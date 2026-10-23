@@ -329,8 +329,9 @@ export function writeTextToBuffer(fontBuf: IFontBuffers, text: string, color: Ve
     let phase = fontBuf.sharedRender.activePhase;
     let vertBuf = fontBuf.vertBuffer.localBufs[phase];
     ensureFloatBufferSize(vertBuf, text.length * floatsPerVert);
-    if (fontBuf.segmentsUsed === Math.floor(texWidth * 4 / floatsPerSegment)) {
-        // the last segment on each texel row would overflow (it takes 5 texels), so we skip it
+    let texelsPerSegment = floatsPerSegment / 4;
+    if ((fontBuf.segmentsUsed * texelsPerSegment) % texWidth + texelsPerSegment > texWidth) {
+        // a segment takes 5 texels and must not straddle a texel row, so skip the one that would
         fontBuf.segmentsUsed += 1;
     }
     let segmentId = fontBuf.segmentsUsed;
@@ -388,6 +389,7 @@ export function writeTextToBuffer(fontBuf: IFontBuffers, text: string, color: Ve
         let newBuf = new Float32Array(newCapacity * floatsPerSegment);
         newBuf.set(fontBuf.localTexBuffer);
         fontBuf.localTexBuffer = newBuf;
+        fontBuf.segmentCapacity = newCapacity;
     }
 
     fontBuf.localTexBuffer.set(mtx, fontBuf.segmentsUsed * floatsPerSegment + 0);

@@ -63,8 +63,8 @@ export const WelcomePopup: React.FC<{}> = () => {
                 <TocDiagram activePhase={null} onEnterPhase={hide} />
             </div>
             <div className={s.text}>
-                <p>这是 k005b VLA 网络的交互式 3D 可视化：相机 patch + 语言 + 状态 → Qwen3-VL 主干 → knack 分类头 / done 头 / 动作专家。</p>
-                <p>3D 场景中的小模型只是示意（真实 k005b 为 36 层、宽度 768）。</p>
+                <p>这是 k005b VLA 网络的交互式 3D 可视化：视觉 + 语言 + 状态 token → Qwen3-VL 主干（28 层，宽度 2048）→ knack 头 / done 头 / 动作专家。</p>
+                <p>3D 场景中的数值全部来自真实 k005b checkpoint（step 130000）的权重，以及对一个真实样本前向时抓取的激活；大张量只画一个真实窗口，悬停可查看真实下标与整张量统计。</p>
                 <p>你可以自由交互，也可以跟随讲解逐步查看每个环节。</p>
             </div>
         </div>

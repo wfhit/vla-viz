@@ -107,7 +107,7 @@ export function eventEndTime(evt: ITimeInfo) {
 }
 
 export interface ICommentary extends ITimeInfo {
-    strings: TemplateStringsArray;
+    strings: readonly string[];
     values: any[];
 }
 
@@ -126,10 +126,22 @@ export function commentary(wt: IWalkthrough, prev?: ITimeInfo | null, duration?:
 
         let commentaryT = createAtTime(wt, prev ? eventEndTime(prev) : 0, duration ?? 0.2);
 
+        // plain strings / numbers are spliced into the text so they render (and take part in markup parsing)
+        let strings: string[] = [stringsArr[0]];
+        let objValues: any[] = [];
+        values.forEach((v, i) => {
+            if (v === null || v === undefined || typeof v !== 'object' && typeof v !== 'function') {
+                strings[strings.length - 1] += String(v ?? '') + stringsArr[i + 1];
+            } else {
+                objValues.push(v);
+                strings.push(stringsArr[i + 1]);
+            }
+        });
+
         let res: ICommentary = {
             ...commentaryT,
-            strings: stringsArr,
-            values,
+            strings,
+            values: objValues,
         };
 
         wt.times[wt.times.length - 1] = res; // replace the time info with the commentary

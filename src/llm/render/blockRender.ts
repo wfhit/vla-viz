@@ -153,7 +153,7 @@ export function initBlockRender(ctx: IGLContext | null) {
 
             bool cellDark = (blockPos.x + blockPos.y + blockPos.z) % 2 == 0;
 
-            float maxDist = 4000.0;
+            float maxDist = 40000.0;
             float minDist = 600.0;
             float dist = distance(u_camPos, v_modelPos);
             float t = clamp((dist - minDist) / (maxDist - minDist), 0.0, 1.0);
@@ -175,7 +175,9 @@ export function initBlockRender(ctx: IGLContext | null) {
 
                 if (insideAny) {
                     ivec2 accessPos = ivec2(u_accessMtx * vec4(blockPos, 1.0));
-                    vec4 valVec = texelFetch(u_accessSampler, accessPos, 0) * u_accessTexScale;
+                    ivec2 texSize = textureSize(u_accessSampler, 0);
+                    bool inTex = accessPos.x >= 0 && accessPos.y >= 0 && accessPos.x < texSize.x && accessPos.y < texSize.y;
+                    vec4 valVec = inTex ? texelFetch(u_accessSampler, accessPos, 0) * u_accessTexScale : vec4(0.0);
                     float val = u_accessTexChannel == 0.0 ? valVec.r : u_accessTexChannel == 1.0 ? valVec.g : valVec.b;
 
                     float weight = clamp(abs(val), 0.0, 1.0);
@@ -214,7 +216,9 @@ export function initBlockRender(ctx: IGLContext | null) {
 
                 vec3 block256 = block16 / 16.0;
                 vec3 block256Grid = 1.0 - abs(fract(block256 - 0.5) - 0.5) / fwidth(block256);
-                float line256 = max(max(block256Grid.x, block256Grid.y), block256Grid.z);
+                vec3 pxPerBlock256 = 1.0 / fwidth(block256);
+                float visibility256 = smoothstep(2.0, 10.0, min(min(pxPerBlock256.x, pxPerBlock256.y), pxPerBlock256.z));
+                float line256 = max(max(block256Grid.x, block256Grid.y), block256Grid.z) * visibility256;
 
                 vec3 cube = v_cubePos - v_normal * 0.1;
                 vec3 cubeGrid = 1.0 - abs(fract(cube - 0.5) - 0.5) / fwidth(cube);
@@ -365,7 +369,7 @@ export function renderAllBlocks(blockRender: IBlockRender, layout: IModelLayout,
 
     gl.useProgram(blockRender.shader.program);
 
-    let camPosModel = modelMtx.mulVec3Proj(camPos);
+    let camPosModel = modelMtx.invert().mulVec3Proj(camPos);
     gl.uniform3f(locs.u_camPos, camPosModel.x, camPosModel.y, camPosModel.z);
 
     gl.uniform1i(locs.u_accessSampler, 0);

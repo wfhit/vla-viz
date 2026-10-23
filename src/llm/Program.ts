@@ -2,7 +2,7 @@ import { genModelViewMatrices, ICamera, ICameraPos, updateCamera } from "./Camer
 import { drawAllArrows } from "./components/Arrow";
 import { drawBlockLabels } from "./components/SectionLabels";
 import { drawModelCard } from "./components/ModelCard";
-import { IGptModelLink, IGpuGptModel, IModelShape } from "./GptModel";
+import { IGptModelLink, IModelShape } from "./GptModel";
 import { genGptModelLayout, IBlkDef, IGptModelLayout } from "./GptModelLayout";
 import { drawText, IFontAtlasData, IFontOpts, measureText } from "./render/fontRender";
 import { initRender, IRenderState, IRenderView, renderModel, resetRenderBuffers } from "./render/modelRender";
@@ -16,8 +16,6 @@ import { Mat4f } from "@/src/utils/matrix";
 import { runMouseHitTesting } from "./Interaction";
 import { RenderPhase } from "./render/sharedRender";
 import { drawBlockInfo } from "./components/BlockInfo";
-import { NativeFunctions } from "./NativeBindings";
-import { IWasmGptModel, stepWasmModel, syncWasmDataWithJsAndGpu } from "./GptModelWasm";
 import { IMovementInfo, manageMovement } from "./components/MovementControls";
 import { IBlockRender, initBlockRender } from "./render/blockRender";
 import { ILayout } from "../utils/layout";
@@ -25,9 +23,6 @@ import { DimStyle } from "./walkthrough/WalkthroughTools";
 import { Subscriptions } from "../utils/hooks";
 
 export interface IProgramState {
-    native: NativeFunctions | null;
-    wasmGptModel: IWasmGptModel | null;
-    stepModel: boolean;
     mouse: IMouseState;
     render: IRenderState;
     inWalkthrough: boolean;
@@ -39,7 +34,6 @@ export interface IProgramState {
     examples: IModelExample[];
     currExampleId: number;
     shape: IModelShape;
-    gptGpuModel: IGpuGptModel | null;
     jsGptModel: IGptModelLink | null;
     movement: IMovementInfo;
     display: IDisplayState;
@@ -97,55 +91,20 @@ export function initProgramState(canvasEl: HTMLCanvasElement, fontAtlasData: IFo
         camPosModel: new Vec3(),
     }
 
+    // Geometry before the real data arrives: same window dims the exporter writes
+    // (tools/export_k005b.py); replaced by shapeFromConfig(config) once loaded.
+    // No data is attached until then (blocks render blank).
     let shape: IModelShape = {
-        B: 1,
-        T: 11,
-        C: 48,
-        nHeads: 3,
-        A: 48 / 3,
-        nBlocks: 3,
-        vocabSize: 3,
-    };
-
-    let gpt2ShapeSmall: IModelShape = {
-        B: 1,
-        T: 75,
-        C: 768,
-        nHeads: 12,
-        A: 768 / 12,
-        nBlocks: 12,
-        vocabSize: 260,
-    };
-
-    let gpt2ShapeLarge: IModelShape = {
-        B: 1,
-        T: 75,
-        C: 768,
-        nHeads: 12,
-        A: 768 / 12,
-        nBlocks: 36,
-        vocabSize: 260,
-    };
-
-    let gpt3Shape: IModelShape = {
-        B: 1,
-        T: 1024,
-        C: 12288,
-        nHeads: 96,
-        A: 12288 / 96,
-        nBlocks: 96,
-        vocabSize: 50257,
+        B: 1, T: 32, C: 64, nHeads: 16, nKvHeads: 8, A: 32, F: 64, nBlocks: 28,
+        vocabSize: 64, nKnack: 17, nDone: 2, actH: 16, actD: 23, nSuffix: 17,
+        full: null,
     };
 
     function makeCamera(center: Vec3, angle: Vec3): ICameraPos {
         return { center, angle };
     }
 
-    let delta = new Vec3(10000, 0, 0);
-
     return {
-        native: null,
-        wasmGptModel: null,
         render: render!,
         inWalkthrough: true,
         walkthrough,
@@ -154,7 +113,7 @@ export function initProgramState(canvasEl: HTMLCanvasElement, fontAtlasData: IFo
         layout: genGptModelLayout(shape),
         currExampleId: -1,
         mainExample: {
-            name: 'k005b mini',
+            name: 'k005b',
             enabled: true,
             shape: shape,
             offset: new Vec3(),
@@ -162,34 +121,8 @@ export function initProgramState(canvasEl: HTMLCanvasElement, fontAtlasData: IFo
             blockRender: null!,
             camera: makeCamera(new Vec3(42.771, 0.000, -569.287), new Vec3(284.959, 26.501, 12.867)),
         },
-        examples: [{
-            name: 'k005b x12',
-            enabled: true,
-            shape: gpt2ShapeSmall,
-            offset: delta.mul(-5),
-            modelCardOffset: delta.mul(-2.0),
-            blockRender: initBlockRender(render?.ctx ?? null),
-            camera: makeCamera(new Vec3(-65141.321, 0.000, -69843.439), new Vec3(224.459, 24.501, 1574.240)),
-        }, {
-            name: 'k005b x36',
-            enabled: true,
-            shape: gpt2ShapeLarge,
-            offset: delta.mul(20),
-            modelCardOffset: delta.mul(0.5),
-            blockRender: initBlockRender(render?.ctx ?? null),
-            camera: makeCamera(new Vec3(237902.688, 0.000, -47282.484), new Vec3(311.959, 23.501, 1382.449)),
-        }, {
-            name: 'k005b wide',
-            enabled: false,
-            shape: gpt3Shape,
-            offset: delta.mul(50.0),
-            modelCardOffset: delta.mul(15.0),
-            blockRender: initBlockRender(render?.ctx ?? null),
-            camera: makeCamera(new Vec3(837678.163, 0.000, -485242.286), new Vec3(238.959, 10.501, 12583.939)),
-        }],
-        gptGpuModel: null,
+        examples: [],
         jsGptModel: null,
-        stepModel: false,
         markDirty: () => { },
         htmlSubs: new Subscriptions(),
         mouse: {
@@ -234,15 +167,6 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     state.display.tokenColors = null;
     state.display.tokenIdxColors = null;
 
-    if (state.wasmGptModel && state.jsGptModel) {
-        syncWasmDataWithJsAndGpu(state.wasmGptModel, state.jsGptModel);
-    }
-
-    if (state.stepModel && state.wasmGptModel && state.jsGptModel) {
-        state.stepModel = false;
-        stepWasmModel(state.wasmGptModel, state.jsGptModel);
-    }
-
     // generate the base model, incorporating the gpu-side model if available
     state.layout = genGptModelLayout(state.shape, state.jsGptModel);
 
@@ -276,7 +200,6 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     drawAllArrows(state.render, state.layout);
 
     drawModelCard(state, state.layout, 'k005b VLA', new Vec3());
-    // drawTokens(state.render, state.layout, state.display);
 
     for (let example of state.examples) {
         if (example.enabled && example.layout) {
@@ -293,7 +216,7 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     let tw = state.render.size.x;
     state.render.sharedRender.activePhase = RenderPhase.Overlay2D;
     for (let line of state.display.lines) {
-        let opts: IFontOpts = { color: new Vec4(), size: 14 };
+        let opts: IFontOpts = { color: new Vec4(0.05, 0.05, 0.1, 1), size: 14 };
         let w = measureText(state.render.modelFontBuf, line, opts);
         drawText(state.render.modelFontBuf, line, tw - w - 4, lineNo * opts.size * 1.3 + 4, opts)
         lineNo++;

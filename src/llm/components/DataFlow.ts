@@ -1,7 +1,7 @@
-import { text } from "stream/consumers";
 import { dimProps, TextAlignHoriz } from "../Annotations";
 import { BlKDepSpecial, BlkSpecial, cellPosition, IBlkCellDep, IBlkDef } from "../GptModelLayout";
 import { getDepDotLen, getDepSrcIdx } from "../Interaction";
+import { embedColForToken, IRealTex, texelToRealIndex } from "../GptModel";
 import { IProgramState } from "../Program";
 import { drawText, IFontOpts, measureText } from "../render/fontRender";
 import { addLine2, drawLineSegs, makeLineOpts } from "../render/lineRender";
@@ -82,8 +82,8 @@ export function drawDataFlow(state: IProgramState, blk: IBlkDef, destIdx: Vec3, 
     } else if (blk.deps.special === BlKDepSpecial.Attention) {
         bb = drawAttention(dataFlowArgs);
 
-    } else if (blk.deps.special === BlKDepSpecial.Gelu) {
-        bb = drawGeluActivation(dataFlowArgs);
+    } else if (blk.deps.special === BlKDepSpecial.SwiGlu) {
+        bb = drawSwiGluActivation(dataFlowArgs);
 
     // Standard ones
     } else if (blk.deps.dot) {
@@ -170,7 +170,6 @@ let backWhiteColor = new Vec4(0.0, 0.0, 0.0, 1).mul(1.0);
 let nameColor = new Vec4(1.0, 1.0, 1.0, 1);
 let embedBlockHeight = 30;
 let tokEmbedBlockWidth = 40;
-let posEmbedBlockWidth = 35;
 
 export function drawOLInputEmbed(args: IDataFlowArgs) {
     let { center, mtx } = args;
@@ -180,8 +179,6 @@ export function drawOLInputEmbed(args: IDataFlowArgs) {
 
         subs: [
             { type: TextBlockType.Custom, draw: (blk) => drawOLIndexLookup(args, blk.offset), size: new Vec3(tokEmbedBlockWidth, embedBlockHeight) },
-            { text: ' + ' },
-            { type: TextBlockType.Custom, draw: (blk) => drawOLPosEmbedLookup(args, blk.offset), size: new Vec3(posEmbedBlockWidth, embedBlockHeight) },
         ]
 
     }), [20, 0, 0, 0]);
@@ -214,10 +211,41 @@ export function getBlockValueAtIdx(blk: IBlkDef, blkIdx: Vec3) {
     return localBuffer[idx];
 }
 
+export interface IBlockRealInfo {
+    tex: IRealTex;
+    value: number;
+    realIdx: number[];
+}
+
+// Value + real (full-tensor) index of a block cell, read from the exported window.
+export function getBlockRealInfo(blk: IBlkDef, blkIdx: Vec3): IBlockRealInfo | null {
+    let tex = blk.access?.src as IRealTex | undefined;
+    if (!blk.access || !tex?.localBuffer || !tex.meta) {
+        return null;
+    }
+    let m = blk.access.mat;
+    let bx = blkIdx.x, by = blkIdx.y, bz = blkIdx.z;
+    let texX = Math.round(m[0] * bx + m[1] * by + m[2] * bz + m[3]);
+    let texY = Math.round(m[4] * bx + m[5] * by + m[6] * bz + m[7]);
+    if (texX < 0 || texY < 0 || texX >= tex.width || texY >= tex.height) {
+        return null;
+    }
+    let value = tex.localBuffer[(texY * tex.width + texX) * tex.channels];
+    return { tex, value, realIdx: texelToRealIndex(tex.meta, texX, texY) };
+}
+
+export function formatRealValue(v: number) {
+    if (v === -Infinity) return '-inf (masked)';
+    if (!isFinite(v)) return String(v);
+    let a = Math.abs(v);
+    return a !== 0 && (a < 1e-3 || a >= 1e5) ? v.toExponential(4) : v.toPrecision(6);
+}
+
 export function drawOLIndexLookup(args: IDataFlowArgs, offset: Vec3) {
     let { state, center, destIdx, mtx } = args;
-    let tokenIdx = getBlockValueAtIdx(state.layout.idxObj, new Vec3(destIdx.x, 0, destIdx.z));
-    let tokenPct = isNotNil(tokenIdx) ? tokenIdx / (state.layout.tokEmbedObj.cx - 1) : 0.3;
+    let model = state.layout.model;
+    let col = model ? embedColForToken(model, destIdx.x) : -1;
+    let tokenPct = col >= 0 ? col / (state.layout.tokEmbedObj.cx - 1) : 0.5;
     let heightPct = destIdx.y / (state.layout.residual0.cy - 1);
 
     let pos = center.add(new Vec3(-35, -20, 0));
@@ -258,40 +286,6 @@ export function drawOLIndexLookup(args: IDataFlowArgs, offset: Vec3) {
 
     drawCells(state.render, new Vec3(1, 1), new Vec3(lineStartX + 8, lineEndY - lineHeight), new Vec3(7, 7), Colors.Intermediates, mtx);
 }
-
-export function drawOLPosEmbedLookup(args: IDataFlowArgs, offset: Vec3) {
-    let { state, center, destIdx, mtx } = args;
-    let posPct = destIdx.x / (state.layout.posEmbedObj.cx - 1);
-    let heightPct = destIdx.y / (state.layout.residual0.cy - 1);
-
-    let pos = center.add(new Vec3(35, -20, 0));
-    let color = Colors.Weights;
-
-    // let tl = pos.add(new Vec3(-posEmbedBlockWidth/2, -embedBlockHeight/2));
-    // let br = pos.add(new Vec3(posEmbedBlockWidth/2,  embedBlockHeight/2));
-    let tl = offset;
-    let br = tl.add(new Vec3(tokEmbedBlockWidth, embedBlockHeight));
-
-    drawLineRect(state.render, tl, br, makeLineOpts({ color, mtx, n: new Vec3(0, 0, 1), thick: 0.4 }));
-
-    addQuad(state.render.triRender, tl, br, backWhiteColor, mtx);
-
-    let colW = 8;
-    let colTl = new Vec3(tl.x + lerp(0, br.x-tl.x-colW, posPct), tl.y);
-    let colBr = new Vec3(colTl.x + colW, br.y);
-
-    let cellTl = new Vec3(colTl.x, colTl.y + lerp(0, br.y-tl.y-colW, heightPct));
-    let cellBr = new Vec3(colBr.x, cellTl.y + colW);
-
-    addQuad(state.render.triRender, colTl, colBr, color.mul(0.3), mtx);
-    addQuad(state.render.triRender, cellTl, cellBr, color, mtx);
-
-    let textOpts: IFontOpts = { color: new Vec4(1,1,1,1).mul(0.8), mtx, size: 20 };
-    let tw = measureText(state.render.modelFontBuf, 't', textOpts);
-
-    drawText(state.render.modelFontBuf, 't', (cellTl.x + cellBr.x) / 2 - tw / 2, colTl.y - 3 - textOpts.size, textOpts);
-}
-
 
 export function drawOLMatrixMul(args: IDataFlowArgs) {
     let { center, mtx, blk } = args;
@@ -416,10 +410,9 @@ function drawLayerNormMuAgg(args: IDataFlowArgs) {
     let textBlock = mkTextBlock({
         opts: fontOpts,
         subs: [
-            { text: 'E[', color: workingSrcColor },
+            { text: 'mean(', color: workingSrcColor },
             { cellX: 1, cellY: 3, color: workingSrcColor },
-            { text: ']', color: workingSrcColor },
-
+            { text: '²)', color: workingSrcColor },
         ],
     });
 
@@ -432,17 +425,20 @@ function drawLayerNormSigmaAgg(args: IDataFlowArgs) {
 
     let textBlock = mkTextBlock({
         opts: fontOpts,
-        subs: [{
-            type: TextBlockType.Sqrt,
-            subs: [
-                { type: TextBlockType.Line, subs: [
-                    { text: 'Var[', color: workingSrcColor },
-                    { cellX: 1, cellY: 3, color: workingSrcColor },
-                    { text: ']', color: workingSrcColor },
-                    { text: ' + ε' },
-                ]},
-            ],
-        }],
+        subs: [
+            { text: '1 / ' },
+            {
+                type: TextBlockType.Sqrt,
+                subs: [
+                    { type: TextBlockType.Line, subs: [
+                        { text: 'mean(', color: workingSrcColor },
+                        { cellX: 1, cellY: 3, color: workingSrcColor },
+                        { text: '²)', color: workingSrcColor },
+                        { text: ' + ε' },
+                    ]},
+                ],
+            },
+        ],
     });
 
     return drawMaths(args, center, textBlock);
@@ -452,45 +448,23 @@ function drawLayerNorm(args: IDataFlowArgs) {
     let { center, mtx } = args;
     let fontOpts: IFontOpts = { color: opColor, mtx, size: 16 };
 
+    // RMSNorm (Qwen3): x · rsqrt(mean(x²) + ε) · γ  — no mean subtraction, no β
     let blk = mkTextBlock({
         opts: fontOpts,
-        subs: [{
-            type: TextBlockType.Divide,
-            subs: [
-                { subs: [
-                        { cellX: 1, cellY: 1, color: workingSrcColor },
-                        { text: ' \— ' },
-                        {
-                            type: TextBlockType.Line,
-                            rectOpts: { color: Colors.Aggregates.mul(0.8), mtx, thick: 1.0, dash: 6 },
-                            subs: [
-                                { text: 'E[', color: workingSrcColor },
-                                { cellX: 1, cellY: 3, color: workingSrcColor },
-                                { text: ']', color: workingSrcColor },
-                            ],
-                        },
-                    ],
-                },
-                {
-                    type: TextBlockType.Line,
-                    rectOpts: { color: Colors.Aggregates.mul(0.8), mtx, thick: 1.0, dash: 6 },
-                    subs: [{
-                        type: TextBlockType.Sqrt,
-                        subs: [
-                            { type: TextBlockType.Line, subs: [
-                                { text: 'Var[', color: workingSrcColor },
-                                { cellX: 1, cellY: 3, color: workingSrcColor },
-                                { text: ']', color: workingSrcColor },
-                                { text: ' + ε' },
-                            ]},
-                        ],
-                    }],
-                }]
+        subs: [
+            { cellX: 1, cellY: 1, color: workingSrcColor },
+            { text: ' ‧ ' },
+            {
+                type: TextBlockType.Line,
+                rectOpts: { color: Colors.Aggregates.mul(0.8), mtx, thick: 1.0, dash: 6 },
+                subs: [
+                    { text: 'rsqrt(mean(', color: workingSrcColor },
+                    { cellX: 1, cellY: 3, color: workingSrcColor },
+                    { text: '²) + ε)', color: workingSrcColor },
+                ],
             },
             { text: '  ‧ ' },
             { text: 'γ', color: weightSrcColor },
-            { text: ' + ' },
-            { text: 'β', color: weightSrcColor },
         ],
     });
 
@@ -652,28 +626,11 @@ export function drawAttention(args: IDataFlowArgs) {
     return drawMaths(args, center, textBlock);
 }
 
-export function drawGeluActivation(args: IDataFlowArgs) {
+// SwiGLU: out = SiLU(gate) · up, plotted on the SiLU curve at the real gate value.
+export function drawSwiGluActivation(args: IDataFlowArgs) {
     let { state, center, mtx, blk, destIdx } = args;
 
-    // ugly
-    // let fontOpts = { color: opColor, mtx, size: 16 };
-    // let textBlk = mkTextBlock({
-    //     opts: fontOpts,
-    //     subs: [
-    //         { text: '0.5' },
-    //         { cellX: 1, cellY: 1, color: workingSrcColor },
-    //         { text: '(1 + tanh(' },
-    //         { type: TextBlockType.Sqrt, subs: [{ text: '2/π' }], },
-    //         { text: '(' },
-    //         { cellX: 1, cellY: 1, color: workingSrcColor },
-    //         { text: ' + 0.044715' },
-    //         { cellX: 1, cellY: 1, color: workingSrcColor },
-    //         { text: '^3)' },
-    //     ],
-    // });
-    // return drawMaths(state, center, mtx, textBlk);
-
-    let geluX = (x: number) => x * 0.5 * (1.0 + Math.tanh(Math.sqrt(2.0 / Math.PI) * (x + 0.044715 * x * x * x)))
+    let silu = (x: number) => x / (1.0 + Math.exp(-x));
 
     let w = 70;
     let h = 50;
@@ -683,9 +640,9 @@ export function drawGeluActivation(args: IDataFlowArgs) {
 
     drawRoundedRect(state.render, tl, br, backWhiteColor, mtx, 4);
 
-    let halfW = 3;
+    let halfW = 4;
     let halfH = halfW * h / w;
-    let hOffset = 1.2;
+    let hOffset = 1.6;
     let mappingX = createMapping(tl.x, br.x, -halfW, halfW);
     let mappingY = createMapping(br.y, tl.y, -halfH + hOffset, halfH + hOffset);
 
@@ -693,9 +650,8 @@ export function drawGeluActivation(args: IDataFlowArgs) {
     let pts = new Float32Array(nPts * 3);
     for (let i = 0; i < nPts; i++) {
         let x = -halfW + i * halfW * 2 / (nPts - 1);
-        let y = geluX(x);
         pts[i * 3 + 0] = mappingX(x);
-        pts[i * 3 + 1] = mappingY(y);
+        pts[i * 3 + 1] = mappingY(silu(x));
     }
 
     let axisLineOpts = makeLineOpts({ color: new Vec4(0.5,0.5,0.5,1), mtx, thick: 1.5 });
@@ -705,17 +661,20 @@ export function drawGeluActivation(args: IDataFlowArgs) {
     let curveLineOpts = makeLineOpts({ color: Colors.Intermediates, mtx, thick: 3.5 });
     drawLineSegs(state.render.lineRender, pts, curveLineOpts);
 
-    let srcBlk = blk.deps!.add![0].src;
-    let srcVal = getBlockValueAtIdx(srcBlk, destIdx);
+    let gateVal = getBlockValueAtIdx(blk.deps!.add![0].src, destIdx);
+    let upVal = getBlockValueAtIdx(blk.deps!.add![1].src, destIdx);
 
-    if (isNotNil(srcVal)) {
-        let destVal = geluX(srcVal);
-        drawCircle(state.render, new Vec3(mappingX(srcVal), mappingY(destVal)), 2, 1, Colors.Intermediates, mtx);
+    if (isNotNil(gateVal)) {
+        let gx = Math.max(-halfW, Math.min(halfW, gateVal));
+        drawCircle(state.render, new Vec3(mappingX(gx), mappingY(silu(gx))), 2, 1, Colors.Intermediates, mtx);
     }
 
-    let bb = new BoundingBox3d(tl, br);
+    let textOpts: IFontOpts = { color: opColor, mtx, size: 7 };
+    let label = `SiLU(${isNotNil(gateVal) ? formatRealValue(gateVal) : '?'}) · ${isNotNil(upVal) ? formatRealValue(upVal) : '?'}`;
+    let lw = measureText(state.render.modelFontBuf, label, textOpts);
+    drawText(state.render.modelFontBuf, label, center.x - lw / 2, tl.y + 2, textOpts);
 
-    return bb;
+    return new BoundingBox3d(tl, br);
 }
 
 export function createMapping(range0: number, range1: number, domain0: number, domain1: number) {
@@ -741,12 +700,16 @@ function drawCellIndexAndValue(args: IDataFlowArgs, bb: BoundingBox3d): Bounding
     let xDim = mapDimToSub(blk.dimX, 0);
     let yDim = mapDimToSub(blk.dimY, 1);
 
+    let info = getBlockRealInfo(blk, destIdx);
+    let realText = info ? `  ${info.tex.meta.name}[${info.realIdx.join(',')}] = ${formatRealValue(info.value)}` : '';
+
     let textBlock = mkTextBlock({
         opts: fontOpts,
         subs: [
             xDim,
             xDim && yDim && { text: ', ' },
             yDim,
+            info && { text: realText, color: new Vec4(1, 1, 0.6, 1) },
         ],
     });
 

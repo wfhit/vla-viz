@@ -1,6 +1,7 @@
 import { addSourceDestCurveLine, blockDimension, blockIndex, drawTextOnModel, findSubBlocks, indexMappingLines, renderIndexes, splitGrid, TextAlignHoriz, TextAlignVert } from "../Annotations";
 import { ICamera, ICameraPos } from "../Camera";
 import { IBlkDef } from "../GptModelLayout";
+import { embedColForToken } from "../GptModel";
 import { IProgramState } from "../Program";
 import { IRenderView } from "../render/modelRender";
 import { drawThread } from "../render/threadRender";
@@ -97,21 +98,21 @@ export function initWalkthrough() {
             phases: [
                 { id: Phase.Input_Detail_Embedding, title: '输入嵌入' },
                 { id: Phase.Input_Detail_LayerNorm, title: 'RMSNorm' },
-                { id: Phase.Input_Detail_SelfAttention, title: '联合双流注意力' },
+                { id: Phase.Input_Detail_SelfAttention, title: 'GQA 联合注意力' },
                 { id: Phase.Input_Detail_Softmax, title: '前缀 Softmax' },
                 { id: Phase.Input_Detail_Projection, title: '输出投影与残差' },
-                { id: Phase.Input_Detail_Mlp, title: 'MLP (GELU)' },
-                { id: Phase.Input_Detail_Transformer, title: '36 层主干堆叠' },
+                { id: Phase.Input_Detail_Mlp, title: 'MLP (SwiGLU)' },
+                { id: Phase.Input_Detail_Transformer, title: '28 层主干堆叠' },
                 { id: Phase.Input_Detail_Output, title: 'h* 答案边界读出' },
             ],
         }, {
             groupId: PhaseGroup.Heads,
             title: '输出头与动作专家',
             phases: [
-                { id: Phase.Head_Knack, title: 'knack 并行分类头' },
+                { id: Phase.Head_Knack, title: 'knack 分类头' },
                 { id: Phase.Head_Done, title: 'done 头' },
                 { id: Phase.Action_Expert, title: '动作专家' },
-                { id: Phase.Action_Denoise, title: '速度场与 Euler 积分' },
+                { id: Phase.Action_Denoise, title: '速度与动作解码' },
                 { id: Phase.Harness_Law, title: 'Harness 法则' },
             ],
         }] as IPhaseGroup[],
@@ -262,25 +263,15 @@ export function walkthroughDetailed(args: IWalkthroughArgs) {
         t0_showAll.t = 1.0;
 
         let tokEmbed = layout.tokEmbedObj;
-        drawTextOnModel(render, 'token-embedding matrix', new Vec3(tokEmbed.x - layout.margin, tokEmbed.y + tokEmbed.dy / 4, 0), {
+        drawTextOnModel(render, 'embed table (tied, rows v0..v0+63 of 151936)', new Vec3(tokEmbed.x - layout.margin, tokEmbed.y + tokEmbed.dy / 4, 0), {
             align: TextAlignHoriz.Right,
             valign: TextAlignVert.Middle,
             color: new Vec4(0,0,0,1).mul(t0_showAll.t),
             size: 3,
         });
-        let posEmbed = layout.posEmbedObj;
-        drawTextOnModel(render, 'position-embedding matrix', new Vec3(posEmbed.x + posEmbed.dx + layout.margin, tokEmbed.y + tokEmbed.dy / 4, 0), {
-            align: TextAlignHoriz.Left,
-            valign: TextAlignVert.Middle,
-            color: new Vec4(0,0,0,1).mul(t0_showAll.t),
-            size: 3,
-        });
-
         blockDimension(state, layout, tokEmbed, Dim.X, DimStyle.n_vocab, t0_showAll.t);
         blockDimension(state, layout, tokEmbed, Dim.Y, DimStyle.C, t0_showAll.t);
 
-        blockDimension(state, layout, posEmbed, Dim.X, DimStyle.T, t0_showAll.t);
-        blockDimension(state, layout, posEmbed, Dim.Y, DimStyle.C, t0_showAll.t);
 
         blockDimension(state, layout, layout.residual0, Dim.X, DimStyle.T, t0_showAll.t);
         blockDimension(state, layout, layout.residual0, Dim.Y, DimStyle.C, t0_showAll.t);
@@ -305,8 +296,9 @@ export function walkthroughDetailed(args: IWalkthroughArgs) {
 
         let t7_iterCols = afterTime(t6_cleanup1, 5.0, 0.0);
 
-        let exampleTIdx = 3;
-        let exampleTokIdx = layout.model?.inputBuf[exampleTIdx] ?? 1;
+        // the boundary token (last of the window): its embed row is the first exported row (v0)
+        let exampleTIdx = layout.shape.T - 1;
+        let exampleTokIdx = layout.model ? embedColForToken(layout.model, exampleTIdx) : 0;
 
         // blockDimension(state, layout, layout.residual0, Dim.X, DimStyle.T, 0.5);
         if (t6_cleanup1.t < 1.0) {
@@ -325,7 +317,7 @@ export function walkthroughDetailed(args: IWalkthroughArgs) {
 
         if (layout.model && t7_iterCols.t <= 0.0) {
             let mixes = new Array(layout.tokEmbedObj.cx).fill(0.0);
-            mixes[layout.model!.inputBuf[exampleTIdx]] = t4_highlightTokEmIdx.t;
+            mixes[exampleTokIdx] = t4_highlightTokEmIdx.t;
             renderIndexes(render, layout, layout.tokEmbedObj, embedOffColor, t3_showTokEmIdx.t, exampleTIdx, 0, null, { color2: dimStyleColor(DimStyle.n_vocab), mixes });
         }
 
@@ -346,14 +338,13 @@ export function walkthroughDetailed(args: IWalkthroughArgs) {
         if (layout.model && t5_iter1Col.t > 0.0 && t6_cleanup1.t <= 0.0) {
             let sub = findSubBlocks(layout.residual0, Dim.X, exampleTIdx, exampleTIdx)[0];
             if (sub) {
-                sub.access = { ...sub.access!, src: layout.model.vocabEmbed.output, disable: false };
+                sub.access = { ...sub.access!, src: layout.model.embedOut, disable: false };
                 let yPos = t5_iter1Col.t * sub.cy;
                 let yIdx = Math.floor(yPos);
                 if (yIdx < sub.cy) {
                     addSourceDestCurveLine(render, layout, layout.tokEmbedObj, layout.residual0, new Vec3(exampleTokIdx, yIdx, 0), new Vec3(exampleTIdx, yIdx, 0), new Vec4(1,0,0,1));
                     drawThread(render.threadRender, layout, sub, Dim.Y, 0, 0, 1, yIdx + 1, new Vec4(1,0,0,1));
                     drawThread(render.threadRender, layout, layout.tokEmbedObj, Dim.Y, exampleTokIdx, 0, 1, yIdx + 1, new Vec4(1,0,0,1));
-                    drawThread(render.threadRender, layout, layout.posEmbedObj, Dim.Y, exampleTIdx, 0, 1, yIdx + 1, new Vec4(1,0,0,1));
                 }
 
                 splitGrid(layout, sub, Dim.Y, yPos, 0.0);
@@ -374,7 +365,7 @@ export function walkthroughDetailed(args: IWalkthroughArgs) {
             let t_inner = tPos - tIdx;
             let cPos = t_inner * C;
 
-            let tokIdx = layout.model.inputBuf[tIdx];
+            let tokIdx = embedColForToken(layout.model, tIdx);
 
             display.tokenColors = { color2: dimStyleColor(DimStyle.n_vocab), mixes: oneHotArray(T, tIdx, 1.0) };
 
@@ -392,12 +383,11 @@ export function walkthroughDetailed(args: IWalkthroughArgs) {
 
                 let yIdx = Math.floor(cPos);
                 let curveColor = new Vec4(1,0,0,1).mul(0.3);
-                addSourceDestCurveLine(render, layout, layout.tokEmbedObj, layout.residual0, new Vec3(tokIdx, yIdx, 0), new Vec3(tIdx, yIdx, 0), curveColor);
-                addSourceDestCurveLine(render, layout, layout.posEmbedObj, layout.residual0, new Vec3(tIdx, yIdx, 0), new Vec3(tIdx, yIdx, 0), curveColor);
-
+                if (tokIdx >= 0) {
+                    addSourceDestCurveLine(render, layout, layout.tokEmbedObj, layout.residual0, new Vec3(tokIdx, yIdx, 0), new Vec3(tIdx, yIdx, 0), curveColor);
+                    drawThread(render.threadRender, layout, layout.tokEmbedObj, Dim.Y, tokIdx, 0, 1, yIdx + 1, new Vec4(1,0,0,1));
+                }
                 drawThread(render.threadRender, layout, layout.residual0, Dim.Y, tIdx, 0, 1, yIdx + 1, new Vec4(1,0,0,1));
-                drawThread(render.threadRender, layout, layout.tokEmbedObj, Dim.Y, tokIdx, 0, 1, yIdx + 1, new Vec4(1,0,0,1));
-                drawThread(render.threadRender, layout, layout.posEmbedObj, Dim.Y, tIdx, 0, 1, yIdx + 1, new Vec4(1,0,0,1));
 
                 splitGrid(layout, sub2, Dim.Y, yPos, 0.0);
 
@@ -407,6 +397,7 @@ export function walkthroughDetailed(args: IWalkthroughArgs) {
             }
 
 
+            if (tokIdx >= 0) {
             let mixes = oneHotArray(layout.tokEmbedObj.cx, tokIdx, 1.0);
             renderIndexes(render, layout, layout.tokEmbedObj, embedOffColor, t3_showTokEmIdx.t, 3, 0, null, { color2: dimStyleColor(DimStyle.n_vocab), mixes });
 
@@ -420,11 +411,6 @@ export function walkthroughDetailed(args: IWalkthroughArgs) {
             if (tokSub) {
                 tokSub.highlight = 0.2;
             }
-
-            let posSub = splitGrid(layout, layout.posEmbedObj, Dim.X, tIdx + 0.5, 0);
-            // let posSub = findSubBlocks(layout.posEmbedObj, Dim.X, tIdx, tIdx)[0];
-            if (posSub) {
-                posSub.highlight = 0.2;
             }
         }
 

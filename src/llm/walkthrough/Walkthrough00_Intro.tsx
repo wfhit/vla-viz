@@ -51,6 +51,7 @@ function getIntroState(walkthrough: IWalkthrough): IIntroState {
 export function walkthroughIntro(args: IWalkthroughArgs) {
     let { breakAfter, afterTime, c_str } = phaseTools(args.state);
     let { state, layout, walkthrough: wt } = args;
+    let nTok = layout.shape.T;
 
     if (wt.phase !== Phase.Intro_Intro) {
         return;
@@ -58,17 +59,17 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
 
     setInitialCamera(state, new Vec3(184.744, 0.000, -636.820), new Vec3(296.000, 16.000, 13.500));
 
-    let c0 = commentary(wt, null, 0)`欢迎来到 _k005b_ VLA 网络的可视化讲解。k005b 把相机画面、语言指令和机器人状态放进同一个 Qwen3-VL 主干，再分出两条输出：knack 分类头（说"现在该做什么"）和动作专家（生成 16x23 的动作块）。
+    let cfg = layout.shape.full;
+    let c0 = commentary(wt, null, 0)`欢迎来到 _k005b_ VLA 网络的可视化讲解。k005b 把相机画面、语言指令和机器人状态放进同一个 Qwen3-VL-2B 主干，再分出输出：knack 分类头（说"现在该做什么"）、done 头，以及动作专家（生成 16×23 的动作块）。
 
-下面的 3D 场景是一个 _示意小模型_（3 层、序列长度 11、宽度 48），用来演示数据流动；k005b 真实尺寸是 36 层、宽度 768。整体流程：
-1. 输入嵌入：3 路 224x224 相机 patch tokens + 语言 tokens（Goal / Plan / Last knack）+ 状态槽（61+14=75 维）。
-2. Qwen3-VL 主干：36 层 Transformer 等距堆叠。
-3. 展开一层：RMSNorm → 联合双流注意力 → 输出投影 → 残差 → MLP (GELU) → 残差。
-4. h* 答案边界读出：两个头的分叉点。
-5. knack 并行分类头 + done 头；动作专家做去噪并输出动作块。
+3D 场景里显示的全部是 _真实 k005b checkpoint（step ${cfg?.step ?? '…'}）_ 的权重，以及对一个真实训练样本（"${cfg?.sample.goal_text ?? '…'}"）做前向时用 hook 抓下来的真实激活。真实尺寸太大无法逐格画出，所以每个张量只画一个真实窗口：token ${cfg ? `${cfg.window.t0}–${cfg.window.t0 + cfg.window.Wt - 1}` : '…'}（以 h* 边界 token 结尾）、通道 0–${(cfg?.window.Wc ?? 64) - 1}（共 ${cfg?.n_embd ?? 2048}）、head 维 0–${(cfg?.window.Wd ?? 32) - 1}（共 ${cfg?.head_dim ?? 128}）、FF 0–${(cfg?.window.Wf ?? 64) - 1}（共 ${cfg?.intermediate ?? 6144}）。鼠标悬停任意格子会显示真实张量名、完整形状、真实下标、数值和整张量统计。整体流程：
+1. 输入嵌入：${cfg?.n_visual_tokens ?? '…'} 个视觉 token + 语言 token + ${cfg?.n_state_tokens ?? 16} 个状态 token，共 ${cfg?.T_prefix ?? '…'} 个前缀 token。
+2. Qwen3-VL 主干：${cfg?.n_layer ?? 28} 层 Transformer（16 个 query 头、8 个 KV 头的 GQA，head_dim 128）。
+3. 展开一层：RMSNorm → 联合注意力（前缀 + 动作后缀）→ o_proj → 残差 → RMSNorm → SwiGLU MLP → 残差。
+4. h* 边界读出：ln_f 在 p=${cfg?.p_star ?? '…'} 处的输出。
+5. knack 头 + done 头；动作专家与主干逐层联合注意力，输出动作块。
 
-输入序列示意：${embed(ExampleInputOutput)}
-（P = 相机 patch，G = Goal，K = Last knack，S = 状态槽）`;
+窗口里的真实输入 token：${embed(ExampleInputOutput)}`;
 
     if (c0.t > 0) {
         for (let cube of layout.cubes) {
@@ -76,7 +77,7 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
                 cube.access.disable = true;
             }
         }
-        state.display.tokenIdxModelOpacity = makeArray(6, 0);
+        state.display.tokenIdxModelOpacity = makeArray(nTok, 0);
     }
 
     let t4 = afterTime(null, 1.5, 0.4);
@@ -89,11 +90,11 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
     }
 
     if (t6.active && t6.t < 1.0) {
-        let mixes = [0, 0, 0, 0, 0, 0];
-        for (let i = 0; i < 6; i++) {
+        let mixes = makeArray(nTok, 0);
+        for (let i = 0; i < nTok; i++) {
             // want to smoothly flash each token in turn (t6.t goes from 0-1, and each token should flash at 0.2, 0.4, 0.6, 0.8, 1.0 etc)
-            let highT = (i + 1.5) / 8;
-            mixes[i] = 1.0 - clamp(Math.abs(t6.t - highT) * 4, 0, 1);
+            let highT = (i + 1.5) / (nTok + 2);
+            mixes[i] = 1.0 - clamp(Math.abs(t6.t - highT) * nTok, 0, 1);
         }
         state.display.tokenColors = { mixes, color2: dimStyleColor(DimStyle.Token) }; //  new Vec4(0.8, 0.2, 0.8) };
     }
@@ -103,26 +104,26 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
     let tokenStr = c_str('_token_', 0, DimStyle.Token);
     let tokenIdxStr = c_str('_token index_', 0, DimStyle.TokenIdx);
 
-    commentary(wt, t6)`其中每一项叫做一个 ${tokenStr}，模型所有 token 种类组成 _词表_：${embed(TokenVocab)}
+    commentary(wt, t6)`其中每一项叫做一个 ${tokenStr}。k005b 使用 Qwen 的 BPE 词表，共 ${cfg?.vocab_size ?? 151936} 个 token。
 
-    按此表，每个 token 对应一个编号，即 ${tokenIdxStr}。于是整个序列就变成一串数字，送入模型：${embed(ExampleTokenValues)}\n`;
+    每个 token 对应一个编号，即 ${tokenIdxStr}。窗口内的真实编号如下，它们被送入模型：${embed(ExampleTokenValues)}\n`;
     breakAfter();
 
     let t7 = afterTime(null, 1.5, 0.5);
 
     if (t7.active) {
-        let opacity = makeArray(6, 0);
-        for (let i = 0; i < 6; i++) {
-            let highT = (i + 1.5) / 8;
-            opacity[i] = clamp((t7.t - highT) * 4, 0, 1);
+        let opacity = makeArray(nTok, 0);
+        for (let i = 0; i < nTok; i++) {
+            let highT = (i + 1.5) / (nTok + 2);
+            opacity[i] = clamp((t7.t - highT) * nTok, 0, 1);
         }
         state.display.tokenIdxColors = { mixes: opacity, color2: dimStyleColor(DimStyle.TokenIdx) };
 
-        let idxPos = t7.t * 6;
+        let idxPos = t7.t * nTok;
 
         if (t7.t < 1.0) {
-            splitGrid(layout, layout.idxObj, Dim.X, idxPos, clamp(6 - idxPos, 0, 1));
-            for (let blk of findSubBlocks(layout.idxObj, Dim.X, null, Math.min(5, Math.floor(idxPos)))) {
+            splitGrid(layout, layout.idxObj, Dim.X, idxPos, clamp(nTok - idxPos, 0, 1));
+            for (let blk of findSubBlocks(layout.idxObj, Dim.X, null, Math.min(nTok - 1, Math.floor(idxPos)))) {
                 if (blk.access) {
                     blk.access.disable = false;
                 }
@@ -137,7 +138,7 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
     breakAfter();
 
     let c5 = commentary(wt)`在 3D 视图中，每个绿色格子是正在处理的数值，每个蓝色格子是权重。${embed(GreenBlueCells)}
-    序列中的每个编号首先变成一个向量（示意小模型为 48 维，k005b 为 768 维），这叫 _嵌入_。`;
+    序列中的每个编号首先查嵌入表变成一个 ${cfg?.n_embd ?? 2048} 维向量，这叫 _嵌入_（图中显示通道 0–${(cfg?.window.Wc ?? 64) - 1}）。`;
     breakAfter(c5);
 
     {
@@ -147,9 +148,9 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
         moveCameraTo(state, t_camMove, new Vec3(14.1, 0, -30.4), new Vec3(286, 14.5, 0.8));
 
         if (t_makeVecs.active) {
-            let idxPos = t_makeVecs.t * 6;
-            let splitWidth = clamp(6 - idxPos, 0, 2);
-            let splitIdx = Math.min(5, Math.floor(idxPos));
+            let idxPos = t_makeVecs.t * nTok;
+            let splitWidth = clamp(nTok - idxPos, 0, 2);
+            let splitIdx = Math.min(nTok - 1, Math.floor(idxPos));
             if (t_makeVecs.t < 1.0) {
                 splitGrid(layout, layout.idxObj, Dim.X, idxPos, splitWidth);
                 for (let blk of findSubBlocks(layout.idxObj, Dim.X, null, splitIdx)) {
@@ -173,7 +174,7 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
     }
 
     breakAfter();
-    commentary(wt)`嵌入向量随后依次穿过一层层 Transformer（k005b 共 36 层，这里只有 3 层），最终到达底部的读出位置 h*。`;
+    commentary(wt)`嵌入向量随后依次穿过全部 ${cfg?.n_layer ?? 28} 层 Transformer（3D 中每层都是真实权重与激活），最终到达底部的读出位置 h*。`;
     breakAfter();
 
     {
@@ -213,12 +214,12 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
         let t_outputToks = afterTime(null, 1.0, 0.5);
 
         if (t_firstResid.active) {
-            let arr = makeArray(6, 0);
+            let arr = makeArray(nTok, 0);
 
             if (t_outputToks.active) {
-                for (let i = 0; i < 6; i++) {
-                    let highT = (i + 1.5) / 8;
-                    arr[i] = clamp((t_outputToks.t - highT) * 4, 0, 1);
+                for (let i = 0; i < nTok; i++) {
+                    let highT = (i + 1.5) / (nTok + 2);
+                    arr[i] = clamp((t_outputToks.t - highT) * nTok, 0, 1);
                 }
             }
 
@@ -227,9 +228,9 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
         }
     }
 
-    commentary(wt)`输出是什么？在答案边界 h* 处读出，分叉为两路：knack 各字段独立的 softmax 概率（每个字段只有一个值胜出），以及单独的 done 头。示意小模型这里只演示一路概率输出。`
+    commentary(wt)`输出是什么？在答案边界 h* 处读出：knack 头对 ${cfg?.knack_names.length ?? 17} 个 knack 做 softmax（本样本预测 ${cfg?.pred_knack ?? '…'}，目标 ${cfg?.sample.target_knack ?? '…'}），done 头输出 ${cfg?.pred_done ?? '…'}。`
 
-    commentary(wt)`另一路是动作专家：它与主干逐层联合注意力，对 16 个带噪动作 token 去噪，经 Euler 积分得到 16x23 动作块。模型只负责汇报，切换子任务由 Harness 决定。接下来逐步展开每个环节。`;
+    commentary(wt)`另一路是动作专家（d=${cfg?.expert_hidden ?? 768}）：它与主干逐层联合注意力，输出速度 v，动作块 = x1 − v（16×23）。模型只负责汇报，切换子任务由 Harness 决定。接下来逐步展开每个环节。`;
 
     breakAfter();
 }
@@ -358,18 +359,22 @@ export function processUpTo(state: IProgramState, timer: ITimeInfo, block: IBlkD
     return info;
 }
 
+function tokenDisplay(tok: string) {
+    return tok.replace(/\n/g, '⏎');
+}
+
 const ExampleInputOutput: React.FC = () => {
     let state = useProgramState();
     let cols = state.display.tokenColors;
-    let chars = 'PPPGKS'.split('');
+    let toks = state.jsGptModel?.config.window_tokens ?? [];
 
     return <div className={s.tableWrap}>
-        <div>{chars.map((c, i) => {
+        <div>{toks.map((c, i) => {
             let baseColor = dimStyleColor(DimStyle.Token);
-            if (cols) {
+            if (cols && cols.mixes[i]) {
                 baseColor = Vec4.lerp(baseColor, cols.color2, cols.mixes[i]);
             }
-            return <span key={i} style={{ color: baseColor.toHexColor() }}>{c} </span>;
+            return <span key={i} style={{ color: baseColor.toHexColor(), whiteSpace: 'pre' }}>{tokenDisplay(c)}|</span>;
         })}</div>
     </div>;
 };
@@ -377,41 +382,30 @@ const ExampleInputOutput: React.FC = () => {
 const ExampleTokenValues: React.FC = () => {
     let state = useProgramState();
     let cols = state.display.tokenIdxColors;
-    let chars = 'PPPGKS'.split('');
+    let ids = state.jsGptModel?.config.window_token_ids ?? [];
 
-     return <div className={s.tableWrap}>
-        <div>{chars.map((c, i) => {
-            let tokIdx = 'PGKS'.indexOf(c);
-
+    return <div className={s.tableWrap}>
+        <div>{ids.map((id, i) => {
             let baseColor = dimStyleColor(DimStyle.TokenIdx);
-            if (cols) {
+            if (cols && cols.mixes[i]) {
                 baseColor = Vec4.lerp(baseColor, cols.color2, cols.mixes[i]);
             }
-            return <span key={i} style={{ color: baseColor.toHexColor() }}>{tokIdx} </span>;
+            return <span key={i} style={{ color: baseColor.toHexColor() }}>{id} </span>;
         })}</div>
     </div>;
 };
 
-const TokenVocab: React.FC = () => {
-
-    return <div className={s.tableWrap}>
-        <table className={s.table}>
-            <tbody>
-                <tr className={s.tokString} style={{ color: dimStyleColor(DimStyle.Token).toHexColor() }}>
-                    <th>token</th><td>P</td><td>G</td><td>K</td><td>S</td>
-                </tr>
-                <tr className={s.tokIndex} style={{ color: dimStyleColor(DimStyle.TokenIdx).toHexColor() }}>
-                    <th>index</th><td>0</td><td>1</td><td>2</td><td>3</td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
-};
-
 const GreenBlueCells: React.FC = () => {
 
-    let [blueNums, setBlueNums] = useState([-0.7, 0.7, -0.1]);
-    let [greenNums, setGreenNums] = useState([-0.7, 0.4, 0.8]);
+    // real values: embed_out[p*, c0..2] (activation) and embed[v0, c0..2] (weight), scaled by each window's colour scale
+    let model = useProgramState().jsGptModel;
+    let realGreen = model ? Array.from(model.embedOut.localBuffer.slice((model.embedOut.height - 1) * model.embedOut.width, (model.embedOut.height - 1) * model.embedOut.width + 3)).map(v => v * model!.embedOut.meta.absScale) : [];
+    let realBlue = model ? Array.from(model.embedWeight.localBuffer.slice(0, 3)).map(v => v * model!.embedWeight.meta.absScale) : [];
+    let [blueNums, setBlueNums] = useState<number[] | null>(null);
+    let [greenNums, setGreenNums] = useState<number[] | null>(null);
+    if (!model) {
+        return null;
+    }
 
     let blueColor = new Vec4(0.3, 0.3, 1.0);
     let greenColor = new Vec4(0.3, 0.9, 0.3);
@@ -419,13 +413,13 @@ const GreenBlueCells: React.FC = () => {
     return <div className={s.tableWrap}>
         <div className={s.cellInfoCols}>
             <div className={s.cellInfoCol}>
-                <Cell nums={greenNums} color={greenColor} mul={0.5} />
-                <Graph nums={greenNums} color={greenColor} setNums={setGreenNums} />
+                <Cell nums={greenNums ?? realGreen} color={greenColor} mul={0.5} />
+                <Graph nums={greenNums ?? realGreen} color={greenColor} setNums={setGreenNums} />
                 <div className={s.cellInfoText}>处理中的数值</div>
             </div>
             <div className={s.cellInfoCol}>
-                <Cell nums={blueNums} color={blueColor} mul={1} />
-                <Graph nums={blueNums} color={blueColor} setNums={setBlueNums} />
+                <Cell nums={blueNums ?? realBlue} color={blueColor} mul={1} />
+                <Graph nums={blueNums ?? realBlue} color={blueColor} setNums={setBlueNums} />
                 <div className={s.cellInfoText}>权重</div>
             </div>
         </div>

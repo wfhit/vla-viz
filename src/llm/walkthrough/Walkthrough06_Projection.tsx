@@ -21,8 +21,8 @@ export function walkthrough06_Projection(args: IWalkthroughArgs) {
 
 注意力计算完成后，每个 head 都得到了自己的输出：由 Q/K 决定权重、对 V 向量加权混合后的结果。
 
-要合并各 head 的${c_blockRef('输出向量', outBlocks)}，只需把它们首尾相接（concat）。以时间位置
-${c_dimRef('t = 4', DimStyle.T)} 为例，3 个长度为 ${c_dimRef('A = 16', DimStyle.A)} 的向量被拼成 1 个长度为 ${c_dimRef('C = 48', DimStyle.C)} 的向量。`;
+要合并各 head 的${c_blockRef('输出向量', outBlocks)}，只需把它们首尾相接（concat）。每个 token 位置上，
+16 个长度为 ${c_dimRef('A = 128', DimStyle.A)} 的向量被拼成 1 个长度为 ${c_dimRef('16 × 128 = 2048', DimStyle.C)} 的向量。`;
 
     breakAfter();
 
@@ -34,10 +34,10 @@ ${c_dimRef('t = 4', DimStyle.T)} 为例，3 个长度为 ${c_dimRef('A = 16', Di
 
     commentary(wt)`
 
-每个 head 内的向量长度（${c_dimRef('A = 16', DimStyle.A)}）等于 ${c_dimRef('C', DimStyle.C)} / head 数，
-因此拼回去后长度恰好还是 ${c_dimRef('C', DimStyle.C)}。（这里是 3 层的示意小模型；k005b 真实尺寸要大得多。）
+k005b 中 head 数 × head 维度（16 × 128）恰好等于 ${c_dimRef('C = 2048', DimStyle.C)}，
+因此拼回去后长度还是 ${c_dimRef('C', DimStyle.C)}。图中显示的是真实 o_proj 权重的一个 64 × 64 窗口。
 
-接着用输出投影矩阵（output projection）对每一列做矩阵-向量乘法并加上 bias，把各 head 的信息混合起来，
+接着用输出投影矩阵（output projection）对每一列做矩阵-向量乘法（无 bias），把各 head 的信息混合起来，
 得到这一层注意力的输出。`;
 
     breakAfter();

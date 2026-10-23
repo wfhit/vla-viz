@@ -26,12 +26,6 @@ export const WalkthroughSidebar: React.FC = () => {
         ev.preventDefault();
     }
 
-    function stepModel() {
-        console.log('stepping model');
-        progState.stepModel = true;
-        progState.markDirty();
-    }
-
     let menu = <>
         <div className={s.topSplit}>
             <div className={s.toc}>
@@ -74,7 +68,6 @@ export const WalkthroughSidebar: React.FC = () => {
                     {menuVisible && <Popup targetEl={menuButtonEl} placement={PopupPos.BottomLeft} className={s.mainMenu} closeBackdrop onClose={() => setMenuVisible(false)}>
                         {menu}
                     </Popup>}
-                    <div onClick={() => stepModel()}>Step</div>
                 </div> */}
                 <Commentary />
             </div>

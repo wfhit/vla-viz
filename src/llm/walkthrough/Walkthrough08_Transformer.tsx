@@ -15,8 +15,8 @@ export function walkthrough08_Transformer(args: IWalkthroughArgs) {
 
 到这里，一层完整的 transformer 就讲完了！
 
-Qwen3-VL 主干把这样的一层重复堆叠 36 次，在 3D 场景中是等间距排列的 slab：
-上一层的输出沿着残差通路直接成为下一层的输入。（演示用的是 3 层示意小模型。）
+Qwen3-VL 主干把这样的一层重复堆叠 28 次，3D 场景中 28 层分两列排列，每层都是该层真实的权重与激活：
+上一层的输出沿着残差通路直接成为下一层的输入。
 
 每一层里，suffix（action expert）流都会通过 joint 注意力与 VLM prefix 流相遇——不是只在最后才汇合一次，而是逐层交互。
 

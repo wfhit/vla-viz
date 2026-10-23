@@ -56,7 +56,7 @@ export function drawBlockLabels(state: IRenderState, layout: IGptModelLayout) {
             let color = baseColor.mul(block.mlpAct.opacity * block.mlpLabel.visible);
             let tl = new Vec3(mlpLeft, mlpTop, 0);
             let br = new Vec3(mlpLeft, blockBottom, 0);
-            drawSectionLabel(state, `MLP (GELU)`, tl, br, { color, fontSize: 12 });
+            drawSectionLabel(state, `MLP (SwiGLU)`, tl, br, { color, fontSize: 12 });
         }
 
         {

@@ -24,9 +24,9 @@ export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
 
     commentary(wt, null, 0)`
 
-上一节得到的${c_blockRef('_输入嵌入_', state.layout.residual0)}矩阵是 Qwen3-VL 第一个 transformer 层的输入（共 36 层，这里展开其中一层）。
+上一节得到的${c_blockRef('_输入嵌入_', state.layout.residual0)}矩阵是 Qwen3-VL 第一个 transformer 层（L0）的输入（共 28 层，这里展开其中一层）。
 
-层内第一步是 _RMSNorm_：对矩阵的每一列分别做归一化。这里的小模型只是 k005b 的示意版本。`;
+层内第一步是 _RMSNorm_：对矩阵的每一列分别做归一化。图中数值均为 L0 input_layernorm 的真实值。`;
     breakAfter();
 
     let t_moveCamera = afterTime(null, 1.0);
@@ -38,7 +38,7 @@ export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
     commentary(wt)`
 归一化能让深层网络的训练更稳定。
 
-各列互相独立，先看第 4 列（${c_dimRef('t = 3', DimStyle.T)}）。`;
+各列互相独立，先看其中一列。`;
 
     breakAfter();
     let t_focusColumn = afterTime(null, 0.5);
@@ -48,7 +48,7 @@ export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
     breakAfter();
     commentary(wt)`
 RMSNorm 用该列的均方根（root-mean-square）去缩放整列，使其尺度为 1；与 LayerNorm 不同，它不减去均值，也没有偏置 β。
-示意小模型的可视化仍展示了一个聚合步骤（${c_blockRef('mean (\u03bc)', ln.lnAgg1)} 与 ${c_blockRef('std dev (\u03c3)', ln.lnAgg2)}）：这是示意画面，实际的 RMSNorm 只是省掉了减均值这一步。`;
+图中两个聚合格分别是真实的 ${c_blockRef('mean(x²)', ln.lnAgg1)} 与 ${c_blockRef('rsqrt(mean(x²) + ε)', ln.lnAgg2)}，均对完整的 2048 个通道计算（不仅是图中显示的 64 个）。`;
 
     breakAfter();
 
@@ -59,11 +59,11 @@ RMSNorm 用该列的均方根（root-mean-square）去缩放整列，使其尺�
 
     breakAfter();
     commentary(wt)`
-RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_dimRef('C', DimStyle.C)} 的整列，ε（${<>1&times;10<sup>-5</sup></>}）用来避免除以零。
+RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_dimRef('C', DimStyle.C)} 的整列，ε（${<>1&times;10<sup>-6</sup></>}）用来避免除以零。
 
 这些聚合值只需对整列算一次，因此存放在聚合层中。
 
-最后把每个元素乘以可学习的${c_blockRef('增益 (\u03b3)', ln.lnSigma)}，得到${c_blockRef('归一化结果', ln.lnResid)}。示意画面里的偏置项在 RMSNorm 中并不存在。`;
+最后把每个元素乘以可学习的${c_blockRef('增益 (\u03b3)', ln.lnSigma)}，得到${c_blockRef('归一化结果', ln.lnResid)}。RMSNorm 没有偏置 β。`;
 
     breakAfter();
 
@@ -73,7 +73,7 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
 
     breakAfter();
     commentary(wt)`
-对${c_blockRef('输入嵌入矩阵', layout.residual0)}的每一列都做同样的归一化，得到${c_blockRef('归一化后的输入嵌入', ln.lnResid)}，接下来送入联合双流注意力层。
+对${c_blockRef('输入嵌入矩阵', layout.residual0)}的每一列都做同样的归一化，得到${c_blockRef('归一化后的输入嵌入', ln.lnResid)}，接下来送入联合注意力层。
 `;
 
     breakAfter();

@@ -1,18 +1,14 @@
 'use client';
 
 import React, { useContext, useEffect, useLayoutEffect, useState } from 'react';
-import { IDataAndModel, IModelState, initModel } from './GptModel';
+import { createK005bGpuModel, fetchK005bData, IK005bData, shapeFromConfig } from './GptModel';
 import s from './LayerView.module.scss';
 import { IRenderState, IRenderView } from './render/modelRender';
 import { fetchFontAtlasData, IFontAtlasData } from './render/fontRender';
-import { Random } from '@/src/utils/random';
-import { ITensorSet, TensorF32 } from '@/src/utils/tensor';
 import { ProgramStateContext, WalkthroughSidebar } from './Sidebar';
 import { initProgramState, IProgramState, runProgram } from './Program';
 import { CanvasEventSurface } from './CanvasEventSurface';
 import { Vec3 } from '@/src/utils/vector';
-import { loadNativeBindings } from './NativeBindings';
-import { constructModel, createGpuModelForWasm } from './GptModelWasm';
 import { MovementAction } from './components/MovementControls';
 import { useScreenLayout } from '@/src/utils/layout';
 import { jumpPhase } from './Commentary';
@@ -23,20 +19,9 @@ import { ModelSelectorToolbar } from './components/ModelSelectorToolbar';
 import { PlayBar } from './components/PlayBar';
 import { HeadsOverlay } from './components/HeadsOverlay';
 
-async function fetchTensorData(url: string): Promise<ITensorSet> {
-    let resp = await fetch(url);
-    let data = await resp.json();
-    for (let k in data) {
-        if (data[k].shape) {
-            data[k] = TensorF32.fromJson(data[k]);
-        }
-    }
-    return data;
-}
-
 export function LayerView() {
     let [canvasEl, setCanvasEl] = useState<HTMLCanvasElement | null>(null);
-    let [dataAndModel, setDataAndModel] = useState<IDataAndModel | null>(null);
+    let [dataAndModel, setDataAndModel] = useState<IK005bData | null>(null);
     let [canvasRender, setCanvasRender] = useState<CanvasRender | null>(null);
     let [fontAtlasData, setFontAtlasData] = useState<IFontAtlasData | null>(null);
     let layout = useScreenLayout();
@@ -130,12 +115,9 @@ export function LayerView() {
     useEffect(() => {
         let stale = false;
         async function getData() {
-            let dataP = fetchTensorData('gpt-nano-sort-t0-partials.json');
-            let modelP = fetchTensorData('gpt-nano-sort-model.json');
-            let nativeBindingsP = loadNativeBindings();
-            let [data, model, native] = await Promise.all([dataP, modelP, nativeBindingsP]);
+            let data = await fetchK005bData();
             if (stale) return;
-            setDataAndModel({ data, model, native });
+            setDataAndModel(data);
         }
 
         getData();
@@ -230,14 +212,12 @@ export function LayerView() {
 }
 
 interface ICanvasData {
-    dataAndModel: IDataAndModel | null;
+    dataAndModel: IK005bData | null;
 }
 
 class CanvasRender {
     renderState: IRenderState;
     progState: IProgramState;
-    modelState: IModelState | null = null;
-    random: Random;
     stopped = false;
     canvasSizeDirty = true;
 
@@ -246,7 +226,6 @@ class CanvasRender {
         this.progState.markDirty = this.markDirty;
         this.progState.walkthrough.markDirty = this.markDirty;
         this.renderState = this.progState.render;
-        this.random = new Random(4);
     }
 
     destroy() {
@@ -256,14 +235,12 @@ class CanvasRender {
     setData(data: ICanvasData) {
         this.canvasData = data;
 
-        if (data.dataAndModel && !this.progState.gptGpuModel && this.progState.render) {
-            this.progState.gptGpuModel = initModel(this.renderState, data.dataAndModel, 1);
-            this.progState.native = data.dataAndModel.native;
-            this.progState.wasmGptModel = constructModel(data.dataAndModel.model, data.dataAndModel.model.config, data.dataAndModel.native);
-            this.progState.jsGptModel = createGpuModelForWasm(this.renderState.gl, data.dataAndModel.model.config);
-            // initWebGpu();
-            // setModelInputData(this.renderState, this.progState.gptGpuModel, this.random);
-            // runModel(this.renderState, this.progState.gptGpuModel);
+        if (data.dataAndModel && !this.progState.jsGptModel && this.progState.render) {
+            let model = createK005bGpuModel(this.renderState.gl, data.dataAndModel);
+            this.progState.jsGptModel = model;
+            this.progState.shape = shapeFromConfig(model.config);
+            this.progState.mainExample.shape = this.progState.shape;
+            (window as any).__k005b = model;
         }
         this.markDirty();
     }

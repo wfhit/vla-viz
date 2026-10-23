@@ -32,75 +32,58 @@ export function drawModelCard(state: IProgramState, layout: IGptModelLayout, tit
 
     let lineOpts: ILineOpts = { color: borderColor, mtx, thick, n };
 
-    let tl = new Vec3(-45, -97, 0);
-    let br = new Vec3( 45, -70, 0);
+    let tl = new Vec3(-75, -112, 0);
+    let br = new Vec3( 75, -70, 0);
     drawLineRect(render, tl, br, lineOpts);
 
     addQuad(render.triRender, new Vec3(tl.x, tl.y, -0.1), new Vec3(br.x, br.y, -0.1), backgroundColor, mtx);
 
-    // let w = measureTextWidth(state.modelFontBuf, title, .0);
-    let { B, C, T, A, nBlocks, nHeads, vocabSize } = layout.shape;
-
     let midX = (tl.x + br.x) / 2;
-    let paramLeft = br.x - 50;
-    let paramOff = tl.y + 2;
-
     let paramLineHeight = 1.3;
-    let paramFontScale = 4;
-    let numWidth = paramFontScale * 0.6;
-    let allNums = [B, C, T, A, nBlocks, nHeads];
-    let maxLen = Math.max(...allNums.map(n => n.toString().length));
-    let paramHeight = 2 + paramLineHeight * paramFontScale * 3 + 1;
+    let paramFontScale = 3;
 
-    let titleFontScale = 13;
+    let titleFontScale = 11;
     let titleW = measureTextWidth(render.modelFontBuf, title, titleFontScale);
     let titleHeight = titleFontScale * paramLineHeight;
     writeTextToBuffer(render.modelFontBuf, title, titleColor, midX - titleW / 2, tl.y + 2, titleFontScale, mtx);
 
-    // layout.weightCount = 150000000000;
+    let cfg = layout.shape.full;
+    let paramOff = tl.y + titleHeight + 3;
 
     let nParamsText = `n_params = `;
-    let weightCountText = numberToCommaSep(layout.weightCount);
-
-    let weightSize = 8;
+    let weightCountText = cfg ? numberToCommaSep(layout.weightCount) : 'loading real k005b checkpoint…';
+    let weightSize = 6;
     let weightTitleW = measureTextWidth(render.modelFontBuf, nParamsText, paramFontScale);
     let weightCountW = measureTextWidth(render.modelFontBuf, weightCountText, weightSize);
-    // let infoText = "goal: sort 6 letters from { A, B, C } into ascending order";
-    // writeTextToBuffer(render.modelFontBuf, infoText, titleColor, tl.x + 2, tl.y + paramHeight + 2, 4, mtx);
-
-    paramOff = tl.y + titleHeight + 4;
     let weightX = midX - (weightCountW + weightTitleW) / 2;
-
-    writeTextToBuffer(render.modelFontBuf, nParamsText, titleColor, weightX, paramOff - paramFontScale / 2, paramFontScale, mtx);
+    writeTextToBuffer(render.modelFontBuf, nParamsText, titleColor, weightX, paramOff - paramFontScale / 2 + 1, paramFontScale, mtx);
     writeTextToBuffer(render.modelFontBuf, weightCountText, titleColor, weightX + weightTitleW, paramOff - weightSize / 2, weightSize, mtx);
-    // addParam("C (channels) = ", C.toString(), dimStyleColor(DimStyle.C));
-    // addParam("T (time) = ", T.toString(), dimStyleColor(DimStyle.T));
-    // addParam("B (batches) = ", B.toString(), dimStyleColor(DimStyle.B));
-    // paramOff = tl.y + 2;
-    // paramLeft += 35;
-    // addParam("n_vocab = ", vocabSize.toString(), dimStyleColor(DimStyle.n_vocab));
-    // addParam("n_layers = ", nBlocks.toString(), dimStyleColor(DimStyle.n_layers));
-    // addParam("n_heads = ", nHeads.toString(), dimStyleColor(DimStyle.n_heads));
+    paramOff += weightSize * paramLineHeight - 1;
 
-    // function addParam(name: string, value: string, color: Vec4 = borderColor) {
-    //     let y = paramOff;
-    //     let w = measureTextWidth(render.modelFontBuf, name, paramFontScale);
-    //     let numW = measureTextWidth(render.modelFontBuf, value, paramFontScale);
-    //     let left = paramLeft;
-    //     writeTextToBuffer(render.modelFontBuf, name, color,  left - w        , y, paramFontScale, mtx);
-    //     writeTextToBuffer(render.modelFontBuf, value, color, left + maxLen * numWidth - numW, y, paramFontScale, mtx);
-    //     paramOff += paramFontScale * paramLineHeight;
-    // }
-
-    // addLine(render.lineRender, thick, borderColor, new Vec3(tl.x, tl.y + paramHeight), new Vec3(br.x, tl.y + paramHeight), n, mtx);
+    if (cfg) {
+        let w = cfg.window;
+        let lines = [
+            `${cfg.name} · step ${cfg.step}`,
+            `trunk: ${cfg.n_layer} layers · d ${cfg.n_embd} · ${cfg.n_head} q / ${cfg.n_kv_head} kv heads × ${cfg.head_dim} · SwiGLU ${cfg.intermediate} · vocab ${cfg.vocab_size}`,
+            `expert: d ${cfg.expert_hidden} · ${cfg.expert_heads} q / ${cfg.expert_kv_heads} kv heads · FF ${cfg.expert_intermediate} · ${cfg.n_suffix} suffix tokens → action ${cfg.action_horizon}×${cfg.action_dim}`,
+            `sample: row ${cfg.sample.row} · "${cfg.sample.goal_text}" · prefix ${cfg.T_prefix} tok (${cfg.n_visual_tokens} visual) · h* at p=${cfg.p_star}`,
+            `knack = ${cfg.pred_knack} (target ${cfg.sample.target_knack ?? '?'}) · done = ${cfg.pred_done} (target ${cfg.sample.target_done ?? '?'})`,
+            `3D cells = real windows: tokens ${w.t0}–${w.t0 + w.Wt - 1}, channels 0–${w.Wc - 1}, head dims 0–${w.Wd - 1}, FF 0–${w.Wf - 1}, embed rows ${w.v0}–${w.v0 + w.Wv - 1}`,
+        ];
+        for (let line of lines) {
+            let lw = measureTextWidth(render.modelFontBuf, line, paramFontScale);
+            writeTextToBuffer(render.modelFontBuf, line, titleColor, midX - lw / 2, paramOff, paramFontScale, mtx);
+            paramOff += paramFontScale * paramLineHeight;
+        }
+    }
 
     renderOutputAtBottom(state);
 
     renderInputAtTop(state);
 }
 
-export function sortABCInputTokenToString(a: number) {
-    return String.fromCharCode('A'.charCodeAt(0) + a); // just A, B, C supported!
+function tokenDisplayString(tok: string) {
+    return tok.replace(/\n/g, '⏎').replace(/^ /, '·');
 }
 
 export interface IInputBoxOpts {
@@ -130,13 +113,19 @@ export function renderInputBoxes(state: IProgramState, layout: IGptModelLayout, 
             drawLine(render.lineRender, new Vec3(lineX, tl.y, 0), new Vec3(lineX, br.y, 0), lineOpts);
         }
 
-        if (tokens && i < layout.model!.inputLen) {
+        let tokStrs = layout.model?.config.window_tokens;
+        if (tokens && tokStrs && i < tokens.length) {
             let cx = tl.x + (i + 0.5) * cellW;
 
             let tokOpts = { ...tokTextOpts, color: mixColorValues(opts?.tokMixes ?? null, tokTextOpts.color, i) };
             let tokIdxOpts = { ...idxTextOpts, color: mixColorValues(opts?.idxMixes ?? null, idxTextOpts.color, i) };
-            let tokStr = sortABCInputTokenToString(tokens[i]);
-            let tokW = measureText(render.modelFontBuf, tokStr, tokTextOpts);
+            let tokStr = tokenDisplayString(tokStrs[i]);
+            let maxW = cellW * 0.95;
+            let fullW = measureText(render.modelFontBuf, tokStr, tokTextOpts);
+            if (fullW > maxW) {
+                tokOpts = { ...tokOpts, size: tokOpts.size * maxW / fullW };
+            }
+            let tokW = measureText(render.modelFontBuf, tokStr, tokOpts);
             let idxW = measureText(render.modelFontBuf, tokens[i].toString(), idxTextOpts);
             let totalH = tokTextOpts.size + idxTextOpts.size;
             let top = tl.y + (inCellH - totalH) / 2;
@@ -171,53 +160,44 @@ export function renderOutputBoxes(state: IProgramState, layout: IGptModelLayout,
 
     drawLineRect(render, tl, br, lineOpts);
 
-    let sortedOutput = layout.model?.sortedBuf;
+    // The trunk has no LM head here: the only output is the knack/done prediction
+    // read from h* at the last (boundary) token. Show the real knack softmax there.
+    let model = layout.model;
 
     for (let i = 0; i < T; i++) {
         if (i > 0) {
             let lineX = tl.x + i * cellW;
             drawLine(render.lineRender, new Vec3(lineX, tl.y, 0), new Vec3(lineX, br.y, 0), lineOpts);
         }
+    }
 
-        if (sortedOutput && i < layout.model!.inputLen) {
-            let usedSoFar = 0.0;
-            let cx = tl.x + (i + 0.5) * cellW;
-
-            for (let j = 0; j < vocabSize; j++) {
-                let tokIdx = sortedOutput[(i * vocabSize + j) * 2 + 0];
-                let tokProb = sortedOutput[(i * vocabSize + j) * 2 + 1];
-
-                let partTop = tl.y + usedSoFar * outCellH;
-                let partH = tokProb * outCellH;
-
-                let dimmed = i < layout.model!.inputLen - 1 || !boldLast;
-
-                let color = mixColorValues(opts?.tokMixes ?? null, tokTextOpts.color, i);
-                if (dimmed) {
-                    color = color.mul(0.3);
-                }
-
-                let tokOpts = { ...tokTextOpts, color };
-                let idxOpts = { ...idxTextOpts, color: color.mul(0.6) };
-
-                let tokStr = sortABCInputTokenToString(tokIdx);
-                let tokW = measureText(render.modelFontBuf, tokStr, tokOpts);
-                let idxW = measureText(render.modelFontBuf, tokIdx.toString(), idxOpts);
-                let textH = tokOpts.size + idxOpts.size;
+    if (model) {
+        let probs = model.knackProbs.localBuffer;
+        let names = model.config.knack_names;
+        let order = Array.from(probs).map((p, j) => ({ p, j })).sort((a, b) => b.p - a.p);
+        let i = T - 1;
+        let cx = tl.x + (i + 0.5) * cellW;
+        let usedSoFar = 0.0;
+        for (let { p, j } of order) {
+            let partTop = tl.y + usedSoFar * outCellH;
+            let partH = p * outCellH;
+            let color = mixColorValues(opts?.tokMixes ?? null, tokTextOpts.color, i);
+            if (!boldLast) color = color.mul(0.3);
+            let tokOpts = { ...tokTextOpts, color, size: tokTextOpts.size * 0.5 };
+            let idxOpts = { ...idxTextOpts, color: color.mul(0.6), size: idxTextOpts.size * 0.6 };
+            let nameStr = names[j];
+            let pStr = p.toFixed(3);
+            let nameW = measureText(render.modelFontBuf, nameStr, tokOpts);
+            let pW = measureText(render.modelFontBuf, pStr, idxOpts);
+            let textH = tokOpts.size + idxOpts.size;
+            if (partH > textH) {
                 let top = partTop + (partH - textH) / 2;
-
-                if (partH > textH) {
-                    drawText(render.modelFontBuf, tokStr, cx - tokW / 2, top, tokOpts);
-                    drawText(render.modelFontBuf, tokIdx.toString(),  cx - idxW / 2, top + tokOpts.size, idxOpts);
-                }
-
-                usedSoFar += tokProb;
-
-                drawLine(render.lineRender, new Vec3(cx - cellW/2, partTop + partH, 0), new Vec3(cx + cellW/2, partTop + partH, 0), lineOpts);
-                if (usedSoFar >= 1.0 - 1e-4) {
-                    break;
-                }
+                drawText(render.modelFontBuf, nameStr, cx - nameW / 2, top, tokOpts);
+                drawText(render.modelFontBuf, pStr, cx - pW / 2, top + tokOpts.size, idxOpts);
             }
+            usedSoFar += p;
+            drawLine(render.lineRender, new Vec3(cx - cellW/2, partTop + partH, 0), new Vec3(cx + cellW/2, partTop + partH, 0), lineOpts);
+            if (usedSoFar >= 1.0 - 1e-3) break;
         }
     }
 }
@@ -283,7 +263,7 @@ function renderInputAtTop(state: IProgramState) {
 
     renderInputBoxes(state, layout, tl, br, inCellW, 4, lineOpts, { tokMixes: state.display.tokenColors, idxMixes: state.display.tokenIdxColors });
 
-    let inputTitle = "Input";
+    let inputTitle = layout.model ? `Prompt tokens ${layout.model.config.window.t0}–${layout.model.config.window.t0 + layout.shape.T - 1} (of ${layout.model.config.T_prefix}-token prefix)` : "Prompt tokens";
     drawText(render.modelFontBuf, inputTitle, tl.x, tl.y - lineHeight(titleTextOpts), titleTextOpts);
 
     {
@@ -292,7 +272,7 @@ function renderInputAtTop(state: IProgramState) {
         let outTl = new Vec3(tl.x, outBr.y - outCellH);
         renderOutputBoxes(state, layout, outTl, outBr, inCellW, 4, lineOpts, { opacity: outputOpacity, boldLast: outputOpacity < 1.0, tokMixes: state.display.tokenOutputColors });
 
-        let outputTitle = "Output";
+        let outputTitle = "Knack prediction (softmax at h*)";
         let outputTextOpts = { ...titleTextOpts, color: titleTextOpts.color.mul(outputOpacity) };
         drawText(render.modelFontBuf, outputTitle, outTl.x, outTl.y - lineHeight(titleTextOpts), outputTextOpts);
     }

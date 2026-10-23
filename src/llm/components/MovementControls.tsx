@@ -460,7 +460,7 @@ function constructNavLevels(model: IGptModelLayout) {
     };
 
     let topLevel: INavLevel = {
-        name: "nanoGPT",
+        name: "k005b",
         childDir: "col",
         children: [embeddings, ...transformers, outputs],
     };

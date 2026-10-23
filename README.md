@@ -12,21 +12,26 @@ and third-party assets (fonts, RISC-V tests, etc.), which retain their original 
 ## Projects
 
 The main projects are:
-* LLM Visualization: 3D interactive model of a GPT-style LLM network running inference.
+* k005b VLA Visualization: 3D interactive model of the real k005b VLA (Qwen3-VL-2B trunk + action expert) running inference.
 * [WIP] CPU Simulation: A 2D digital schematic editor with full a execution model, showcasing a simple
   RISC-V based CPU
 
-### LLM Visualization
+### k005b VLA Visualization
 
-This project displays a 3D model of a working implementation of a GPT-style network. That
-is, the network topology that's used in OpenAI's GPT-2, GPT-3, (and maybe GPT-4).
+The 3D view renders the real k005b fused VLA checkpoint (Qwen3-VL-2B trunk, 28 layers, C=2048,
+GQA 16Q/8KV × 128, SwiGLU FF 6144, plus the action expert, knack head and done head).
+Every displayed number is real: weights are read from the checkpoint, and activations are captured
+with forward hooks while running one real sample. Large tensors show a real sub-window (the true
+indices and full-tensor stats are shown on hover and in the model card).
 
-The first network displayed with working weights is a tiny such network, which sorts a small list
-of the letters A, B, and C. This is the demo example model from Andrej Karpathy's
-[minGPT](https://github.com/karpathy/minGPT) implementation.
+The data files `public/k005b-weights.json`, `public/k005b-acts.json` and `public/k005b-check.json`
+are produced by the exporter (CPU only, ~20s):
 
-The renderer also supports visualizing arbitrary sized networks, and works with the smaller gpt2
-size, although the weights aren't downloaded (it's 100's of MBs).
+```
+python tools/export_k005b.py
+```
+
+`k005b-check.json` holds reference values computed in Python, used to verify the values read in the browser.
 
 ### CPU Simulation (WIP; not exposed yet!)
 

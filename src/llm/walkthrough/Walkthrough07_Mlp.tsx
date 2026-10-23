@@ -20,23 +20,23 @@ export function walkthrough07_Mlp(args: IWalkthroughArgs) {
     let block = layout.blocks[0];
 
     setInitialCamera(state, new Vec3(-154.755, 0.000, -460.042), new Vec3(289.100, -8.900, 2.298));
-    wt.dimHighlightBlocks = [block.ln2.lnResid, block.mlpAct, block.mlpFc, block.mlpFcBias, block.mlpFcWeight, block.mlpProjBias, block.mlpProjWeight, block.mlpResult, block.mlpResidual];
+    wt.dimHighlightBlocks = [block.ln2.lnResid, block.mlpAct, block.mlpFc, block.mlpFcWeight, block.mlpUp, block.mlpUpWeight, block.mlpProjWeight, block.mlpResult, block.mlpResidual];
 
     commentary(wt)`
 
-一层的后半部分是 MLP（多层感知机）：一个只有两层线性变换的简单网络，负责逐 token 地加工信息。
+一层的后半部分是 MLP：Qwen3 用的是 SwiGLU 前馈网络，负责逐 token 地加工信息。
 
 与注意力一样，向量进入 MLP 前先做一次${c_blockRef('归一化（RMSNorm）', block.ln2.lnResid)}。
 
-MLP 中，每个长度为 ${c_dimRef('C = 48', DimStyle.C)} 的列向量（彼此独立）依次经过：
+MLP 中，每个长度为 ${c_dimRef('C = 2048', DimStyle.C)} 的列向量（彼此独立）依次经过：
 
-1. ${c_blockRef('线性变换', block.mlpFcWeight)}加${c_blockRef('bias', block.mlpFcBias)}，扩展到长度 ${c_dimRef('4 * C', DimStyle.C4)}。
+1. 两个并行的线性变换：${c_blockRef('gate_proj', block.mlpFcWeight)} 得到 ${c_blockRef('gate', block.mlpFc)}，${c_blockRef('up_proj', block.mlpUpWeight)} 得到 ${c_blockRef('up', block.mlpUp)}，都扩展到长度 ${c_dimRef('6144', DimStyle.C4)}（无 bias）。
 
-2. GELU 激活函数（逐元素）。
+2. 逐元素计算 ${c_blockRef('SiLU(gate) · up', block.mlpAct)}。
 
-3. 再一次${c_blockRef('线性变换', block.mlpProjWeight)}加${c_blockRef('bias', block.mlpProjBias)}，收缩回长度 ${c_dimRef('C', DimStyle.C)}。
+3. 再用${c_blockRef('down_proj', block.mlpProjWeight)}收缩回长度 ${c_dimRef('C', DimStyle.C)}（无 bias）。
 
-（这是示意小模型；k005b 的 prefix 与 suffix 两个流各有自己的 MLP 权重。）
+图中显示的是 L0 的真实权重与激活窗口（64 个通道 × 64 个中间维）。
 
 我们来跟踪其中一个向量：
 `;
@@ -47,7 +47,7 @@ MLP 中，每个长度为 ${c_dimRef('C = 48', DimStyle.C)} 的列向量（彼�
     breakAfter();
 
 commentary(wt)`
-先做带 bias 的矩阵-向量乘法，把向量扩展到长度 ${c_dimRef('4 * C', DimStyle.C4)}。（注意：这里输出矩阵是转置绘制的，仅为方便可视化。）
+先做两次矩阵-向量乘法（gate 与 up），把向量扩展到长度 ${c_dimRef('6144', DimStyle.C4)}。（注意：这里输出矩阵是转置绘制的，仅为方便可视化。）
 `;
     breakAfter();
 
@@ -56,8 +56,8 @@ commentary(wt)`
     breakAfter();
 
 commentary(wt)`
-接着对向量的每个元素施加 GELU 激活函数，这是网络引入非线性的关键。GELU 看起来很像 ReLU（即 ${<code>max(0, x)</code>}），
-但拐角处是平滑曲线而不是尖角。
+接着逐元素计算 SiLU(gate) · up，这是网络引入非线性的关键。SiLU(x) = x · sigmoid(x)，看起来很像 ReLU（即 ${<code>max(0, x)</code>}），
+但拐角处是平滑曲线；再乘以 up 就是“门控”（gated）线性单元。
 
 ${<ReluGraph />}
 
@@ -69,7 +69,7 @@ ${<ReluGraph />}
     breakAfter();
 
 commentary(wt)`
-然后再做一次带 bias 的矩阵-向量乘法，把向量收缩回长度 ${c_dimRef('C', DimStyle.C)}。
+然后用 down_proj 再做一次矩阵-向量乘法，把向量收缩回长度 ${c_dimRef('C', DimStyle.C)}。
 `;
     breakAfter();
 
@@ -183,7 +183,7 @@ MLP 完成。至此得到了这一层 transformer 的输出，可以交给下一
 const ReluGraph: React.FC = () => {
 
     let fnRelu = (x: number) => Math.max(0, x);
-    let fnGelu = (x: number) => x * 0.5 * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * Math.pow(x, 3))));
+    let fnSilu = (x: number) => x / (1 + Math.exp(-x));
 
     function createMapping(range0: number, range1: number, domain0: number, domain1: number) {
         let m = (range1 - range0) / (domain1 - domain0);
@@ -230,7 +230,7 @@ const ReluGraph: React.FC = () => {
             <line x1={xScale(-halfW)} x2={xScale(halfW)} y1={yScale(0)} y2={yScale(0)} stroke={"gray"} strokeWidth={1} />
             <line x1={xScale(0)} x2={xScale(0)} y1={yScale(-halfH + hOffset)} y2={yScale(halfH + hOffset)} stroke={"gray"} strokeWidth={1} />
             {/* <path d={makePath(fnRelu)} stroke={"blue"} fill="none" strokeWidth={1} /> */}
-            <path d={makePath(fnGelu)} stroke={dimStyleColor(DimStyle.Intermediates).toHexColor()} fill="none" strokeWidth={3} />
+            <path d={makePath(fnSilu)} stroke={dimStyleColor(DimStyle.Intermediates).toHexColor()} fill="none" strokeWidth={3} />
             {vertTicks.map((a, i) => <g key={i} transform={`translate(${a.x}, ${a.y})`}>
                 <line x1={-5} x2={5} y1={0} y2={0} stroke={tickColor} strokeWidth={1} />
                 <text x={10} y={5} fontSize={10} fill={tickColor}>{a.label}</text>

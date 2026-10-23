@@ -31,9 +31,9 @@ export function walkthrough04_SelfAttention(args: IWalkthroughArgs) {
     wt.dimHighlightBlocks = [layout.residual0, block0.ln1.lnResid, ...head2.cubes];
 
     commentary(wt, null, 0)`
-联合双流注意力是 transformer 层的核心：输入嵌入矩阵中的各列在这里相互“交流”。在其他阶段，各列都是相互独立处理的。
+注意力是 transformer 层的核心：输入嵌入矩阵中的各列在这里相互“交流”。在其他阶段，各列都是相互独立处理的。
 
-k005b 把两条流拼进同一次注意力：VLM 前缀流（相机 patch、语言 token）和动作专家后缀流。下面先用示意小模型中的一个 head，逐个单元格地看 Q/K/V 是如何算出来的。`;
+k005b 的注意力是 GQA：每层 16 个 query head、8 个 key/value head（每 2 个 query head 共享一组 K/V），head 维度 128。图中是 L0 的 head 2 的真实数值（显示 32 个 token × 64 维的窗口）。Q/K 在点积前还要经过 q_norm / k_norm（RMSNorm）和 RoPE 旋转。`;
     breakAfter();
     let t_moveCamera = afterTime(null, 1.0);
     let t_highlightHeads = afterTime(null, 2.0);
@@ -50,7 +50,7 @@ ${embedInline(<ul>
     <li>V: <BlockText blk={head2.vBlock}>值向量 (Value)</BlockText></li>
 </ul>)}
 
-每个向量都由一次矩阵-向量乘法（加偏置）得到，每个输出单元格都是输入向量的线性组合。例如${c_blockRef('Q 向量', head2.qBlock)}，是${c_blockRef('Q 权重矩阵', head2.qWeightBlock)}的一行与${c_blockRef('输入矩阵', block0.ln1.lnResid)}的一列做点积。`;
+每个向量都由一次矩阵-向量乘法得到（Qwen3 的 QKV 没有偏置），每个输出单元格都是输入向量的线性组合。例如${c_blockRef('Q 向量', head2.qBlock)}，是${c_blockRef('Q 权重矩阵', head2.qWeightBlock)}的一行与${c_blockRef('输入矩阵', block0.ln1.lnResid)}的一列做点积。`;
     breakAfter();
 
     let t_focusQCol = afterTime(null, 1.0);
@@ -135,7 +135,7 @@ ${embedInline((() => {
     </div>;
 })())}
 
-来看一个具体例子：以第 6 列（${c_dimRef('t = 5', DimStyle.T)}）作为发出查询的一列：`;
+来看一个具体例子：以窗口中第 6 列（${c_dimRef('t = 5', DimStyle.T)}）作为发出查询的一列：`;
     breakAfter();
 
     let t_focusQKVCols = afterTime(null, 1.0);
@@ -145,7 +145,7 @@ ${embedInline((() => {
 // columns each have a K (key) vector, which represents the information that that column has, and our
 // Q (query) vector is what information is relevant to us.
     commentary(wt)`
-查找表中的 {K, V} 条目是它之前的 6 列，Q 是当前这一列。
+查找表中的 {K, V} 条目是它可见的各列，Q 是当前这一列。
 
 先计算当前列（${c_dimRef('t = 5', DimStyle.T)}）的${c_blockRef('Q 向量', head2.qBlock)}与之前各列的${c_blockRef('K 向量', head2.kBlock)}的点积，结果存入${c_blockRef('注意力矩阵', head2.attnMtx)}的对应行（${c_dimRef('t = 5', DimStyle.T)}）。`;
     breakAfter();
@@ -156,9 +156,9 @@ ${embedInline((() => {
     commentary(wt)`
 点积衡量两个向量的相似度：越相似，点积越大；差异越大，点积越小甚至为负。
 
-在 k005b 中，后缀流（动作专家）的查询可以关注前缀流的全部 K/V，也可以关注后缀自身；而前缀流不受后缀影响，不会“看到”后缀。示意小模型用下三角（因果）掩码画出这种单向可见性。
+在 k005b 中，后缀流（动作专家）的查询可以关注前缀流的全部 K/V，也可以关注后缀自身；前缀流不会“看到”后缀。图中被掩码的位置是真实的 -inf（softmax 后为 0）。
 
-点积之后还要除以 sqrt(${c_dimRef('A', DimStyle.A)})，其中 ${c_dimRef('A', DimStyle.A)} 是 Q/K/V 向量的长度。这样可避免较大的数值在下一步 softmax 中占据主导。
+点积之后还要除以 sqrt(${c_dimRef('A', DimStyle.A)}) = sqrt(128)，其中 ${c_dimRef('A', DimStyle.A)} 是 Q/K/V 向量的长度。这样可避免较大的数值在下一步 softmax 中占据主导。
 
 softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和为 1。`;
     breakAfter();

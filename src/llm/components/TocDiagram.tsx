@@ -54,23 +54,23 @@ const SVG_H = 612;
 const BUS_X = 312;
 
 const nodes: INode[] = [
-    { id: 'inCam', x: 6, y: 8, w: 94, h: 40, label: ['3×相机', '224² patch'], color: colors.input },
-    { id: 'inLang', x: 106, y: 8, w: 94, h: 40, label: ['语言 token', 'Goal/Plan/knack'], color: colors.input },
-    { id: 'inState', x: 206, y: 8, w: 94, h: 40, label: ['状态槽', '61+14=75'], color: colors.input },
-    { id: 'embed', x: 6, y: 62, w: 294, h: 28, label: ['Embedding (→ 768)'], color: colors.embed },
+    { id: 'inCam', x: 6, y: 8, w: 94, h: 40, label: ['3×相机', '850 视觉 token'], color: colors.input },
+    { id: 'inLang', x: 106, y: 8, w: 94, h: 40, label: ['语言 token', '提示词'], color: colors.input },
+    { id: 'inState', x: 206, y: 8, w: 94, h: 40, label: ['状态', '16 token'], color: colors.input },
+    { id: 'embed', x: 6, y: 62, w: 294, h: 28, label: ['Embedding (→ 2048)'], color: colors.embed },
     { id: 'backbone', x: 6, y: 104, w: 200, h: 330, label: [], color: colors.backbone, dashed: true },
     { id: 'ln1', x: 46, y: 134, w: 120, h: 22, label: ['RMSNorm'], color: colors.norm },
-    { id: 'attn', x: 31, y: 172, w: 150, h: 44, label: ['联合双流注意力', 'Q/K/V + softmax'], color: colors.attn },
+    { id: 'attn', x: 31, y: 172, w: 150, h: 44, label: ['GQA 联合注意力', '16Q / 8KV head'], color: colors.attn },
     { id: 'proj', x: 46, y: 230, w: 120, h: 22, label: ['输出投影'], color: colors.proj },
     { id: 'ln2', x: 46, y: 284, w: 120, h: 22, label: ['RMSNorm'], color: colors.norm },
-    { id: 'mlp', x: 46, y: 320, w: 120, h: 30, label: ['MLP (GELU)'], color: colors.mlp },
+    { id: 'mlp', x: 46, y: 320, w: 120, h: 30, label: ['MLP (SwiGLU)'], color: colors.mlp },
     { id: 'hstar', x: 88, y: 444, w: 36, h: 28, label: ['h*'], color: colors.harness, round: true },
-    { id: 'knack', x: 6, y: 500, w: 140, h: 44, label: ['knack 并行头', '字段独立 softmax'], color: colors.head },
-    { id: 'done', x: 152, y: 500, w: 84, h: 44, label: ['done 头', '[B,2]'], color: colors.done },
-    { id: 'exIn', x: 214, y: 104, w: 86, h: 52, label: ['状态75→768', '+ x_t ×16', '+ 时间 adaLN'], color: colors.expert },
-    { id: 'denoiser', x: 214, y: 172, w: 86, h: 44, label: ['联合去噪器', '逐层联合注意力'], color: colors.expert },
-    { id: 'vt', x: 214, y: 236, w: 86, h: 24, label: ['速度场 v_t'], color: colors.expert },
-    { id: 'euler', x: 214, y: 276, w: 86, h: 24, label: ['Euler 积分'], color: colors.expert },
+    { id: 'knack', x: 6, y: 500, w: 140, h: 44, label: ['knack 头', '17 类 softmax'], color: colors.head },
+    { id: 'done', x: 152, y: 500, w: 84, h: 44, label: ['done 头', '2 类'], color: colors.done },
+    { id: 'exIn', x: 214, y: 104, w: 86, h: 52, label: ['后缀 17 token', '+ 噪声 x1', '宽度 768'], color: colors.expert },
+    { id: 'denoiser', x: 214, y: 172, w: 86, h: 44, label: ['动作专家', '逐层联合注意力'], color: colors.expert },
+    { id: 'vt', x: 214, y: 236, w: 86, h: 24, label: ['速度 v'], color: colors.expert },
+    { id: 'euler', x: 214, y: 276, w: 86, h: 24, label: ['x1 − v'], color: colors.expert },
     { id: 'chunk', x: 214, y: 316, w: 86, h: 36, label: ['16×23', '动作块'], color: colors.expert },
     { id: 'harness', x: 6, y: 570, w: 294, h: 30, label: ['Harness：done→播完→刹车→切换'], color: colors.harness },
 ];
@@ -134,18 +134,18 @@ export const TocDiagram: React.FC<{
     entryGroups.push({ groupName: '主干：一层展开', entries: [] });
     makeEntry(Phase.Input_Detail_Embedding, '输入嵌入', ['inCam', 'inLang', 'inState', 'embed'], true);
     makeEntry(Phase.Input_Detail_LayerNorm, 'RMSNorm', ['ln1', 'ln2']);
-    makeEntry(Phase.Input_Detail_SelfAttention, '联合双流注意力', ['attn']);
+    makeEntry(Phase.Input_Detail_SelfAttention, 'GQA 联合注意力', ['attn']);
     makeEntry(Phase.Input_Detail_Softmax, '前缀 Softmax', ['attn']);
     makeEntry(Phase.Input_Detail_Projection, '输出投影与残差', ['proj', 'add1'], true);
-    makeEntry(Phase.Input_Detail_Mlp, 'MLP (GELU)', ['mlp', 'add2'], true);
-    makeEntry(Phase.Input_Detail_Transformer, '36 层主干堆叠', ['backbone']);
+    makeEntry(Phase.Input_Detail_Mlp, 'MLP (SwiGLU)', ['mlp', 'add2'], true);
+    makeEntry(Phase.Input_Detail_Transformer, '28 层主干堆叠', ['backbone']);
     makeEntry(Phase.Input_Detail_Output, 'h* 答案边界读出', ['hstar']);
 
     entryGroups.push({ groupName: '输出头与动作专家', entries: [] });
-    makeEntry(Phase.Head_Knack, 'knack 并行分类头', ['knack']);
+    makeEntry(Phase.Head_Knack, 'knack 分类头', ['knack']);
     makeEntry(Phase.Head_Done, 'done 头', ['done']);
     makeEntry(Phase.Action_Expert, '动作专家', ['exIn', 'denoiser'], true);
-    makeEntry(Phase.Action_Denoise, '速度场与 Euler 积分', ['vt', 'euler', 'chunk'], true);
+    makeEntry(Phase.Action_Denoise, '速度与动作解码', ['vt', 'euler', 'chunk'], true);
     makeEntry(Phase.Harness_Law, 'Harness 法则', ['harness']);
 
     let focusEntry = entries.find(e => e.id === (hoverId ?? activeId));
@@ -209,9 +209,9 @@ export const TocDiagram: React.FC<{
             {vArrow(106, 306, 320, 'ln2-mlp')}
             {vArrow(106, 350, 365, 'mlp-add2')}
             {vArrow(106, 379, 396, 'add2-dots', colors.line)}
-            <text x={106} y={410} fontSize={10.5} textAnchor='middle' fill={colors.text} opacity={0.8}>… 重复 ×36 层 …</text>
+            <text x={106} y={410} fontSize={10.5} textAnchor='middle' fill={colors.text} opacity={0.8}>… 重复 ×28 层 …</text>
             {vArrow(106, 434, 444, 'bb-hstar', colors.harness)}
-            <text x={12} y={120} fontSize={11.5} fill={colors.text}>Qwen3-VL ×36</text>
+            <text x={12} y={120} fontSize={11.5} fill={colors.text}>Qwen3-VL ×28</text>
             <path d='M106,122 L192,122 L192,268 L116,268' fill='none' stroke={colors.line} strokeWidth={1.2} />
             {arrowHead(114, 268, 'left', 'res1')}
             <path d='M106,278 L192,278 L192,372 L116,372' fill='none' stroke={colors.line} strokeWidth={1.2} />

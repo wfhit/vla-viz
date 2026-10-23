@@ -1,5 +1,6 @@
 import { blockDimension, dimProps, findSubBlocks, splitGrid, splitGridForHighlight } from "./Annotations";
-import { drawDataFlow, getBlockValueAtIdx } from "./components/DataFlow";
+import { drawDataFlow, formatRealValue, getBlockRealInfo } from "./components/DataFlow";
+import { embedColForToken } from "./GptModel";
 import { BlKDepSpecial, IBlkCellDep, IBlkDef } from "./GptModelLayout";
 import { IProgramState } from "./Program";
 import { clamp, isNotNil } from "@/src/utils/data";
@@ -103,6 +104,7 @@ export function runMouseHitTesting(state: IProgramState) {
         highlightCellUnderMouse(state, main, c, pt2);
         drawDependences(state, main, ptIdx);
         drawDataFlow(state, main, ptIdx);
+        pushRealValueLines(state, main, ptIdx);
     } else if (isNotNil(state.display.blkIdxHover)) {
         for (let idx of state.display.blkIdxHover) {
             let mainBlk = state.layout.cubes[idx];
@@ -190,6 +192,24 @@ export function getDepDotLen(blk: IBlkDef, destIdx: Vec3): number | null {
     return dotLen;
 }
 
+// Hover readout: the real tensor name, full shape, full-tensor index & value,
+// and min/max/mean/std over the FULL tensor (not just the shown window).
+function pushRealValueLines(state: IProgramState, blk: IBlkDef, idx: Vec3) {
+    let info = getBlockRealInfo(blk, idx);
+    let lines = state.display.lines;
+    if (!info) {
+        if (blk.access?.src) lines.push(`${blk.name}: cell outside exported window`);
+        return;
+    }
+    let { meta } = info.tex;
+    let st = meta.stats;
+    let f = (v: number) => formatRealValue(v);
+    lines.push(`${blk.name}  ←  ${meta.name}  full shape [${meta.fullShape.join(', ')}]`);
+    lines.push(`${meta.name}[${info.realIdx.join(', ')}] = ${f(info.value)}`);
+    lines.push(`full-tensor stats: min ${f(st.min)}  max ${f(st.max)}  mean ${f(st.mean)}  std ${f(st.std)}`);
+    if (meta.desc) lines.push(meta.desc);
+}
+
 export function drawDependences(state: IProgramState, blk: IBlkDef, idx: Vec3) {
     let layout = state.layout;
     let deps = blk.deps;
@@ -201,9 +221,12 @@ export function drawDependences(state: IProgramState, blk: IBlkDef, idx: Vec3) {
         let { srcIdx, dotDim, otherDim, isDot } = getDepSrcIdx(dep, destIdx);
 
         if (blk.deps?.special === BlKDepSpecial.InputEmbed && dep.src === state.layout.tokEmbedObj) {
-            let tokenIdx = getBlockValueAtIdx(state.layout.idxObj, new Vec3(destIdx.x, 0, destIdx.z));
+            let col = state.layout.model ? embedColForToken(state.layout.model, destIdx.x) : -1;
+            if (col < 0) {
+                return; // this token's embed row is outside the exported rows
+            }
             isDot = false;
-            srcIdx.setAt(Dim.X, tokenIdx ?? 0);
+            srcIdx.setAt(Dim.X, col);
         }
 
         if (isDot) {
