@@ -1,0 +1,207 @@
+@import '@/styles/variables.scss';
+
+.title {
+    margin: 8px 0;
+    font-size: 1.2rem;
+    text-align: center;
+    font-style: italic;
+    // font-family: 'Merriweather', serif;
+}
+
+.tocBackground {
+    background-color: rgba(15, 23, 42, 0.8);
+    border-bottom: 1px solid #334155;
+    padding: 0 20px;
+    margin-bottom: 10px;
+}
+
+.divider {
+    // margin: 20px 0;
+    // border-top: 1px solid #ccc;
+}
+
+.walkthroughViewport {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
+}
+
+.walkthroughViewport::before {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 10px;
+    content: ' ';
+    pointer-events: none;
+    box-shadow: inset 0 0 5px 0 rgba(0, 0, 0, 0.5);
+    z-index: 1;
+}
+
+.walkthroughText {
+    flex: 1;
+    // padding: 0 40px 0 20px;
+    text-align: justify;
+    font-size: 1rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: stretch;
+    overflow-y: auto;
+    overflow-x: hidden;
+    position: relative;
+    scrollbar-width: 10px;
+    scrollbar-color: #475569 #1e293b;
+    outline: none;
+
+}
+
+.walkthroughText::-webkit-scrollbar {
+    width: 10px;
+    border-radius: 20px;;
+    background-color: #1e293b;
+}
+
+.walkthroughText::-webkit-scrollbar-thumb {
+    /* width: 10px; */
+    background-color: #475569;
+    border-radius: 20px;
+    cursor: pointer;
+}
+
+.walkthroughParas {
+    padding: 0 20px;
+    position: relative;
+    flex: 1;
+
+    p, .para {
+        margin: 10px 0;
+    }
+}
+
+.chapterControls {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: row;
+    margin-bottom: 10px;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.chapterTitle {
+    flex: 1 0 auto;
+    font-size: 1.1rem;
+    text-align: center;
+}
+
+.controls {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: row;
+    padding: 10px 0;
+    justify-content: center;
+}
+
+.btn {
+    font-size: 1.0em;
+    background-color: #1e293b;
+    color: #e2e8f0;
+    cursor: pointer;
+    border: 1px solid rgba(125, 211, 252, 0.4);
+    border-radius: 4px;
+    padding: 0 8px;
+    height: 30px;
+}
+
+.prevNextBtn {
+    flex: 0 1 auto;
+    width: 60px;
+}
+
+.commentaryBreak {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    flex: 1;
+    margin: 16px 0;
+
+    /* margin: 20px 20%; */
+    /* border-bottom: 1px solid #cfcfcf; */
+}
+
+
+.playPause {
+    color: #8d8d8d;
+    width: 20px;
+    margin-right: 15px;
+}
+
+.jump {
+    color: #8d8d8d;
+    width: 20px;
+    margin-right: 10px;
+}
+
+.dividerLine {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background-color: rgba(14, 116, 144, 0.9);
+    margin: 5px 0;
+    box-shadow: 0 0 2px 0 rgba(189, 208, 245, 0.9);
+
+}
+
+.activeRange {
+    position: absolute;
+    left: -10px;
+    right: -10px;
+    background-color: rgba(14, 165, 233, 0.15);
+    border: 1px solid #38bdf8;
+    border-radius: 5px;
+}
+
+.beadOfLight {
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    background-color: rgba(30, 41, 59, 0.9);
+    border-radius: 50%;
+    animation: beadOfLight 3s infinite linear;
+  }
+
+  @keyframes beadOfLight {
+    0% {
+        top: -6px;
+        left: -6px;
+    }
+    25% {
+        top: -6px;
+        left: calc(100% + 6px);
+        transform: translateX(-100%);
+    }
+    50% {
+        top: calc(100% + 6px);
+        left: calc(100% + 6px);
+        transform: translate(-100%, -100%);
+    }
+    75% {
+        top: calc(100% + 6px);
+        left: -6px;
+        transform: translateY(-100%);
+    }
+    100% {
+        top: -6px;
+        left: -6px;
+    }
+}
+
+.sectionHighlightWrap {
+    position: absolute;
+    pointer-events: none;
+    margin: 0 20px;
+    // background-color: rgba(black, 0.1);
+}

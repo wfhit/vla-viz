@@ -1,0 +1,45 @@
+.tocDiagram {
+    display: flex;
+    align-items: flex-start;
+    color: #e6edf7;
+}
+
+.toc {
+    flex: 1 0 104px;
+    min-width: 104px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.tocTitle {
+    font-size: 1.1rem;
+    text-align: center;
+    margin: 10px 0 4px;
+}
+
+.tocGroupTitle {
+    font-size: 0.8rem;
+    opacity: 0.8;
+    padding: 4px 0 0;
+    border-bottom: 1px solid #3a4a63;
+    margin-bottom: 4px;
+}
+
+.menuEntry {
+    cursor: pointer;
+    padding: 3px 2px 3px 8px;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    line-height: 1.3;
+
+    &.active {
+        background-color: #1e4a7a;
+        color: #fff;
+    }
+
+    &.hover {
+        background-color: #2a5ea8;
+        color: white;
+    }
+}
