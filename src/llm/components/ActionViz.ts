@@ -41,7 +41,6 @@ export function defaultActionViz(): IActionVizState {
 
 const kColor = Vec4.fromHexColor('#f59e0b');
 const vColor = Vec4.fromHexColor('#d946ef');
-const expertArrowColor = Vec4.fromHexColor('#d97706');
 const posColor = Vec4.fromHexColor('#2563eb');
 const negColor = Vec4.fromHexColor('#dc2626');
 const errColor = Vec4.fromHexColor('#e11d48');
@@ -54,78 +53,19 @@ function groupColorOf(d: number) {
     return new Vec4(0.7, 0.7, 0.7, 1);
 }
 
-export function drawActionViz(state: IProgramState) {
+export function drawActionViz(state: IProgramState, isVisible?: (cubes: IBlkDef[]) => boolean) {
     let layout = state.layout;
     let m = state.jsGptModel;
     if (!layout || !m || !state.render) return;
     let viz = state.display.actionViz ?? defaultActionViz();
 
     state.render.sharedRender.activePhase = RenderPhase.Opaque;
-    drawExpertChain(state, layout, viz);
-    drawJointLinks(state, layout, m, viz);
+    drawJointLinks(state, layout, m, viz, isVisible);
     if (viz.massBars > 0) drawMassBars(state, layout, m, viz);
     if (viz.particles > 0) {
         drawParticles(state, layout, m, viz);
     } else if (viz.field > 0) {
         drawBarField(state, layout, m, viz);
-    }
-}
-
-function drawExpertChain(state: IProgramState, layout: IGptModelLayout, viz: IActionVizState) {
-    let render = state.render;
-    let n = new Vec3(0, 0, 1);
-    let w = 4;
-    let pad = 2;
-    let arrow = (src: IBlkDef, dst: IBlkDef, x: number) => {
-        let op = Math.min(src.opacity, dst.opacity);
-        if (op <= 0) return;
-        recordArrowEdge(src, dst);
-        drawArrow(render, new Vec3(x, src.y + src.dy + pad, 0), new Vec3(x, dst.y - pad, 0), w, n, expertArrowColor.mul(op), true);
-    };
-
-    // a jump between columns gets no arrow across the scene; both ends are labelled (as the
-    // trunk's wrap) and the edge is recorded so every block stays traceable
-    let wrap = (src: IBlkDef, dst: IBlkDef, outText: string, inText: string) => {
-        let op = Math.min(src.opacity, dst.opacity);
-        if (op <= 0) return;
-        recordArrowEdge(src, dst);
-        let fb = render.modelFontBuf, size = 6;
-        let color = new Vec4(0.55, 0.35, 0.15, 1).mul(op);
-        let put = (blk: IBlkDef, text: string, y: number) => {
-            let opts = { color, size, mtx: Mat4f.fromTranslation(new Vec3(blk.x + blk.dx / 2, y, blk.z + blk.dz / 2)) };
-            let tw = measureText(fb, text, opts);
-            let prev = render.sharedRender.activePhase;
-            render.sharedRender.activePhase = RenderPhase.Overlay;
-            drawText(fb, text, -tw / 2, 0, opts);
-            render.sharedRender.activePhase = prev;
-        };
-        put(src, outText, src.y + src.dy + 3 * size);
-        put(dst, inText, dst.y - size);
-    };
-
-    let els = layout.expertLayers;
-    if (els.length === 0) return;
-    let xIn = layout.expertIn.x + layout.expertIn.dx / 2;
-    arrow(layout.expertIn, els[0].attn, xIn);
-    for (let i = 0; i < els.length; i++) {
-        let { attn, out } = els[i];
-        let x = out.x + out.dx / 2;
-        arrow(attn, out, x);
-        let next = els[i + 1];
-        if (!next) continue;
-        if (Math.abs(next.attn.x - attn.x) < 1) {
-            arrow(out, next.attn, x);
-        } else {
-            wrap(out, next.attn, `continues: expert ${i + 1} (next column) ->`, `<- from expert ${i}`);
-        }
-    }
-    let nLast = els.length - 1;
-    let last = els[nLast].out;
-    let fin = layout.expertOut;
-    if (Math.abs(fin.x - last.x) < 1) {
-        arrow(last, fin, last.x + last.dx / 2);
-    } else {
-        wrap(last, fin, `continues: Expert Suffix Out (below heads) ->`, `<- from expert ${nLast}`);
     }
 }
 
@@ -155,23 +95,31 @@ function arrow3(state: IProgramState, a: Vec3, b: Vec3, thick: number, color: Ve
 }
 
 // trunk layer i's K and V groups feed expert layer i's joint attention (the suffix Q attends
-// over them); width ∝ the real share of suffix attention that lands on the prefix
-function drawJointLinks(state: IProgramState, layout: IGptModelLayout, m: IGptModelLink, viz: IActionVizState) {
-    if (viz.links <= 0 || viz.activeLayer < 0) return;
-    let i = viz.activeLayer;
-    let { attn } = layout.expertLayers[i];
-    let block = layout.blocks[i];
-    if (attn.opacity <= 0) return;
-    let mass = layerMass(m, i);
-    let pre = mass[1] + mass[2];
-    let thick = 1 + 3 * pre;
-    let end = new Vec3(attn.x - 2, attn.y + attn.dy / 2, attn.z + attn.dz / 2);
-    for (let g of block.kvGroups) {
-        for (let [src, col] of [[g.kBlock, kColor], [g.vBlock, vColor]] as [IBlkDef, Vec4][]) {
-            if (src.opacity <= 0) continue;
-            recordArrowEdge(src, attn);
-            let start = new Vec3(src.x + src.dx + 2, src.y + src.dy / 2, src.z + src.dz / 2);
-            arrow3(state, start, end, thick, col.mul(viz.links));
+// over them). Every visible layer pair shows its coupling faintly; the active pair (walkthrough
+// focus, or the layer the data pass is in) is bright, width ∝ the real prefix share of the
+// suffix attention mass
+function drawJointLinks(state: IProgramState, layout: IGptModelLayout, m: IGptModelLink, viz: IActionVizState,
+    isVisible?: (cubes: IBlkDef[]) => boolean) {
+    let flow = layout.flow;
+    for (let i = 0; i < layout.expertLayers.length; i++) {
+        let { attn } = layout.expertLayers[i];
+        let block = layout.blocks[i];
+        if (attn.opacity <= 0) continue;
+        let bright = (viz.activeLayer === i ? viz.links : 0);
+        if (flow && flow.active.has(attn)) bright = 1;
+        let visible = !isVisible || isVisible([attn, ...block.kvGroups.map(g => g.kBlock)]);
+        let faint = flow && flow.pending.has(attn) ? 0.08 : 0.22;
+        let mass = layerMass(m, i);
+        let thick = bright > 0 ? 1 + 3 * (mass[1] + mass[2]) : 0.6;
+        let end = new Vec3(attn.x - 2, attn.y + attn.dy / 2, attn.z + attn.dz / 2);
+        for (let g of block.kvGroups) {
+            for (let [src, col] of [[g.kBlock, kColor], [g.vBlock, vColor]] as [IBlkDef, Vec4][]) {
+                if (src.opacity <= 0) continue;
+                recordArrowEdge(src, attn);
+                if (!visible) continue;
+                let start = new Vec3(src.x + src.dx + 2, src.y + src.dy / 2, src.z + src.dz / 2);
+                arrow3(state, start, end, thick, col.mul(Math.max(bright, faint) * src.opacity));
+            }
         }
     }
 }

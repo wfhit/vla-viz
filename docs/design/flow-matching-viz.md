@@ -56,6 +56,7 @@ assert allclose(x, model.sample_action_chunk(enc, state75, x1)[0], atol=1e-6)
 | `E{i}.attn[K]` | 28 × 10 × 17×49 窗口 | 每步的联合注意力（后缀 Q 对 [前缀可见列窗口 ‖ 17]） |
 | `E{i}.mass[K]` | 28 × 10 × 17×4 | 状态/视觉/文本/后缀质量 |
 | `E{i}.out[K]` | 28 × 10 × 17×64 窗口 | 层输出 |
+| `E{i}.{ln1,o,res1,ln2,mlp}[K]` | 28 × 10 × 17×64 窗口 | 子层张量（AdaRMSNorm1 → o_proj → ⊕ → AdaRMSNorm2 → MLP），供逐子层的数据穿层动画；K=1 版本已在 step_130000 导出，断言 out = res1 + mlp |
 | `fm.suffix_in[K]` | 10 × 17×64 | 后缀输入 |
 | `fm.particles` | 8 × 11 × 16×23，以及 mass 8×10×28×17×4 | 8 个噪声的完整轨迹 |
 | `fm.k1` | {x0, mse} | 同一检查点上 K=1 的对照 |

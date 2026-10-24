@@ -5,6 +5,7 @@ import { IBlkDef, IGptModelLayout } from "../GptModelLayout";
 import { describeActionRow, fmtSigned, normalizeAction, unnormalizeAction } from "../actionDims";
 import { layerMass } from "../components/ActionViz";
 import { IProgramState } from "../Program";
+import { applyFlowPass, nFlowStages } from "./FlowPass";
 
 // Flow matching chapter (docs/design/flow-matching-viz.md §5, FM-0 … FM-9). Everything in the
 // scene is a real k005b tensor; the only non-model frames are the τ interpolation of FM-6/FM-8,
@@ -62,7 +63,7 @@ export function walkthrough11_FlowMatching(args: IWalkthroughArgs) {
     switch (wt.phase) {
 
     case Phase.FM_Overview: {
-        let expertCol = [L.expertIn, ...fm.cubes, ...el.flatMap(e => [e.attn, e.out, e.ada]), L.expertOut];
+        let expertCol = [L.expertIn, ...fm.cubes, ...el.flatMap(e => e.cubes), L.expertOut];
         let trunkCol = [L.residual0, ...L.blocks.flatMap(b => [b.attnResidual, b.mlpResidual])];
         let top = [L.idxObj, L.residual0, L.expertIn, ...fm.cubes, ...el.slice(0, 3).flatMap(e => [e.attn, e.out]), ...L.blocks.slice(0, 3).map(b => b.mlpResidual)];
         initialFrame(state, top, 284, 14, { fill: 1.0 });
@@ -121,7 +122,7 @@ k005b 不一样：训练和部署都固定在 t = 1，只走 1 步，即 action 
 
     case Phase.FM_Suffix: {
         initialFrame(state, [...fm.cubes, L.expertIn], 272, 10, { fill: 1.0 });
-        dimExcept(L, [...fm.cubes, L.expertIn, el[0].ada, el[0].out], 0.25);
+        dimExcept(L, [...fm.cubes, L.expertIn, el[0].ada, el[0].ada2, el[0].ln1, el[0].ln2, el[0].out], 0.25);
 
         commentary(wt, null, 0)`
 
@@ -141,7 +142,7 @@ token 1..16：x1 的每一行（一个时间步的 23 维）先经 ${c_blockRef(
         breakAfter();
         commentary(wt)`
 
-te 还有第二条去路：它是专家每一层 AdaRMSNorm 的条件。每一层旁边那根窄块就是 ${c_blockRef('γ(te)、β(te)', el[0].ada)}（4 行：输入 norm 的 γ、β，注意力后 norm 的 γ、β），箭头指向该层输出。FM-4 会展开讲。
+te 还有第二条去路：它是专家每一层 AdaRMSNorm 的条件。每一层旁边有两根窄块：${c_blockRef('γ₁β₁(te)', el[0].ada)} 调制输入 AdaRMSNorm（箭头指向 ${c_blockRef('AdaRMSNorm1', el[0].ln1)}），${c_blockRef('γ₂β₂(te)', el[0].ada2)} 调制注意力后的 AdaRMSNorm（指向 ${c_blockRef('AdaRMSNorm2', el[0].ln2)}）。FM-4 会展开讲。
 `;
         // light the chain in data-flow order
         let chainA = [fm.state75, fm.stateProjW, fm.stateEmb, L.expertIn];
@@ -152,7 +153,7 @@ te 还有第二条去路：它是专家每一层 AdaRMSNorm 的条件。每一�
         };
         if (tA.active && tA.t < 1) light(chainA, tA.t);
         if (tB.active && tB.t < 1) light(chainB, tB.t);
-        if (tB.t >= 1) el[0].ada.highlight = 0.5;
+        if (tB.t >= 1) { el[0].ada.highlight = 0.5; el[0].ada2.highlight = 0.5; }
     } break;
 
     case Phase.FM_JointAttn: {
@@ -199,7 +200,7 @@ ${c_blockRef('Joint Attn (expert i)', el[0].attn)} 就是后缀 query 那一半�
     } break;
 
     case Phase.FM_TimeMod: {
-        let around = (i: number) => [el[i].out, el[i].ada, el[i].attn];
+        let around = (i: number) => [el[i].out, el[i].ada, el[i].ada2, el[i].attn];
         initialFrame(state, around(0), 250, 10, { fill: 1.4 });
         let st = (i: number) => {
             let s = m?.fm.ada[i].meta.stats;
@@ -211,7 +212,7 @@ t 对专家的第二个作用是逐层调制。专家每层的两个 RMSNorm 都
 
 out = (1 + γ(te)) · RMSNorm(x) · w + β(te)
 
-γ、β 都是以 te 为输入的线性层。${c_blockRef('这根窄块', el[0].ada)} 就是第 0 层真实的 4 × 768 组 γ/β（图中前 64 通道），整组值域 ${st(0)}。
+γ、β 都是以 te 为输入的线性层。${c_blockRef('γ₁β₁', el[0].ada)} 与 ${c_blockRef('γ₂β₂', el[0].ada2)} 两根窄块合起来就是第 0 层真实的 4 × 768 组 γ/β（每根 2 行，图中前 64 通道），整组值域 ${st(0)}。
 `;
         breakAfter();
         let t2 = afterTime(null, 2.0);
@@ -222,6 +223,7 @@ out = (1 + γ(te)) · RMSNorm(x) · w + β(te)
         if (t2.active) frameTo(state, t2, around(nPairs - 1), 250, 10, { fill: 1.4 });
         let i = t2.t >= 1 ? nPairs - 1 : 0;
         el[i].ada.highlight = 0.5;
+        el[i].ada2.highlight = 0.5;
         viz.activeLayer = -1;
     } break;
 
@@ -230,10 +232,10 @@ out = (1 + γ(te)) · RMSNorm(x) · w + β(te)
         initialFrame(state, col1, 292, 12, { fill: 0.9 });
         commentary(wt, null, 0)`
 
-${nPairs} 个层对逐层改写 17 个后缀 token，这是深度方向的“迭代”：每一层都在上一层的残差上加一点修正。高亮依次扫过 ${c_blockRef('Expert 0 Out', el[0].out)} … ${c_blockRef(`Expert ${nPairs - 1} Out`, el[nPairs - 1].out)}。
+${nPairs} 个层对逐层改写 17 个后缀 token，这是深度方向的“迭代”：每一层都在上一层的残差上加一点修正。下面后缀流从 ${c_blockRef('Expert 0', el[0].ln1)} 一层层穿到 ${c_blockRef(`Expert ${nPairs - 1} Out`, el[nPairs - 1].out)}：每层依次点亮 AdaRMSNorm → 联合注意力（与主干同层 K/V 的耦合线同时加亮）→ o_proj → ⊕ → AdaRMSNorm → MLP → ⊕。
 `;
         breakAfter();
-        let tDepth = afterTime(null, 6.0);
+        let tDepth = afterTime(null, 14.0);
         breakAfter();
         let tMove = afterTime(null, 1.5);
         frameTo(state, tMove, [...actionBlocks, fBox], 300, 22, { fill: 1.05 });
@@ -245,9 +247,8 @@ ${nPairs} 个层对逐层改写 17 个后缀 token，这是深度方向的“迭
 右侧柱场现在显示的就是 v 本身（蓝为正、红为负，柱高为值）：每根柱子对应一个（时间步，动作维）。例如 v[0][15] = ${f3(vel?.[15])}，v[0][14] = ${f3(vel?.[14])}。v 的含义是“从 x1 指向动作 x0 的方向”的反向，即 v ≈ x1 − x0。
 `;
         if (tDepth.active && tDepth.t < 1) {
-            let k = Math.min(nL - 1, Math.floor(tDepth.t * nL));
-            el[k].out.highlight = 0.6;
-            followLayer(state, L, tDepth.t * (nL - 1), 292, 12);
+            applyFlowPass(L, tDepth.t * nL * nFlowStages);
+            followLayer(state, L, Math.max(0, tDepth.t * nL - 0.5), 292, 12);
         }
         viz.field = tMove.active ? 1 : 0;
         viz.fieldMode = 'velocity';

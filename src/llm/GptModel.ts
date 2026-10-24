@@ -168,7 +168,12 @@ export interface IBlockLayerLink {
 // One layer-pair of the action expert: its suffix output and the suffix queries'
 // share of the SAME joint attention the trunk layer runs.
 export interface IExpertLayerLink {
-    out: IRealTex;      // [n_suf, Wc] expert residual stream after layer i
+    ln1: IRealTex;      // [n_suf, Wc] input AdaRMSNorm(te) out
+    o: IRealTex;        // [n_suf, Wc] o_proj out (suffix rows of the joint attention)
+    res1: IRealTex;     // [n_suf, Wc] x_in + o_proj
+    ln2: IRealTex;      // [n_suf, Wc] post-attn AdaRMSNorm(te) out
+    mlp: IRealTex;      // [n_suf, Wc] SwiGLU MLP out
+    out: IRealTex;      // [n_suf, Wc] expert residual stream after layer i (res1 + mlp)
     attn: IRealTex;     // [n_suf, Wt + n_suf] head-mean probs: prefix window keys | suffix keys
     mass: Float32Array; // [n_suf, 4] attention mass on [state tokens | visual | text | suffix]
 }
@@ -447,6 +452,11 @@ export function createK005bGpuModel(gl: WebGL2RenderingContext, data: IK005bData
         doneProbs: a('done_probs'),
         expertIn: a('expert_in'),
         expertLayers: Array.from({ length: config.n_layer_pairs }, (_, i) => ({
+            ln1: a(`E${i}.ln1`),
+            o: a(`E${i}.o`),
+            res1: a(`E${i}.res1`),
+            ln2: a(`E${i}.ln2`),
+            mlp: a(`E${i}.mlp`),
             out: a(`E${i}.out`),
             attn: a(`E${i}.attn`),
             mass: get(A, `E${i}.attn_mass`).data,

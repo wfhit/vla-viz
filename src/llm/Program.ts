@@ -201,7 +201,7 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     drawBlockInfo(state);
     // these will get modified by the walkthrough (stored where?)
     drawAllArrows(state.render, state.layout, cubes => cubesInView(state, cubes));
-    drawActionViz(state);
+    drawActionViz(state, cubes => cubesInView(state, cubes));
 
     drawModelCard(state, state.layout, 'k005b VLA', new Vec3());
 

@@ -139,7 +139,7 @@ def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
 
     def run(xn, t=1.0):
         d = dict(tensors)
-        d["x1"] = xn[None]
+        d["noisy_action"] = xn[None]
         cap.update(i=0, mass=[])
         with torch.no_grad():
             return model(**d).action_velocity[0].float()
@@ -169,30 +169,21 @@ def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
     put("fm_mean_chunk", mean_chunk, mean_chunk, [0, 0], "mean over the K particle chunks")
 
     # counterfactual: 10 Euler steps with t patched 1→0.1 (outside the trained t=1 regime)
-    orig_suffix = model._suffix_embeds
     tv = {"t": 1.0}
-
-    def patched(s, xx):
-        b, kk, _ = xx.shape
-        tt = create_sinusoidal_pos_embedding(torch.full((b,), tv["t"]), pw, min_period=4e-3, max_period=4.0)
-        a_ = P.action_time_mlp_out(F.silu(P.action_time_mlp_in(
-            torch.cat([P.action_in_proj(xx), tt[:, None].expand(b, kk, pw)], -1))))
-        return torch.cat([P.state_proj(s)[:, None], a_], 1), tt
-
-    model._suffix_embeds = patched
     cf = []
     try:
         xc = x1.clone()
         for s in range(FM_CF_STEPS):
             tv["t"] = 1.0 - s / FM_CF_STEPS
             d = dict(tensors)
-            d["x1"] = xc[None]
+            d["noisy_action"] = xc[None].to(tensors["noisy_action"].dtype)
+            d["flow_time"] = torch.full_like(tensors["flow_time"], tv["t"])
             with torch.no_grad():
                 vc = model(**d).action_velocity[0].float()
             xc = xc - vc / FM_CF_STEPS
             cf.append({"t": tv["t"], "vnorm": float(vc.norm()), "mse": mse(xc, tg)})
     finally:
-        model._suffix_embeds = orig_suffix
+        pass
     print(f"[fm] counterfactual euler{FM_CF_STEPS} final mse {cf[-1]['mse']:.3f}", flush=True)
 
     asserts = {
@@ -286,6 +277,9 @@ def main():
 
     with torch.no_grad():
         tensors = fused_train_tensors(model, batch, image_token_id, "cpu")
+    # step_130000 is the unstamped fixed-t=1 lineage: pin t=1, so noisy_action is the noise x1
+    tensors["noisy_action"] = batch["action_noise"].to(tensors["text_embeds"].dtype)
+    tensors["flow_time"] = torch.ones_like(tensors["flow_time"])
     text_ids = batch["text_input_ids"][0]
     LT = text_ids.shape[0]
     T = 16 + LT                         # trunk (prefix) stream length
@@ -372,12 +366,48 @@ def main():
                 f"expert suffix input [state_proj(state75) | action_time_mlp(x1, t=1)] [{x.shape[0]}, {x.shape[1]}]")
     hooks.append(expert.layers[0].register_forward_pre_hook(expert_in_pre, with_kwargs=True))
 
+    # each expert layer's sublayers (TwoPhaseDecoderLayer): AdaRMSNorm → [joint attn] → o_proj →
+    # +x_in → AdaRMSNorm → SwiGLU MLP → +res1; windows are [n_suf, :WC]
+    def e2d(name, x, desc):
+        x = x[0] if x.dim() == 3 else x
+        put(name, x[:, :WC], x, [0, 0], desc)
+        return x
+
     def expert_hooks(i, layer):
+        ectx = {}
+
+        def pre(mod, a, kw):
+            x = a[0]
+            x = x[0] if x.dim() == 3 else x
+            if kw.get("compute_qkv"):
+                ectx["x_in"] = x
+        hooks.append(layer.register_forward_pre_hook(pre, with_kwargs=True))
+        def ln1_hook(m, a, o):
+            e2d(f"E{i}.ln1", o, f"expert layer {i} input AdaRMSNorm(te) out")
+        hooks.append(layer.input_layernorm.register_forward_hook(ln1_hook))
+
+        def o_hook(m, a, o):
+            out = e2d(f"E{i}.o", o, f"expert layer {i} o_proj out (suffix rows of the joint attention)")
+            res = out + ectx["x_in"]
+            e2d(f"E{i}.res1", res, f"expert layer {i} attention residual (x_in + o_proj)")
+            ectx["res1"] = res
+        hooks.append(layer.self_attn.o_proj.register_forward_hook(o_hook))
+        def ln2_hook(m, a, o):
+            e2d(f"E{i}.ln2", o, f"expert layer {i} post-attn AdaRMSNorm(te) out")
+        hooks.append(layer.post_attention_layernorm.register_forward_hook(ln2_hook))
+
+        def mlp_hook(m, a, o):
+            e2d(f"E{i}.mlp", o, f"expert layer {i} SwiGLU MLP out (down_proj)")
+            ectx["mlp"] = o[0] if o.dim() == 3 else o
+        hooks.append(layer.mlp.register_forward_hook(mlp_hook))
+
         def post(mod, a, kw, o):
             if kw.get("output_atten"):
                 x = o[0] if isinstance(o, (tuple, list)) else o
                 x = x[0] if x.dim() == 3 else x
-                put(f"E{i}.out", x[:, :WC], x, [0, 0], f"expert layer {i} suffix output (residual stream)")
+                assert torch.allclose(x.float(), (ectx["res1"] + ectx["mlp"]).float(), atol=1e-3), \
+                    f"expert layer {i}: out != res1 + mlp"
+                put(f"E{i}.out", x[:, :WC], x, [0, 0], f"expert layer {i} suffix output (res1 + MLP)")
         hooks.append(layer.register_forward_hook(post, with_kwargs=True))
 
     for i in range(NL):
@@ -456,7 +486,7 @@ def main():
     knack = out.behavior_fields.knack[0]
     done = out.behavior_fields.done[0]
     vel = out.action_velocity[0]
-    x1 = tensors["x1"][0]
+    x1 = tensors["noisy_action"][0]
     action = x1 - vel
     with torch.no_grad():  # our captured h* must reproduce the model's own head outputs
         assert torch.allclose(bf.knack_head(h_star), knack, atol=1e-4)

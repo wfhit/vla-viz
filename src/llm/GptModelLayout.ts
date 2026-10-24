@@ -820,7 +820,8 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
     });
     let fmCubes = [fmState75, fmStateProjW, fmStateEmb, fmX1, fmActionInW, fmActionEmb, fmTimeEmb,
         fmTimeInW, fmTimeHidden, fmTimeOutW, fmActionTime];
-    let expertLayers: { attn: IBlkDef, out: IBlkDef, ada: IBlkDef, layer: number }[] = [];
+    let expertLayers: { ln1: IBlkDef, ada: IBlkDef, attn: IBlkDef, o: IBlkDef, res1: IBlkDef, ln2: IBlkDef,
+        ada2: IBlkDef, mlp: IBlkDef, out: IBlkDef, layer: number, cubes: IBlkDef[] }[] = [];
     for (let i = 0; i < nBlocks; i++) {
         if (blockIdxInColumn >= blocksPerColumn) {
             blockIdxInColumn = 0;
@@ -839,31 +840,54 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
             columnWidth = (maxX - minX) + 8 * margin;
         }
         blocks.push(block);
+        // expert layer i, each sublayer level with the trunk's matching sublayer:
+        //   main column: AdaNorm1 → joint attn → o_proj ; AdaNorm2 → MLP
+        //   residual column (right): ⊕ res1, ⊕ out          γβ(te) blocks sit beside the norms
         let el = m?.expertLayers[i];
+        let xMain = expertX();
+        let xAda = xMain + nSuffix * cell + margin;
+        let xRes = xAda + 2 * cell + 2 * margin;
+        let eBlk = (name: string, y: number, xL: number, src: IRealTex | undefined) => mk({
+            t: 'i', cx: nSuffix, cy: C, cz: B, y, xL, zM: 0,
+            access: acc(src, [0, 1, 0], [1, 0, 0]),
+            dimX: DimStyle.T, dimY: DimStyle.C, name,
+        });
+        let eLn1 = eBlk(`AdaRMSNorm1 (expert ${i})`, block.ln1.lnResid.y, xMain, el?.ln1);
+        // AdaRMSNorm modulation by te: rows γ, β of the input norm / of the post-attn norm (first 64 ch)
+        let eAda = mk({
+            t: 'i', cx: 2, cy: C, cz: B, y: eLn1.y, xL: xAda, zM: 0,
+            access: acc(fmM?.ada[i], [0, 1, 0], [1, 0, 0]),
+            dimX: DimStyle.None, dimY: DimStyle.C,
+            name: `gamma/beta in (te) ${i}`,
+        });
         let eAttn = mk({
-            t: 'i', cx: nAttnKeys, cy: nSuffix, cz: B, y: block.ln1.lnResid.y,
-            xL: expertX(), zM: 0,
+            t: 'i', cx: nAttnKeys, cy: nSuffix, cz: B,
+            y: Math.max(block.heads[0].attnMtx.y, eLn1.y + eLn1.dy + margin),
+            xL: xMain, zM: 0,
             access: acc(el?.attn, [1, 0, 0], [0, 1, 0]),
             dimX: DimStyle.T, dimY: DimStyle.None,
             special: BlkSpecial.Attention,
             name: `Joint Attn (expert ${i})`,
         });
-        let eOut = mk({
-            t: 'i', cx: nSuffix, cy: C, cz: B, y: block.attnResidual.y,
-            xL: expertX(), zM: 0,
-            access: acc(el?.out, [0, 1, 0], [1, 0, 0]),
-            dimX: DimStyle.T, dimY: DimStyle.C,
-            name: `Expert ${i} Out`,
-        });
-        // AdaRMSNorm modulation of layer i by te: rows γ_in, β_in, γ_post, β_post (first 64 ch)
-        let eAda = mk({
-            t: 'i', cx: 4, cy: C, cz: B, y: eOut.y,
-            xL: eOut.x + eOut.dx + margin, zM: 0,
-            access: acc(fmM?.ada[i], [0, 1, 0], [1, 0, 0]),
+        let eO = eBlk(`o_proj (expert ${i})`, block.attnOut.y, xMain, el?.o);
+        let eRes1 = eBlk(`Attn Residual (expert ${i})`, block.attnOut.y, xRes, el?.res1);
+        let eLn2 = eBlk(`AdaRMSNorm2 (expert ${i})`, block.ln2.lnResid.y, xMain, el?.ln2);
+        let eAda2 = mk({
+            t: 'i', cx: 2, cy: C, cz: B, y: eLn2.y, xL: xAda, zM: 0,
+            access: acc(fmM?.ada[i], [0, 1, 0], [1, 0, 0, 2]),
             dimX: DimStyle.None, dimY: DimStyle.C,
-            name: `AdaNorm gamma/beta(te) ${i}`,
+            name: `gamma/beta post (te) ${i}`,
         });
-        expertLayers.push({ attn: eAttn, out: eOut, ada: eAda, layer: i });
+        let eMlp = eBlk(`MLP (expert ${i})`, block.mlpResult.y, xMain, el?.mlp);
+        let eOut = eBlk(`Expert ${i} Out`, block.mlpResidual.y, xRes, el?.out);
+        if (i === 0) {
+            let minX = Math.min(...block.cubes.map(c => c.x));
+            let maxX = Math.max(eAttn.x + eAttn.dx, eOut.x + eOut.dx);
+            columnWidth = (maxX - minX) + 8 * margin;
+        }
+        expertLayers.push({ ln1: eLn1, ada: eAda, attn: eAttn, o: eO, res1: eRes1, ln2: eLn2, ada2: eAda2,
+            mlp: eMlp, out: eOut, layer: i,
+            cubes: [eLn1, eAda, eAttn, eO, eRes1, eLn2, eAda2, eMlp, eOut] });
         blockSrc = block.mlpResidual;
         y += blockHalfMargin;
         blockIdxInColumn++;
@@ -1042,7 +1066,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
     let headCubes = [hStar, lmHeadWeight, logits, logitsAgg1, logitsAgg2, logitsSoftmax,
         doneWeight, doneLogits, doneAgg1, doneAgg2, doneProbs];
-    let expertCubes = [...fmCubes, expertIn, ...expertLayers.flatMap(e => [e.attn, e.out, e.ada])];
+    let expertCubes = [...fmCubes, expertIn, ...expertLayers.flatMap(e => e.cubes)];
     let actionCubes = [expertOut, actionWeight, actionVelocity, actionX1, actionChunk];
     cubes.push(...expertCubes);
     cubes.push(...headCubes, ...actionCubes);
@@ -1092,6 +1116,9 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         blocks,
         height: y,
         logitsTransposed: false,
+        // set by a walkthrough's data-pass animation: arrows into `active` blocks are lit,
+        // arrows into `pending` (not yet computed) blocks are faded
+        flow: null as null | { active: Set<IBlkDef>, pending: Set<IBlkDef> },
         model: gptGpuModel,
         labels: [embedLabel, ...blocks.flatMap(b => b.labels), headsLabel, actionLabel, expertLabel],
         weightCount,

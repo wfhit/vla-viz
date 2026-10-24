@@ -49,7 +49,7 @@ export function auditArrows(layout: IGptModelLayout) {
     // sources by construction: the token ids, the FM inputs, te's per-layer AdaNorm γβ, and
     // the bottom x1 which is the same tensor as the FM input x1 (a skip, not a new source)
     let srcOk = new Set<IBlkDef>([layout.idxObj, layout.fm.state75, layout.fm.x1, layout.fm.timeEmb,
-        layout.actionX1, ...layout.expertLayers.map(e => e.ada)]);
+        layout.actionX1, ...layout.expertLayers.flatMap(e => [e.ada, e.ada2])]);
     let sinkOk = new Set<IBlkDef>([layout.logitsSoftmax, layout.doneProbs, layout.actionChunk]);
     let noIn = visible.filter(c => !hasIn.has(c) && !srcOk.has(c) && c.name);
     let noOut = visible.filter(c => !hasOut.has(c) && !sinkOk.has(c) && c.name);
@@ -62,9 +62,11 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
 
     let pad = 2.0;
     let prevResid = layout.residual0;
-    let residWidth = 6;
     let weightColor = Vec4.fromHexColor('#3333aa');
     let dataColor = Vec4.fromHexColor('#33aa33');
+    let expertColor = Vec4.fromHexColor('#d97706');
+    let flowColor = Vec4.fromHexColor('#facc15');
+    let expertSet = new Set<IBlkDef>([layout.expertIn, ...layout.expertLayers.flatMap(e => e.cubes)]);
 
     arrowEdges = [];
     drawVertArrow(layout.idxObj, layout.residual0);
@@ -83,30 +85,27 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
     drawArrowBetween(fm.timeHidden, BlockPos.Left, fm.timeOutW, BlockPos.Right, 4);
     drawArrowBetween(fm.timeOutW, BlockPos.Left, fm.actionTime, BlockPos.Right, 4);
     drawArrowBetween(fm.actionTime, BlockPos.Left, layout.expertIn, BlockPos.Right, 4);
-    // te's per-layer AdaRMSNorm γβ modulate expert layer i
-    for (let e of layout.expertLayers) {
-        drawArrowBetween(e.ada, BlockPos.Left, e.out, BlockPos.Right, 3);
-    }
-
     for (let i = 0; i < layout.blocks.length; i++) {
         let block = layout.blocks[i];
         if (Math.abs(prevResid.x - block.attnResidual.x) > 1) {
             // column wrap: the stream continues at the top of the next column — no arrow
             // runs back up across the scene; both ends are labelled instead
-            recordArrowEdge(prevResid, block.attnResidual);
+            recordArrowEdge(prevResid, block.ln1.lnResid);
             drawWrapLabel(prevResid, `continues: layer ${i} (next column) ->`, 1);
             let entry = { ...block.attnResidual, y: block.ln1.lnAgg1.y - 4 * layout.margin, dy: 0 };
             drawWrapLabel(entry, `<- from layer ${i - 1}`, -1);
             prevResid = entry;
         }
-        drawVertArrow(prevResid, block.attnResidual);
         if (isVisible && !isVisible(block.cubes)) {
-            drawVertArrow(block.attnResidual, block.mlpResidual);
+            // off-screen: keep the edge record (audit) without uploading geometry
+            for (let [s, d] of [[prevResid, block.ln1.lnResid], [prevResid, block.attnResidual],
+                [block.attnResidual, block.ln2.lnResid], [block.attnResidual, block.mlpResidual]]) recordArrowEdge(s, d);
             prevResid = block.mlpResidual;
             continue;
         }
-        drawArrowResidSplit(prevResid, block.ln1.lnResid);
-        drawArrowResidSplit(prevResid, block.ln1.lnAgg2, 2);
+        // the stream enters the layer: down out of the previous ⊕, into the input RMSNorm
+        drawArrowBetween(prevResid, BlockPos.Bot, block.ln1.lnAgg2, BlockPos.Right, 2);
+        drawArrowBetween(prevResid, BlockPos.Bot, block.ln1.lnResid, BlockPos.Right);
         drawVertArrow(block.ln1.lnAgg2, block.ln1.lnResid, 2);
 
         // K/V are shared by the query heads of a kv group: one arrow per group
@@ -133,18 +132,17 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
             drawArrowBetween(head.vOutBlock, BlockPos.Bot, block.attnOut, BlockPos.Top);
         }
 
-        drawVertArrow(block.attnResidual, block.mlpResidual);
         drawHorizArrow(block.attnOut, block.attnResidual);
-
         drawHorizArrow(block.projWeight, block.attnOut);
-
         drawHorizArrow(block.ln1.lnSigma, block.ln1.lnResid);
+        // ⊕ = o_proj out + the layer input: the skip is a label, not a line past the sublayers
+        drawSkip(prevResid, block.attnResidual, '+ skip: layer input');
 
-        drawArrowResidSplit(block.attnResidual, block.ln2.lnAgg2, 2);
+        drawArrowBetween(block.attnResidual, BlockPos.Bot, block.ln2.lnAgg2, BlockPos.Right, 2);
+        drawArrowBetween(block.attnResidual, BlockPos.Bot, block.ln2.lnResid, BlockPos.Right);
         drawVertArrow(block.ln2.lnAgg2, block.ln2.lnResid, 2);
         drawHorizArrow(block.ln2.lnSigma, block.ln2.lnResid);
 
-        drawArrowResidSplit(block.attnResidual, block.ln2.lnResid);
         drawArrowBetween(block.ln2.lnResid, BlockPos.Bot, block.mlpFc, BlockPos.Right);
         drawArrowOverTo(block.ln2.lnResid, block.mlpUp);
 
@@ -156,11 +154,14 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         drawHorizArrow(block.mlpProjWeight, block.mlpResult);
         drawHorizArrow(block.mlpResult, block.mlpResidual);
         drawArrowBetween(block.mlpAct, BlockPos.Right, block.mlpResult, BlockPos.Top);
+        drawSkip(block.attnResidual, block.mlpResidual, '+ skip: attn residual');
 
         prevResid = block.mlpResidual;
     }
 
-    drawArrowResidSplit(prevResid, layout.ln_f.lnAgg2, 2);
+    drawExpertStream();
+
+    drawArrowBetween(prevResid, BlockPos.Bot, layout.ln_f.lnAgg2, BlockPos.Right, 2);
     drawArrowBetween(prevResid, BlockPos.Bot, layout.ln_f.lnResid, BlockPos.Right);
     drawVertArrow(layout.ln_f.lnAgg2, layout.ln_f.lnResid);
     drawHorizArrow(layout.ln_f.lnSigma, layout.ln_f.lnResid);
@@ -184,17 +185,96 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
     drawHorizArrow(layout.actionX1, layout.actionChunk);
 
     // straight down from src's bottom into dest's top at src's x (dest is wider)
-    function drawStraightDown(src: IBlkDef, dest: IBlkDef, width: number = 6) {
+    function drawStraightDown(src: IBlkDef, dest: IBlkDef, width: number = 6, x?: number) {
         let opacity = Math.min(src.opacity, dest.opacity);
         if (opacity === 0) return;
         recordArrowEdge(src, dest);
         let start = blockPos(src, BlockPos.Bot);
+        if (x !== undefined) start.x = x;
         let end = new Vec3(start.x, dest.y - pad, dest.z + dest.dz / 2);
-        drawArrow(state, start, end, width, new Vec3(0, 0, 1), blkColor(src).mul(opacity), true);
+        drawArrow(state, start, end, width, new Vec3(0, 0, 1), arrowColor(src, dest, opacity), true);
     }
 
     function blkColor(src: IBlkDef) {
         return src.t === 'w' ? weightColor : dataColor;
+    }
+
+    // during a data-pass animation the arrow into the block being computed is lit and arrows
+    // into blocks the pass has not reached yet are faded
+    function arrowColor(src: IBlkDef, dest: IBlkDef, opacity: number) {
+        let base = expertSet.has(src) && src.t !== 'w' ? expertColor : blkColor(src);
+        let f = layout.flow;
+        if (f) {
+            if (f.active.has(dest)) return flowColor.mul(opacity);
+            if (f.pending.has(dest)) return base.mul(opacity * 0.18);
+        }
+        return base.mul(opacity);
+    }
+
+    // a residual add: the skip operand is named on the ⊕ block instead of a line running past
+    // the sublayers (the edge is still recorded so the audit sees the dependency)
+    function drawSkip(src: IBlkDef, dest: IBlkDef, text: string) {
+        let opacity = Math.min(src.opacity, dest.opacity);
+        if (opacity === 0) return;
+        recordArrowEdge(src, dest);
+        let size = 4;
+        let f = layout.flow;
+        let a = f && f.pending.has(dest) ? 0.25 : 1;
+        let mtx = Mat4f.fromTranslation(new Vec3(dest.x + dest.dx / 2, dest.y - size * 1.4, dest.z + dest.dz / 2));
+        let col = f && f.active.has(dest) ? flowColor : new Vec4(0.2, 0.45, 0.2, 1);
+        let opts = { color: col.mul(opacity * a), size, mtx };
+        let w = measureText(state.modelFontBuf, text, opts);
+        let prev = state.sharedRender.activePhase;
+        state.sharedRender.activePhase = RenderPhase.Overlay;
+        drawText(state.modelFontBuf, text, -w / 2, 0, opts);
+        state.sharedRender.activePhase = prev;
+    }
+
+    // the action expert's suffix stream through its 28 layers; every sublayer is a block in
+    // line with the trunk sublayer it shares a row with (the joint attention couples them)
+    function drawExpertStream() {
+        let els = layout.expertLayers;
+        if (els.length === 0) return;
+        let prev: IBlkDef = layout.expertIn;
+        for (let i = 0; i < els.length; i++) {
+            let e = els[i];
+            if (i > 0 && Math.abs(els[i - 1].ln1.x - e.ln1.x) > 1) {
+                recordArrowEdge(prev, e.ln1);
+                drawWrapLabel(prev, `continues: expert ${i} (next column) ->`, 1);
+                drawWrapLabel(e.ln1, `<- from expert ${i - 1}`, -1);
+            } else if (isVisible && !isVisible(e.cubes)) {
+                recordArrowEdge(prev, e.ln1);
+            } else if (i === 0) {
+                drawStraightDown(prev, e.ln1, 4, e.ln1.x + e.ln1.dx / 2);
+            } else {
+                drawArrowOverTo(prev, e.ln1, 4);
+            }
+            if (isVisible && !isVisible(e.cubes)) {
+                for (let [s, d] of [[e.ada, e.ln1], [e.ln1, e.attn], [e.attn, e.o], [e.o, e.res1], [prev, e.res1],
+                    [e.res1, e.ln2], [e.ada2, e.ln2], [e.ln2, e.mlp], [e.mlp, e.out], [e.res1, e.out]]) recordArrowEdge(s, d);
+                prev = e.out;
+                continue;
+            }
+            drawArrowBetween(e.ada, BlockPos.Left, e.ln1, BlockPos.Right, 3);
+            drawStraightDown(e.ln1, e.attn, 4, e.ln1.x + e.ln1.dx / 2);
+            drawStraightDown(e.attn, e.o, 4, e.o.x + e.o.dx / 2);
+            drawHorizArrow(e.o, e.res1, 4);
+            drawSkip(prev, e.res1, '+ skip: x_in');
+            drawArrowOverTo(e.res1, e.ln2, 4);
+            drawArrowBetween(e.ada2, BlockPos.Left, e.ln2, BlockPos.Right, 3);
+            drawVertArrow(e.ln2, e.mlp, 4);
+            drawHorizArrow(e.mlp, e.out, 4);
+            drawSkip(e.res1, e.out, '+ skip: attn resid');
+            prev = e.out;
+        }
+        let fin = layout.expertOut;
+        if (Math.abs(fin.x - prev.x) < 1 && fin.y > prev.y) {
+            drawVertArrow(prev, fin, 4);
+        } else {
+            recordArrowEdge(prev, fin);
+            drawWrapLabel(prev, `continues: Expert Suffix Out ->`, 1);
+            drawWrapLabel(fin, `<- from expert ${els.length - 1}`, -1);
+        }
     }
 
     function drawVertArrow(src: IBlkDef, dest: IBlkDef, width: number = 6) {
@@ -213,7 +293,7 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         }
         recordArrowEdge(src, dest);
         let normal = new Vec3(0, 0, 1);
-        let color = blkColor(src).mul(opacity);
+        let color = arrowColor(src, dest, opacity);
         let start = blockPos(src, BlockPos.Bot);
         let end = blockPos(dest, BlockPos.Top);
         let yMid = dest.y - layout.margin / 2;
@@ -246,23 +326,6 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         }
     }
 
-    function drawArrowResidSplit(src: IBlkDef, dest: IBlkDef, width: number = 6) {
-        let start = blockPos(src, BlockPos.Bot);
-        let end = blockPos(dest, BlockPos.Right);
-
-        let opacity = Math.min(src.opacity, dest.opacity);
-        if (opacity === 0) {
-            return;
-        }
-        recordArrowEdge(src, dest);
-
-        let normal = new Vec3(0, 0, 1);
-        let color = blkColor(src).mul(opacity);
-
-        let mid1 = new Vec3(start.x - residWidth / 2, end.y);
-        drawArrow(state, mid1, end, width, normal, color, true);
-    }
-
     function drawArrowBotToSide(src: IBlkDef, dest: IBlkDef, offset: number, width: number = 6, forceOffset: boolean = false) {
         let start = blockPos(src, BlockPos.Bot);
         let left = start.z > dest.z + dest.dz / 2;
@@ -276,7 +339,7 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
 
 
         let normal = new Vec3(0, 0, 1);
-        let color = blkColor(src).mul(opacity);
+        let color = arrowColor(src, dest, opacity);
         let endDir = new Vec3(0, 0, left ? -1 : 1);
 
         let areClose = Math.abs(start.z - (dest.z + dest.dz / 2)) < 1.0;
@@ -298,7 +361,7 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         recordArrowEdge(src, dest);
 
         let normal = new Vec3(0, 0, 1);
-        let color = blkColor(src).mul(opacity);
+        let color = arrowColor(src, dest, opacity);
 
         if (srcPos === BlockPos.Left && destPos === BlockPos.Right) {
             // horizontal: at dest's mid-height if that lies on src, else at src's mid-height
