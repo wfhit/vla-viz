@@ -141,12 +141,22 @@ export const TocDiagram: React.FC<{
     makeEntry(Phase.Input_Detail_Transformer, '28 层主干堆叠', ['backbone']);
     makeEntry(Phase.Input_Detail_Output, 'h* 答案边界读出', ['hstar']);
 
-    entryGroups.push({ groupName: '输出头与动作专家', entries: [] });
+    entryGroups.push({ groupName: '输出头', entries: [] });
     makeEntry(Phase.Head_Knack, 'knack 分类头', ['knack']);
     makeEntry(Phase.Head_Done, 'done 头', ['done']);
-    makeEntry(Phase.Action_Expert, '动作专家', ['exIn', 'denoiser'], true);
-    makeEntry(Phase.Action_Denoise, '速度场与动作解码', ['vt', 'euler', 'chunk'], true);
     makeEntry(Phase.Harness_Law, 'Harness 法则', ['harness']);
+
+    entryGroups.push({ groupName: '动作专家与流匹配', entries: [] });
+    makeEntry(Phase.FM_Overview, '一次前向两条流', ['exIn', 'denoiser'], true);
+    makeEntry(Phase.FM_Inputs, '三个输入', ['exIn'], true);
+    makeEntry(Phase.FM_Suffix, '拼成 17 个后缀 token', ['exIn'], true);
+    makeEntry(Phase.FM_JointAttn, '联合注意力', ['denoiser'], true);
+    makeEntry(Phase.FM_TimeMod, 't 调制每层', ['denoiser'], true);
+    makeEntry(Phase.FM_Velocity, '28 层 → 速度场', ['denoiser', 'vt'], true);
+    makeEntry(Phase.FM_Euler, 'Euler 一步 = 残差', ['vt', 'euler', 'chunk'], true);
+    makeEntry(Phase.FM_Loss, '对照真值', ['chunk'], true);
+    makeEntry(Phase.FM_Particles, '8 个噪声', ['euler', 'chunk'], true);
+    makeEntry(Phase.FM_Robot, '落到机器人', ['chunk'], true);
 
     let focusEntry = entries.find(e => e.id === (hoverId ?? activeId));
     let hasFocus = isNotNil(hoverId) || isNotNil(activePhase);

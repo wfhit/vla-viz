@@ -5,7 +5,7 @@ import { IGptModelLink, IRealTex } from '../GptModel';
 import s from './HeadsOverlay.module.scss';
 import { actionGroups, describeActionRowCompact } from '../actionDims';
 
-const heads = [Phase.Head_Knack, Phase.Head_Done, Phase.Action_Expert, Phase.Action_Denoise, Phase.Harness_Law];
+const heads = [Phase.Head_Knack, Phase.Head_Done, Phase.Harness_Law];
 
 export const HeadsOverlay: React.FC = () => {
     let progState = useProgramState();
@@ -62,8 +62,7 @@ export const HeadsOverlay: React.FC = () => {
         return null;
     }
 
-    let sidePanel = wt.phase === Phase.Action_Expert || wt.phase === Phase.Action_Denoise;
-    return <div className={sidePanel ? `${s.wrap} ${s.side}` : s.wrap} ref={wrapRef}>
+    return <div className={s.wrap} ref={wrapRef}>
         <canvas ref={canvasRef} className={s.canvas} />
     </div>;
 };
@@ -260,61 +259,6 @@ function sceneDone(ctx: CanvasRenderingContext2D, m: IGptModelLink, w: number, h
     text(ctx, `预测 done=${cfg.pred_done}  ·  目标 ${cfg.sample.target_done ?? '?'}  ·  ${metaLine(wd)}`, 20, h - 18, { size: 12, color: palette.dim });
 }
 
-function sceneExpert(ctx: CanvasRenderingContext2D, m: IGptModelLink, w: number, h: number, t: number) {
-    let cfg = m.config;
-    title(ctx, w, `动作专家  d=${cfg.expert_hidden} · ${cfg.expert_heads}q/${cfg.expert_kv_heads}kv 头 · FF ${cfg.expert_intermediate}`, `${cfg.n_suffix} 个后缀 token（Q）看 ${cfg.suffix_visible_prefix} 个前缀列（视觉 + 非答案文本，不含状态 token）的 K/V，${cfg.n_layer_pairs} 个层对逐层联合注意力（专家 checkpoint 共 ${cfg.expert_n_layer} 层）；下图为专家最终输出`);
-    let eo = m.expertOut;
-    let rows = texRows(eo), cols = Math.min(64, texCols(eo));
-    let ch = Math.max(6, Math.floor((h - 150) / rows));
-    let cw2 = Math.max(4, Math.floor((w - 120) / cols));
-    heatmap(ctx, 80, 80, eo.localBuffer, rows, cols, cw2, ch, seg(t, 0.0, 0.5));
-    // suffix token 0 = action-state token, the rest = the noisy action steps fed to action_out_proj
-    for (let r = 0; r < rows; r++) {
-        let lbl = r === 0 ? '状态' : (r - 1) % 5 === 0 || r === rows - 1 ? `步${r - 1}` : '';
-        if (lbl) text(ctx, lbl, 74, 80 + r * ch + ch * 0.75, { size: 10, color: r === 0 ? palette.cyan : palette.dim, align: 'right' });
-    }
-    text(ctx, `expert_out：${rows} 个后缀 token（1 个动作状态 token + ${rows - 1} 个动作步 token）× 通道 0–${cols - 1}（共 ${eo.meta.fullShape[1]}）`, 80, 80 + rows * ch + 20, { size: 12, color: palette.dim });
-    text(ctx, metaLine(eo), 40, h - 18, { size: 12, color: palette.dim });
-}
-
-function sceneDenoise(ctx: CanvasRenderingContext2D, m: IGptModelLink, w: number, h: number, t: number) {
-    let cfg = m.config;
-    title(ctx, w, `速度场 → 动作块 ${cfg.action_horizon} 步 × ${cfg.action_dim} 维`, 'v = action_out_proj(expert_out)；一步 Euler（t: 1 → 0）：action = x1 − v；bounds99 归一化空间');
-    let H = cfg.action_horizon, D = cfg.action_dim;
-    let gap = 30;
-    let x0 = 52;
-    let cw = Math.max(4, Math.floor((w - x0 - 20 - 2 * gap) / (3 * D)));
-    let lines = describeActionRowCompact(cfg, m.actionChunk.localBuffer, 0);
-    let bottomH = 26 + lines.length * 15;
-    let ch = Math.max(5, Math.floor((h - 90 - 56 - bottomH - 10) / H));
-    let top = 90;
-    let blocks: [string, IRealTex][] = [['x1（噪声，t=1）', m.actionX1], ['v（速度场）', m.actionVelocity], ['action = x1 − v', m.actionChunk]];
-    for (let r = 0; r < H; r += 5) {
-        text(ctx, `步${r}`, x0 - 6, top + r * ch + ch * 0.8, { size: 9.5, color: palette.dim, align: 'right' });
-    }
-    blocks.forEach(([label, tex], i) => {
-        let x = x0 + i * (D * cw + gap);
-        let reveal = seg(t, 0.1 + i * 0.2, 0.3 + i * 0.2);
-        heatmap(ctx, x, top, tex.localBuffer, H, D, cw, ch, reveal);
-        text(ctx, label, x, top - 10, { size: 12.5, bold: true, color: palette.action });
-        // the 23 dims, grouped: base velocity | trunk | left arm | left gripper | right arm | right gripper
-        let gy = top + H * ch + 4;
-        actionGroups.forEach((g, gi) => {
-            ctx.fillStyle = g.color;
-            ctx.fillRect(x + g.start * cw, gy, (g.end - g.start) * cw - 1, 4);
-            text(ctx, g.label, x + (g.start + g.end) / 2 * cw, gy + 16 + (gi % 2) * 12, { size: 9.5, color: g.color, align: 'center' });
-        });
-        let st = tex.meta.stats;
-        text(ctx, `min ${fmt(st.min)}  max ${fmt(st.max)}`, x, gy + 48, { size: 10.5, color: palette.dim });
-    });
-    // real step-0 values per group, normalized (robot units)
-    let ly = h - 14 - (lines.length - 1) * 15;
-    text(ctx, '第 0 步真值（bounds99 归一化；夹爪 +1 张开 / −1 闭合）', 20, ly - 18, { size: 11, bold: true, color: palette.text });
-    lines.forEach((ln, i) => {
-        text(ctx, ln, 20, ly + i * 15, { size: 10.5, color: actionGroups[i].color });
-    });
-}
-
 function sceneHarness(ctx: CanvasRenderingContext2D, m: IGptModelLink, w: number, h: number, t: number) {
     let cfg = m.config;
     title(ctx, w, 'Harness 法则', '模型只报告 knack / done，不自行切换 subtask；切换由服务端 harness 决定');
@@ -355,8 +299,6 @@ function drawScene(ctx: CanvasRenderingContext2D, w: number, h: number, phase: P
     switch (phase) {
         case Phase.Head_Knack: sceneKnack(ctx, m, w, h, t); break;
         case Phase.Head_Done: sceneDone(ctx, m, w, h, t); break;
-        case Phase.Action_Expert: sceneExpert(ctx, m, w, h, t); break;
-        case Phase.Action_Denoise: sceneDenoise(ctx, m, w, h, t); break;
         case Phase.Harness_Law: sceneHarness(ctx, m, w, h, t); break;
     }
 }

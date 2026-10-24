@@ -294,17 +294,6 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         name: 'Embed Table',
     });
 
-    // Qwen3-VL has no learned position table (RoPE inside attention). Kept as a
-    // hidden, data-less placeholder so walkthrough code that references it compiles.
-    let posEmbedObj = mk({
-        t: 'w',
-        xL: rightX, zM: 0, y: y,
-        cx: T, cz: 1, cy: C,
-        dimX: DimStyle.T, dimY: DimStyle.C,
-        hidden: true,
-        name: '',
-    });
-
     let residual0 = mk({
         t: 'i',
         xM: 0, zM: 0, y: y,
@@ -764,7 +753,74 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         dimX: DimStyle.T, dimY: DimStyle.C,
         name: 'Expert Suffix In',
     });
-    let expertLayers: { attn: IBlkDef, out: IBlkDef, layer: number }[] = [];
+
+    // ---- flow-matching suffix inputs (model._suffix_embeds), all real tensors ----
+    // token 0: state_proj(state75); tokens 1..16: time_mlp_out(silu(time_mlp_in(cat[action_in_proj(x1), te])))
+    // The x1 chain runs right → left into expertIn's right face; the state chain sits above it.
+    let fmM = m?.fm;
+    let nState = fmM?.state75.meta.fullShape[0] ?? 75;
+    let fmY = expertIn.y;
+    let fmX = expertIn.x + expertIn.dx + margin;
+    let chainX = fmX;
+    let nextX = (cx: number) => { let x = chainX; chainX += cx * cell + margin; return x; };
+    let fmActionTime = mk({
+        t: 'i', cx: actH, cy: C, cz: B, y: fmY, xL: nextX(actH), zM: 0,
+        access: acc(fmM?.actionTime, [0, 1, 0], [1, 0, 0]),
+        dimX: DimStyle.T, dimY: DimStyle.C, name: 'time_mlp_out -> tokens 1..16',
+    });
+    let fmTimeOutW = mk({
+        t: 'w', cx: C, cy: C, cz: 1, y: fmY, xL: nextX(C), zM: 0,
+        access: acc(fmM?.timeOutW, [1, 0, 0], [0, 1, 0]),
+        dimX: DimStyle.C, dimY: DimStyle.C, name: 'action_time_mlp_out W',
+    });
+    let fmTimeHidden = mk({
+        t: 'i', cx: actH, cy: C, cz: B, y: fmY, xL: nextX(actH), zM: 0,
+        access: acc(fmM?.timeHidden, [0, 1, 0], [1, 0, 0]),
+        dimX: DimStyle.T, dimY: DimStyle.C, name: 'SiLU(time_mlp_in)',
+    });
+    let fmTimeInW = mk({
+        t: 'w', cx: C, cy: C, cz: 1, y: fmY, xL: nextX(C), zM: 0,
+        access: acc(fmM?.timeInW, [1, 0, 0], [0, 1, 0]),
+        dimX: DimStyle.C, dimY: DimStyle.C, name: 'action_time_mlp_in W',
+    });
+    let fmActionEmb = mk({
+        t: 'i', cx: actH, cy: C, cz: B, y: fmY, xL: nextX(actH), zM: 0,
+        access: acc(fmM?.actionEmb, [0, 1, 0], [1, 0, 0]),
+        dimX: DimStyle.T, dimY: DimStyle.C, name: 'action_in_proj(x1)',
+    });
+    let fmActionInW = mk({
+        t: 'w', cx: actD, cy: C, cz: 1, y: fmY, xL: nextX(actD), zM: 0,
+        access: acc(fmM?.actionInW, [1, 0, 0], [0, 1, 0]),
+        dimX: DimStyle.None, dimY: DimStyle.C, name: 'action_in_proj W',
+    });
+    let fmX1 = mk({
+        t: 'i', cx: actH, cy: actD, cz: B, y: fmY, xL: nextX(actH), zM: 0,
+        access: acc(m?.actionX1, [0, 1, 0], [1, 0, 0]),
+        dimX: DimStyle.T, dimY: DimStyle.None, name: 'x1 (noise, t=1)',
+    });
+    let fmTimeEmb = mk({
+        t: 'i', cx: C, cy: 1, cz: B, y: fmY - margin - cell, xL: fmTimeInW.x, zM: 0,
+        access: acc(fmM?.timeEmb, [0, 0, 0], [1, 0, 0]),
+        dimX: DimStyle.C, dimY: DimStyle.None, name: 'te = sincos(t=1)',
+    });
+    let fmStateEmb = mk({
+        t: 'i', cx: 1, cy: C, cz: B, y: fmY - margin - C * cell, xL: expertIn.x, zM: 0,
+        access: acc(fmM?.stateEmb, [0, 0, 0], [0, 1, 0]),
+        dimX: DimStyle.None, dimY: DimStyle.C, name: 'state_proj -> token 0',
+    });
+    let fmStateProjW = mk({
+        t: 'w', cx: nState, cy: C, cz: 1, y: fmStateEmb.y, xL: expertIn.x + cell + margin, zM: 0,
+        access: acc(fmM?.stateProjW, [1, 0, 0], [0, 1, 0]),
+        dimX: DimStyle.None, dimY: DimStyle.C, name: 'state_proj W',
+    });
+    let fmState75 = mk({
+        t: 'i', cx: nState, cy: 1, cz: B, y: fmStateEmb.y - margin - cell, xL: fmStateProjW.x, zM: 0,
+        access: acc(fmM?.state75, [0, 0, 0], [1, 0, 0]),
+        dimX: DimStyle.None, dimY: DimStyle.None, name: 'state75 (normalized)',
+    });
+    let fmCubes = [fmState75, fmStateProjW, fmStateEmb, fmX1, fmActionInW, fmActionEmb, fmTimeEmb,
+        fmTimeInW, fmTimeHidden, fmTimeOutW, fmActionTime];
+    let expertLayers: { attn: IBlkDef, out: IBlkDef, ada: IBlkDef, layer: number }[] = [];
     for (let i = 0; i < nBlocks; i++) {
         if (blockIdxInColumn >= blocksPerColumn) {
             blockIdxInColumn = 0;
@@ -799,7 +855,15 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
             dimX: DimStyle.T, dimY: DimStyle.C,
             name: `Expert ${i} Out`,
         });
-        expertLayers.push({ attn: eAttn, out: eOut, layer: i });
+        // AdaRMSNorm modulation of layer i by te: rows γ_in, β_in, γ_post, β_post (first 64 ch)
+        let eAda = mk({
+            t: 'i', cx: 4, cy: C, cz: B, y: eOut.y,
+            xL: eOut.x + eOut.dx + margin, zM: 0,
+            access: acc(fmM?.ada[i], [0, 1, 0], [1, 0, 0]),
+            dimX: DimStyle.None, dimY: DimStyle.C,
+            name: `AdaNorm gamma/beta(te) ${i}`,
+        });
+        expertLayers.push({ attn: eAttn, out: eOut, ada: eAda, layer: i });
         blockSrc = block.mlpResidual;
         y += blockHalfMargin;
         blockIdxInColumn++;
@@ -947,7 +1011,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         xR: ax - margin, zM: 0,
         access: acc(m?.actionX1, [0, 1, 0], [1, 0, 0]),
         dimX: DimStyle.T, dimY: DimStyle.None,
-        name: 'x1 (t=1 noise)',
+        name: 'x1 (skip: same input x1)',
     });
     let actionChunk = mk({
         t: 'i', cx: actH, cy: actD, cz: B, y: actY + C * cell + actD * cell + 2 * margin,
@@ -978,7 +1042,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
     let headCubes = [hStar, lmHeadWeight, logits, logitsAgg1, logitsAgg2, logitsSoftmax,
         doneWeight, doneLogits, doneAgg1, doneAgg2, doneProbs];
-    let expertCubes = [expertIn, ...expertLayers.flatMap(e => [e.attn, e.out])];
+    let expertCubes = [...fmCubes, expertIn, ...expertLayers.flatMap(e => [e.attn, e.out, e.ada])];
     let actionCubes = [expertOut, actionWeight, actionVelocity, actionX1, actionChunk];
     cubes.push(...expertCubes);
     cubes.push(...headCubes, ...actionCubes);
@@ -997,7 +1061,6 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         margin,
         idxObj,
         tokEmbedObj,
-        posEmbedObj,
         residual0,
         ln_f,
         hStar,
@@ -1019,6 +1082,9 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         actionField,
         expertIn,
         expertLayers,
+        fm: { state75: fmState75, stateProjW: fmStateProjW, stateEmb: fmStateEmb, x1: fmX1,
+            actionInW: fmActionInW, actionEmb: fmActionEmb, timeEmb: fmTimeEmb, timeInW: fmTimeInW,
+            timeHidden: fmTimeHidden, timeOutW: fmTimeOutW, actionTime: fmActionTime, cubes: fmCubes },
         expertLabel,
         embedLabel,
         headsLabel,

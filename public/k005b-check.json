@@ -34,6 +34,13 @@
   -0.9682104587554932,
   0.317506343126297
  ],
+ "FM.assert": {
+  "prefix_kv_max_abs_diff_across_seeds": 0.0,
+  "particle0_v_matches_main": 0.0,
+  "x1_minus_v_eq_chunk": 0.0,
+  "mse_chunk_a": 0.37048646807670593,
+  "mse_v_u": 0.37048646807670593
+ },
  "A.L27.mlp_resid[t=p*,c5] (window)": 9.869235038757324,
  "A.L5.q[h3,t=p*,d7] (window)": 1.660910964012146
 }

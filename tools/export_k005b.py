@@ -66,6 +66,157 @@ def stats(t):
                 std=float(finite.std()) if finite.numel() > 1 else 0.0)
 
 
+FM_SEEDS = [None] + list(range(1001, 1008))   # None = the row's own x1 (batch action_noise)
+FM_CF_STEPS = 10
+
+
+def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
+                         x1, vel, action, vis_cols, txt_cols, fba, orig_attn):
+    """The suffix inputs, per-layer AdaRMSNorm modulation, the training target, K=8 real
+    noise particles (t=1 deploy forwards) and the 10-step counterfactual summary."""
+    import torch
+    import torch.nn.functional as F
+    from model.one_step_actions import create_sinusoidal_pos_embedding
+
+    P = model.projections
+    x1, vel, action = x1.float(), vel.float(), action.float()
+    s75 = tensors["action_state"][0].float()
+    with torch.no_grad():
+        pw = P.action_time_mlp_out.in_features
+        te = create_sinusoidal_pos_embedding(torch.ones(1), pw, min_period=4e-3, max_period=4.0)[0]
+        se = P.state_proj(s75)
+        ae = P.action_in_proj(x1)
+        hid = F.silu(P.action_time_mlp_in(torch.cat([ae, te[None].expand(ae.shape[0], pw)], -1)))
+        at = P.action_time_mlp_out(hid)
+    put("fm_state75", s75, s75, [0], "action_state: bounds99-normalised state slots, zero-padded to 75")
+    put("fm_time_emb", te, te, [0], "sinusoidal time embedding of t=1 (sin|cos, 768)")
+    put("fm_state_emb", se[:WC], se, [0], "state_proj(state75) = suffix token 0")
+    put("fm_action_emb", ae[:, :WC], ae, [0, 0], "action_in_proj(x1) [16, 768]")
+    put("fm_time_mlp_hidden", hid[:, :WC], hid, [0, 0], "silu(action_time_mlp_in(cat[action_emb, te])) [16, 768]")
+    put("fm_action_time", at[:, :WC], at, [0, 0], "action_time_mlp_out(...) = suffix tokens 1..16")
+    for nm, wt in (("fm_state_proj_w", P.state_proj.weight), ("fm_action_in_w", P.action_in_proj.weight),
+                   ("fm_time_in_w", P.action_time_mlp_in.weight), ("fm_time_out_w", P.action_time_mlp_out.weight)):
+        win = wt[:WC, :WC] if wt.shape[1] > 75 else wt[:WC]
+        put(nm, win, wt, [0, 0], f"{nm[3:-2]} weight {list(wt.shape)}")
+
+    # t's per-layer modulation: (1 + γ(te))·RMSNorm(x)·w + β(te), input + post-attn norms
+    with torch.no_grad():
+        for i in range(NL):
+            lay = expert.layers[i]
+            rows = []
+            for nrm in (lay.input_layernorm, lay.post_attention_layernorm):
+                rows += [nrm.gamma(te), nrm.beta(te)]
+            ada = torch.stack(rows)               # [4, 768] γ_in | β_in | γ_post | β_post
+            put(f"E{i}.ada", ada[:, :WC], ada, [0, 0],
+                f"expert layer {i} AdaRMSNorm(t=1): rows γ_in, β_in, γ_post, β_post")
+
+    tg = batch["action_target"][0].float()
+    u = x1 - tg
+    put("fm_target", tg, tg, [0, 0], "training label a (bounds99-normalised) [16, 23]")
+    put("fm_u", u, u, [0, 0], "training target velocity u = x1 − a")
+    mse = lambda a, b: float(((a - b) ** 2).mean())
+    per_dim = ((action - tg) ** 2).mean(0)
+    put("fm_err_dim", per_dim, per_dim, [0], "per-dim MSE(chunk, a) over the 16 steps")
+
+    # K=8 real noise particles: each a full t=1 forward; capture prefix K/V + suffix mass
+    cap = {"i": 0}
+
+    def light_attn(q, k, v, mask):
+        out = orig_attn(q, k, v, mask)
+        i = cap["i"]
+        kr = k[0].repeat_interleave(H // k.shape[2], dim=1)
+        sq = torch.einsum("thd,shd->hts", q[0, T:], kr) / math.sqrt(HD)
+        ps = torch.softmax(sq.masked_fill(~mask[0, T:][None], float("-inf")), -1).mean(0)
+        cap["mass"].append(torch.stack([ps[:, :16].sum(-1), ps[:, :T][:, vis_cols].sum(-1),
+                                        ps[:, :T][:, txt_cols].sum(-1), ps[:, T:].sum(-1)], -1))
+        kv = torch.cat([k[0, :T], v[0, :T]], -1)
+        if cap["ref"] is None:
+            cap["kv"].append(kv.clone())
+        else:
+            cap["kvdiff"] = max(cap["kvdiff"], float((kv - cap["ref"][i]).abs().max()))
+        cap["i"] = i + 1
+        return out
+
+    def run(xn, t=1.0):
+        d = dict(tensors)
+        d["x1"] = xn[None]
+        cap.update(i=0, mass=[])
+        with torch.no_grad():
+            return model(**d).action_velocity[0].float()
+
+    fba.our_eager_attention_forward = light_attn
+    cap.update(ref=None, kv=[], kvdiff=0.0)
+    parts, masses = [], []
+    t1 = time.time()
+    try:
+        for k, sd in enumerate(FM_SEEDS):
+            xn = x1 if sd is None else torch.randn(x1.shape, generator=torch.Generator().manual_seed(sd))
+            vk = run(xn)
+            if k == 0:
+                cap["ref"] = cap["kv"]
+            parts.append(torch.stack([xn, vk, xn - vk]))
+            masses.append(torch.stack(cap["mass"]))
+    finally:
+        fba.our_eager_attention_forward = orig_attn
+    print(f"[fm] {len(FM_SEEDS)} particle forwards {time.time() - t1:.0f}s", flush=True)
+    Pt = torch.stack(parts)           # [K, 3, 16, 23]  x1 | v | chunk
+    Mt = torch.stack(masses)          # [K, NL, 17, 4]
+    put("fm_particles", Pt, Pt, [0, 0, 0, 0], f"K={len(FM_SEEDS)} noise particles × [x1, v, chunk=x1−v] [16, 23]")
+    put("fm_particles_mass", Mt, Mt, [0, 0, 0, 0],
+        "per-particle per-layer suffix attention mass [state | visual | text | suffix]")
+    chunks = Pt[:, 2]
+    mean_chunk = chunks.mean(0)
+    put("fm_mean_chunk", mean_chunk, mean_chunk, [0, 0], "mean over the K particle chunks")
+
+    # counterfactual: 10 Euler steps with t patched 1→0.1 (outside the trained t=1 regime)
+    orig_suffix = model._suffix_embeds
+    tv = {"t": 1.0}
+
+    def patched(s, xx):
+        b, kk, _ = xx.shape
+        tt = create_sinusoidal_pos_embedding(torch.full((b,), tv["t"]), pw, min_period=4e-3, max_period=4.0)
+        a_ = P.action_time_mlp_out(F.silu(P.action_time_mlp_in(
+            torch.cat([P.action_in_proj(xx), tt[:, None].expand(b, kk, pw)], -1))))
+        return torch.cat([P.state_proj(s)[:, None], a_], 1), tt
+
+    model._suffix_embeds = patched
+    cf = []
+    try:
+        xc = x1.clone()
+        for s in range(FM_CF_STEPS):
+            tv["t"] = 1.0 - s / FM_CF_STEPS
+            d = dict(tensors)
+            d["x1"] = xc[None]
+            with torch.no_grad():
+                vc = model(**d).action_velocity[0].float()
+            xc = xc - vc / FM_CF_STEPS
+            cf.append({"t": tv["t"], "vnorm": float(vc.norm()), "mse": mse(xc, tg)})
+    finally:
+        model._suffix_embeds = orig_suffix
+    print(f"[fm] counterfactual euler{FM_CF_STEPS} final mse {cf[-1]['mse']:.3f}", flush=True)
+
+    asserts = {
+        "prefix_kv_max_abs_diff_across_seeds": cap["kvdiff"],
+        "particle0_v_matches_main": float((Pt[0, 1] - vel).abs().max()),
+        "x1_minus_v_eq_chunk": float((x1 - vel - action).abs().max()),
+        "mse_chunk_a": mse(action, tg), "mse_v_u": mse(vel, u),
+    }
+    assert asserts["prefix_kv_max_abs_diff_across_seeds"] < 1e-4, asserts
+    assert asserts["particle0_v_matches_main"] < 1e-3, asserts
+    assert abs(asserts["mse_chunk_a"] - asserts["mse_v_u"]) < 1e-5, asserts
+    print("[fm] asserts", asserts, flush=True)
+    return {
+        "t": 1.0, "steps": 1, "min_period": 4e-3, "max_period": 4.0,
+        "seeds": [0 if s is None else s for s in FM_SEEDS], "n_particles": len(FM_SEEDS),
+        "mse": mse(action, tg), "mse_zero": float((tg ** 2).mean()),
+        "mse_mean_chunk": mse(mean_chunk, tg),
+        "mse_per_particle": [mse(c, tg) for c in chunks],
+        "particle_chunk_std": float(chunks.std(0).mean()),
+        "state_valid": int((s75 != 0).sum()),
+        "cf_euler": cf, "asserts": asserts,
+    }
+
+
 def ent(window, full_shape, offset, full_stats, desc):
     import torch
     w = window.detach().to(torch.float32).contiguous().cpu()
@@ -329,6 +480,10 @@ def main():
     put("action_velocity", vel, vel, [0, 0], "action_out_proj(expert suffix tail) [16, 23]")
     put("action_chunk", action, action, [0, 0], "decoded action = x1 − velocity [16, 23]")
 
+    # ---------------- flow matching (docs/design/flow-matching-viz.md §2) ---------------- #
+    fm = export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
+                              x1, vel, action, vis_cols, txt_cols, fba, orig_attn)
+
     # ---------------- weights ---------------- #
     W = {}
 
@@ -417,6 +572,7 @@ def main():
         },
         "pred_knack": CANONICAL_KNACKS[int(knack.argmax())],
         "pred_done": bool(int(done.argmax()) == 1),
+        "fm": fm,
     }
 
     os.makedirs(out_dir, exist_ok=True)
@@ -442,6 +598,7 @@ def main():
             "A.knack_logits": knack.tolist(),
             "A.done_logits": done.tolist(),
             "A.action_chunk[0,:5]": action[0, :5].tolist(),
+            "FM.assert": fm["asserts"],
         }
 
     def dec(e):

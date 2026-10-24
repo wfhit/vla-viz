@@ -33,6 +33,29 @@ import { Vec3, Vec3Buf, Vec4 } from "@/src/utils/vector";
 import { drawText, measureText } from "../render/fontRender";
 import { RenderPhase } from "../render/sharedRender";
 
+// Every drawn arrow records its (src, dst) block pair here; auditArrows() lists data blocks
+// that are visible but have no incoming / outgoing arrow (the "orphan" self-check).
+export interface IArrowEdge { src: IBlkDef; dst: IBlkDef; }
+export let arrowEdges: IArrowEdge[] = [];
+
+export function recordArrowEdge(src: IBlkDef, dst: IBlkDef) {
+    arrowEdges.push({ src, dst });
+}
+
+export function auditArrows(layout: IGptModelLayout) {
+    let hasIn = new Set<IBlkDef>(), hasOut = new Set<IBlkDef>();
+    for (let e of arrowEdges) { hasOut.add(e.src); hasIn.add(e.dst); }
+    let visible = layout.cubes.filter(c => c.opacity > 0 && c.t === 'i');
+    // sources by construction: the token ids, the FM inputs, te's per-layer AdaNorm γβ, and
+    // the bottom x1 which is the same tensor as the FM input x1 (a skip, not a new source)
+    let srcOk = new Set<IBlkDef>([layout.idxObj, layout.fm.state75, layout.fm.x1, layout.fm.timeEmb,
+        layout.actionX1, ...layout.expertLayers.map(e => e.ada)]);
+    let sinkOk = new Set<IBlkDef>([layout.logitsSoftmax, layout.doneProbs, layout.actionChunk]);
+    let noIn = visible.filter(c => !hasIn.has(c) && !srcOk.has(c) && c.name);
+    let noOut = visible.filter(c => !hasOut.has(c) && !sinkOk.has(c) && c.name);
+    return { noIn: noIn.map(c => c.name), noOut: noOut.map(c => c.name), edges: arrowEdges.length };
+}
+
 // `isVisible` lets the caller skip a layer's detailed arrows when the layer is off-screen
 // (28 layers × ~100 arrows otherwise dominate the per-frame geometry upload)
 export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVisible?: (cubes: IBlkDef[]) => boolean) {
@@ -43,15 +66,34 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
     let weightColor = Vec4.fromHexColor('#3333aa');
     let dataColor = Vec4.fromHexColor('#33aa33');
 
+    arrowEdges = [];
     drawVertArrow(layout.idxObj, layout.residual0);
     drawHorizArrow(layout.tokEmbedObj, layout.residual0);
-    drawArrowBetween(layout.posEmbedObj, BlockPos.Left, layout.residual0, BlockPos.Right);
+
+    // flow-matching suffix inputs → expertIn (the x1 chain runs right → left)
+    let fm = layout.fm;
+    drawVertArrow(fm.state75, fm.stateProjW, 4);
+    drawArrowBetween(fm.stateProjW, BlockPos.Left, fm.stateEmb, BlockPos.Right, 4);
+    drawStraightDown(fm.stateEmb, layout.expertIn, 4);
+    drawArrowBetween(fm.x1, BlockPos.Left, fm.actionInW, BlockPos.Right, 4);
+    drawArrowBetween(fm.actionInW, BlockPos.Left, fm.actionEmb, BlockPos.Right, 4);
+    drawArrowBetween(fm.actionEmb, BlockPos.Left, fm.timeInW, BlockPos.Right, 4);
+    drawVertArrow(fm.timeEmb, fm.timeInW, 4);
+    drawArrowBetween(fm.timeInW, BlockPos.Left, fm.timeHidden, BlockPos.Right, 4);
+    drawArrowBetween(fm.timeHidden, BlockPos.Left, fm.timeOutW, BlockPos.Right, 4);
+    drawArrowBetween(fm.timeOutW, BlockPos.Left, fm.actionTime, BlockPos.Right, 4);
+    drawArrowBetween(fm.actionTime, BlockPos.Left, layout.expertIn, BlockPos.Right, 4);
+    // te's per-layer AdaRMSNorm γβ modulate expert layer i
+    for (let e of layout.expertLayers) {
+        drawArrowBetween(e.ada, BlockPos.Left, e.out, BlockPos.Right, 3);
+    }
 
     for (let i = 0; i < layout.blocks.length; i++) {
         let block = layout.blocks[i];
         if (Math.abs(prevResid.x - block.attnResidual.x) > 1) {
             // column wrap: the stream continues at the top of the next column — no arrow
             // runs back up across the scene; both ends are labelled instead
+            recordArrowEdge(prevResid, block.attnResidual);
             drawWrapLabel(prevResid, `continues: layer ${i} (next column) ->`, 1);
             let entry = { ...block.attnResidual, y: block.ln1.lnAgg1.y - 4 * layout.margin, dy: 0 };
             drawWrapLabel(entry, `<- from layer ${i - 1}`, -1);
@@ -141,6 +183,16 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
     drawVertArrow(layout.actionVelocity, layout.actionChunk);
     drawHorizArrow(layout.actionX1, layout.actionChunk);
 
+    // straight down from src's bottom into dest's top at src's x (dest is wider)
+    function drawStraightDown(src: IBlkDef, dest: IBlkDef, width: number = 6) {
+        let opacity = Math.min(src.opacity, dest.opacity);
+        if (opacity === 0) return;
+        recordArrowEdge(src, dest);
+        let start = blockPos(src, BlockPos.Bot);
+        let end = new Vec3(start.x, dest.y - pad, dest.z + dest.dz / 2);
+        drawArrow(state, start, end, width, new Vec3(0, 0, 1), blkColor(src).mul(opacity), true);
+    }
+
     function blkColor(src: IBlkDef) {
         return src.t === 'w' ? weightColor : dataColor;
     }
@@ -159,6 +211,7 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         if (opacity === 0) {
             return;
         }
+        recordArrowEdge(src, dest);
         let normal = new Vec3(0, 0, 1);
         let color = blkColor(src).mul(opacity);
         let start = blockPos(src, BlockPos.Bot);
@@ -201,6 +254,7 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         if (opacity === 0) {
             return;
         }
+        recordArrowEdge(src, dest);
 
         let normal = new Vec3(0, 0, 1);
         let color = blkColor(src).mul(opacity);
@@ -218,6 +272,7 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         if (opacity === 0) {
             return;
         }
+        recordArrowEdge(src, dest);
 
 
         let normal = new Vec3(0, 0, 1);
@@ -240,12 +295,15 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         if (opacity === 0) {
             return;
         }
+        recordArrowEdge(src, dest);
 
         let normal = new Vec3(0, 0, 1);
         let color = blkColor(src).mul(opacity);
 
         if (srcPos === BlockPos.Left && destPos === BlockPos.Right) {
-            start.y = end.y;
+            // horizontal: at dest's mid-height if that lies on src, else at src's mid-height
+            if (end.y >= src.y && end.y <= src.y + src.dy) start.y = end.y;
+            else end.y = start.y;
         }
 
         if (srcPos === BlockPos.Right && destPos === BlockPos.Top) {

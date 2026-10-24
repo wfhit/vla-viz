@@ -21,6 +21,7 @@ import { walkthrough07_Mlp } from "./Walkthrough07_Mlp";
 import { walkthrough08_Transformer } from "./Walkthrough08_Transformer";
 import { walkthrough09_Output } from "./Walkthrough09_Output";
 import { walkthrough10_Heads } from "./Walkthrough10_Heads";
+import { walkthrough11_FlowMatching } from "./Walkthrough11_FlowMatching";
 
 
 /**
@@ -107,13 +108,26 @@ export function initWalkthrough() {
             ],
         }, {
             groupId: PhaseGroup.Heads,
-            title: '输出头与动作专家',
+            title: '输出头',
             phases: [
                 { id: Phase.Head_Knack, title: 'knack 分类头' },
                 { id: Phase.Head_Done, title: 'done 头' },
-                { id: Phase.Action_Expert, title: '动作专家' },
-                { id: Phase.Action_Denoise, title: '速度场与动作解码' },
                 { id: Phase.Harness_Law, title: 'Harness 法则' },
+            ],
+        }, {
+            groupId: PhaseGroup.FlowMatching,
+            title: '动作专家与流匹配',
+            phases: [
+                { id: Phase.FM_Overview, title: '一次前向两条流' },
+                { id: Phase.FM_Inputs, title: '三个输入' },
+                { id: Phase.FM_Suffix, title: '拼成 17 个后缀 token' },
+                { id: Phase.FM_JointAttn, title: '联合注意力' },
+                { id: Phase.FM_TimeMod, title: 't 调制每层' },
+                { id: Phase.FM_Velocity, title: '28 层 → 速度场' },
+                { id: Phase.FM_Euler, title: 'Euler 一步 = 残差' },
+                { id: Phase.FM_Loss, title: '对照真值' },
+                { id: Phase.FM_Particles, title: '8 个噪声' },
+                { id: Phase.FM_Robot, title: '落到机器人' },
             ],
         }] as IPhaseGroup[],
     };
@@ -128,6 +142,7 @@ export enum PhaseGroup {
     Intro,
     Detailed_Input,
     Heads,
+    FlowMatching,
 }
 
 export enum Phase {
@@ -149,9 +164,17 @@ export enum Phase {
     Input_Detail_Output,
     Head_Knack,
     Head_Done,
-    Action_Expert,
-    Action_Denoise,
     Harness_Law,
+    FM_Overview,
+    FM_Inputs,
+    FM_Suffix,
+    FM_JointAttn,
+    FM_TimeMod,
+    FM_Velocity,
+    FM_Euler,
+    FM_Loss,
+    FM_Particles,
+    FM_Robot,
 }
 
 export function phaseToGroup(wt: IWalkthrough) {
@@ -205,6 +228,8 @@ export function runWalkthrough(state: IProgramState, view: IRenderView) {
         walkthrough09_Output(wtArgs);
     } else if (groupId === PhaseGroup.Heads) {
         walkthrough10_Heads(wtArgs);
+    } else if (groupId === PhaseGroup.FlowMatching) {
+        walkthrough11_FlowMatching(wtArgs);
     }
 
     wt.prevPhase = wt.phase;

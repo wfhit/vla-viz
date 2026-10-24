@@ -78,6 +78,17 @@ export interface IK005bConfig {
     };
     pred_knack: string;
     pred_done: boolean;
+    fm: IK005bFmConfig;
+}
+
+// flow matching facts measured by the exporter (tools/export_k005b.py export_flow_matching)
+export interface IK005bFmConfig {
+    t: number; steps: number; min_period: number; max_period: number;
+    seeds: number[]; n_particles: number;
+    mse: number; mse_zero: number; mse_mean_chunk: number; mse_per_particle: number[];
+    particle_chunk_std: number; state_valid: number;
+    cf_euler: { t: number; vnorm: number; mse: number }[];
+    asserts: Record<string, number>;
 }
 
 export interface ITensorStats { min: number; max: number; mean: number; std: number; }
@@ -190,6 +201,28 @@ export interface IGptModelLink {
     actionX1: IRealTex;
     actionVelocity: IRealTex;
     actionChunk: IRealTex;
+    fm: IFmLink;
+}
+
+// the suffix inputs and flow-matching tensors (all real, see export_flow_matching)
+export interface IFmLink {
+    state75: IRealTex;      // [75]
+    timeEmb: IRealTex;      // [768] te of t=1
+    stateEmb: IRealTex;     // [64 of 768] suffix token 0
+    actionEmb: IRealTex;    // [16, 64 of 768]
+    timeHidden: IRealTex;   // [16, 64 of 768]
+    actionTime: IRealTex;   // [16, 64 of 768] suffix tokens 1..16
+    stateProjW: IRealTex;   // [64 of 768, 75]
+    actionInW: IRealTex;    // [64 of 768, 23]
+    timeInW: IRealTex;      // [64 of 768, 64 of 1536]
+    timeOutW: IRealTex;     // [64 of 768, 64 of 768]
+    ada: IRealTex[];        // per layer [4, 64 of 768]: γ_in, β_in, γ_post, β_post
+    target: IRealTex;       // [16, 23] label a
+    u: IRealTex;            // [16, 23] x1 − a
+    errDim: Float32Array;   // [23]
+    particles: Float32Array; // [K, 3, 16, 23] x1 | v | chunk
+    particlesMass: Float32Array; // [K, NL, 17, 4]
+    meanChunk: IRealTex;    // [16, 23]
 }
 
 export interface IK005bData {
@@ -424,6 +457,25 @@ export function createK005bGpuModel(gl: WebGL2RenderingContext, data: IK005bData
         actionX1: a('action_x1'),
         actionVelocity: a('action_velocity'),
         actionChunk: a('action_chunk'),
+        fm: {
+            state75: a('fm_state75'),
+            timeEmb: a('fm_time_emb'),
+            stateEmb: a('fm_state_emb'),
+            actionEmb: a('fm_action_emb'),
+            timeHidden: a('fm_time_mlp_hidden'),
+            actionTime: a('fm_action_time'),
+            stateProjW: a('fm_state_proj_w'),
+            actionInW: a('fm_action_in_w'),
+            timeInW: a('fm_time_in_w'),
+            timeOutW: a('fm_time_out_w'),
+            ada: Array.from({ length: config.n_layer_pairs }, (_, i) => a(`E${i}.ada`)),
+            target: a('fm_target'),
+            u: a('fm_u'),
+            errDim: get(A, 'fm_err_dim').data,
+            particles: get(A, 'fm_particles').data,
+            particlesMass: get(A, 'fm_particles_mass').data,
+            meanChunk: a('fm_mean_chunk'),
+        },
     };
 }
 

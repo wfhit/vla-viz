@@ -308,21 +308,15 @@ function constructNavLevels(model: IGptModelLayout) {
         name: "Input Embeddings",
         block: model.residual0,
     };
-    let posEmbeds: INavLevel = {
-        name: "Position Embeddings",
-        block: model.posEmbedObj,
-    };
-
-    makeRow([tokenEmbeds, inputEmbeds, posEmbeds]);
+    makeRow([tokenEmbeds, inputEmbeds]);
     makeCol([inputToks, tokenEmbeds]);
-    makeCol([inputToks, posEmbeds]);
     makeCol([inputToks, inputEmbeds]); // this one wins for inputToks->down
 
     let embeddings: INavLevel = {
         name: "Embedding",
         label: model.embedLabel,
         zoomLimit: true,
-        children: [inputToks, tokenEmbeds, inputEmbeds, posEmbeds],
+        children: [inputToks, tokenEmbeds, inputEmbeds],
     };
 
     function makeLayerNorm(name: string, ln: IGptLayerNormLayout): INavLevel {
