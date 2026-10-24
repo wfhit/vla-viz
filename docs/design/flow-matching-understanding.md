@@ -11,6 +11,15 @@ k005b 的动作头**在形式上是流匹配**：噪声 x1、速度场 v、Euler
 
 这和 π0 不同。π0 在 t∈(0,1] 上随机采样训练，推理走 10 步 Euler，并复用前缀 KV cache。
 
+> **✅ 已验证（Frank 复核源码确认，2026-10-24）：k005b 是 t=1 单步，没有多步 Euler 迭代。**
+> - 训练：`target_velocity = action_noise − action_target`，即 u = x1 − a，不对 t 采样（`BC/training/behavior_losses.py:219`）。
+> - 部署：`action = x1 − action_velocity`，一次减法（`BC/model/fused_behavior_action.py:209`，`FusedOutput` 契约）。
+> - t：`fm_time = torch.ones(b)`（`fused_behavior_action.py:270`），时间嵌入作为 `ada_cond` 送入专家各层 AdaRMSNorm（:262、:315）；专家 final norm 不受调制（`final_norm_adanorm=False`，:31、:199-202）。
+>
+> 因此**不存在可以 hook 的 Euler 迭代步**，此前"逐迭代步导出 x_t"的要求作废。真实机制只有一条单步流水线：
+>
+> **噪声板 x1 [16×23] → 专家单次前向（ada_cond = te(t=1)；28 层逐层联合注意力，K/V 来自主干前缀）→ 速度场 v [16×23] → 一次减法 x1 − v → 16×23 动作块**
+
 ---
 
 ## 1. 通用流匹配：用来对照的标准形式
@@ -212,7 +221,7 @@ for i in range(28):                         # num_layers = len(trunk.layers) = 2
 | 9 | 0.1 | 2.55 | **1.008** |
 
 **结论**：模型在 t<1 时输出的速度明显偏小，没有学过这些时刻。10 步走完 x 几乎还停在噪声附近，MSE 1.008，远差于真实单步的 0.370。
-所以**"逐迭代步真值动画"如果用改 t 的多步来做，展示的是一个失败的、非部署的过程，会误导观众**。设计上不采用多步作为主线，详见 viz 文档 §1。
+所以**"逐迭代步真值动画"如果用改 t 的多步来做，展示的是一个失败的、非部署的过程，会误导观众**。设计上不采用多步作为主线，详见 viz 文档 §1。（已验证：部署路径没有多步，见 §0 的验证框。）
 
 ---
 
