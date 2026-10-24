@@ -70,7 +70,7 @@ const nodes: INode[] = [
     { id: 'exIn', x: 214, y: 104, w: 86, h: 52, label: ['后缀 17 token', '+ 噪声 x1', '宽度 768'], color: colors.expert },
     { id: 'denoiser', x: 214, y: 172, w: 86, h: 44, label: ['动作专家', '逐层联合注意力'], color: colors.expert },
     { id: 'vt', x: 214, y: 236, w: 86, h: 24, label: ['速度 v'], color: colors.expert },
-    { id: 'euler', x: 214, y: 276, w: 86, h: 24, label: ['x1 − v'], color: colors.expert },
+    { id: 'euler', x: 214, y: 276, w: 86, h: 24, label: ['Euler: x1 − v'], color: colors.expert },
     { id: 'chunk', x: 214, y: 316, w: 86, h: 36, label: ['16×23', '动作块'], color: colors.expert },
     { id: 'harness', x: 6, y: 570, w: 294, h: 30, label: ['Harness：done→播完→刹车→切换'], color: colors.harness },
 ];
@@ -145,7 +145,7 @@ export const TocDiagram: React.FC<{
     makeEntry(Phase.Head_Knack, 'knack 分类头', ['knack']);
     makeEntry(Phase.Head_Done, 'done 头', ['done']);
     makeEntry(Phase.Action_Expert, '动作专家', ['exIn', 'denoiser'], true);
-    makeEntry(Phase.Action_Denoise, '速度与动作解码', ['vt', 'euler', 'chunk'], true);
+    makeEntry(Phase.Action_Denoise, '速度场与动作解码', ['vt', 'euler', 'chunk'], true);
     makeEntry(Phase.Harness_Law, 'Harness 法则', ['harness']);
 
     let focusEntry = entries.find(e => e.id === (hoverId ?? activeId));

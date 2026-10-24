@@ -1,6 +1,6 @@
 import { Vec3 } from "@/src/utils/vector";
 import { Phase } from "./Walkthrough";
-import { commentary, IWalkthroughArgs, setInitialCamera } from "./WalkthroughTools";
+import { commentary, IWalkthroughArgs, setInitialCamera, initialFrame } from "./WalkthroughTools";
 
 export function walkthrough09_Output(args: IWalkthroughArgs) {
     let { walkthrough: wt, state, layout } = args;
@@ -9,7 +9,7 @@ export function walkthrough09_Output(args: IWalkthroughArgs) {
         return;
     }
 
-    setInitialCamera(state, new Vec3(-20.203, 0.000, -1642.819), new Vec3(281.600, -7.900, 2.298));
+    initialFrame(state, [args.layout.ln_f.lnResid, args.layout.hStar, args.layout.lmHeadWeight, args.layout.logits, args.layout.logitsSoftmax, args.layout.doneWeight, args.layout.doneProbs], 281.6, -7.9, { fill: 1.2 });
 
     let c0 = commentary(wt, null, 0)`
 

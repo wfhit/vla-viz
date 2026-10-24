@@ -1,6 +1,6 @@
 import { Vec3 } from "@/src/utils/vector";
 import { Phase } from "./Walkthrough";
-import { commentary, IWalkthroughArgs, setInitialCamera } from "./WalkthroughTools";
+import { commentary, IWalkthroughArgs, setInitialCamera, initialFrame } from "./WalkthroughTools";
 
 export function walkthrough05_Softmax(args: IWalkthroughArgs) {
     let { walkthrough: wt, state } = args;
@@ -9,7 +9,9 @@ export function walkthrough05_Softmax(args: IWalkthroughArgs) {
         return;
     }
 
-    setInitialCamera(state, new Vec3(-24.350, 0.000, -1702.195), new Vec3(283.100, 0.600, 1.556));
+    // heads are stacked in z: frame the front-most one so no other head plate occludes it
+    let h = [...args.layout.blocks[0].heads].sort((a, b) => b.attnMtx.z - a.attnMtx.z)[0];
+    initialFrame(state, [h.qBlock, h.kBlock, h.attnMtx, h.attnMtxAgg1, h.attnMtxAgg2, h.attnMtxSm, h.vOutBlock], 290, 8, { fill: 0.85 });
 
     let c0 = commentary(wt, null, 0)`
 

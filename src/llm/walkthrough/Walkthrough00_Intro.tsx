@@ -1,5 +1,5 @@
 import { IWalkthrough, Phase } from "./Walkthrough";
-import { Colors, commentary, DimStyle, dimStyleColor, embed, ITimeInfo, IWalkthroughArgs, moveCameraTo, phaseTools, setInitialCamera } from "./WalkthroughTools";
+import { Colors, commentary, DimStyle, dimStyleColor, embed, ITimeInfo, IWalkthroughArgs, moveCameraTo, phaseTools, setInitialCamera, frameTo, initialFrame } from "./WalkthroughTools";
 import s from './Walkthrough.module.scss';
 import { Dim, Vec3, Vec4 } from "@/src/utils/vector";
 import { clamp, makeArray } from "@/src/utils/data";
@@ -57,7 +57,7 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
         return;
     }
 
-    setInitialCamera(state, new Vec3(184.744, 0.000, -636.820), new Vec3(296.000, 16.000, 13.500));
+    initialFrame(state, args.layout.cubes, 296, 16, { fill: 1.0 });
 
     let cfg = layout.shape.full;
     let c0 = commentary(wt, null, 0)`欢迎来到 _k005b_ VLA 网络的可视化讲解。k005b 把相机画面、语言指令和机器人状态放进同一个 Qwen3-VL-2B 主干，再分出输出：knack 分类头（说"现在该做什么"）、done 头，以及动作专家（生成 16×23 的动作块）。
@@ -82,7 +82,7 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
 
     let t4 = afterTime(null, 1.5, 0.4);
 
-    moveCameraTo(args.state, t4, new Vec3(5.450, 0.000, 7.913), new Vec3(281.500, 12.500, 0.519));
+    frameTo(args.state, t4, [layout.idxObj, layout.tokEmbedObj, layout.residual0], 281.5, 12.5, { fill: 1.15 });
     let t6 = afterTime(null, 1.0, 0.2);
 
     if (t4.active) {
@@ -145,7 +145,7 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
         let t_camMove = afterTime(null, 1.0, 0.5);
         let t_makeVecs = afterTime(null, 2.0, 0.5);
 
-        moveCameraTo(state, t_camMove, new Vec3(14.1, 0, -30.4), new Vec3(286, 14.5, 0.8));
+        frameTo(state, t_camMove, [layout.idxObj, layout.residual0], 286, 14.5, { fill: 1.25 });
 
         if (t_makeVecs.active) {
             let idxPos = t_makeVecs.t * nTok;
@@ -180,13 +180,13 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
     {
 
         let t_firstResid = afterTime(null, 1.0, 0.5);
-        moveCameraTo(state, t_firstResid, new Vec3(-23.160, 0.000, -128.380), new Vec3(292.300, 26.800, 2.400));
+        frameTo(state, t_firstResid, [layout.residual0, ...layout.blocks[0].ln1.cubes, ...layout.blocks[0].heads.flatMap(h => h.cubes), layout.blocks[0].attnResidual], 292.3, 26.8, { fill: 1.0 });
         let t_firstResidWalk = afterTime(null, 5.0, 0.5);
 
         let processState = processUpTo(state, t_firstResidWalk, layout.blocks[0].attnResidual);
 
         let t_firstTransformer = afterTime(null, 1.0, 0.5);
-        moveCameraTo(state, t_firstTransformer, new Vec3(-78.7, 0, -274.2), new Vec3(299.4, 14.7, 4.3));
+        frameTo(state, t_firstTransformer, layout.blocks[0].cubes, 299.4, 14.7, { fill: 1.0 });
         let t_firstTransformerWalk = afterTime(null, 3.5, 0.5);
         processUpTo(state, t_firstTransformerWalk, layout.blocks[0].mlpResidual, processState);
 
@@ -195,7 +195,7 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
         }
 
         let t_fullFrame = afterTime(null, 1.0, 0.5);
-        moveCameraTo(state, t_fullFrame, new Vec3(-147, 0, -744.1), new Vec3(298.5, 23.4, 12.2));
+        frameTo(state, t_fullFrame, layout.cubes, 298.5, 23.4, { fill: 1.0 });
         let t_fullFrameWalk = afterTime(null, 5.0, 0.5);
         processUpTo(state, t_fullFrameWalk, layout.ln_f.lnResid, processState);
 
@@ -206,7 +206,7 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
         // processUpTo(state, t_endFrameWalk, layout.ln_f.lnResid, processState);
 
         let t_output = afterTime(null, 1.0, 0.5);
-        moveCameraTo(state, t_output, new Vec3(-58.4, 0, -1654.9), new Vec3(271.3, 6.4, 1.1));
+        frameTo(state, t_output, [args.layout.ln_f.lnResid, args.layout.hStar, args.layout.lmHeadWeight, args.layout.logits, args.layout.logitsSoftmax, args.layout.doneWeight, args.layout.doneProbs], 271.3, 6.4, { fill: 1.2 });
         // moveCameraTo(state, t_output, new Vec3(-53.9, 0, -1654.1), new Vec3(270.9, 6.2, 1.1));
         let t_outputWalk = afterTime(null, 2.0, 0.5);
         processUpTo(state, t_outputWalk, layout.logitsSoftmax, processState);

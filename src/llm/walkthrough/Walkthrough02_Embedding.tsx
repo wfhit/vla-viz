@@ -6,7 +6,7 @@ import { lerp } from "@/src/utils/math";
 import { Mat4f } from "@/src/utils/matrix";
 import { Dim, Vec3, Vec4 } from "@/src/utils/vector";
 import { Phase } from "./Walkthrough";
-import { commentary, DimStyle, IWalkthroughArgs, moveCameraTo, setInitialCamera } from "./WalkthroughTools";
+import { commentary, DimStyle, IWalkthroughArgs, moveCameraTo, setInitialCamera, frameTo, initialFrame } from "./WalkthroughTools";
 import { processUpTo, startProcessBefore } from "./Walkthrough00_Intro";
 
 export function walkthrough02_Embedding(args: IWalkthroughArgs) {
@@ -17,7 +17,7 @@ export function walkthrough02_Embedding(args: IWalkthroughArgs) {
         return;
     }
 
-    setInitialCamera(state, new Vec3(15.654, 0.000, -80.905), new Vec3(287.000, 14.500, 3.199));
+    initialFrame(state, [args.layout.idxObj, args.layout.tokEmbedObj, args.layout.residual0], 287, 14.5, { fill: 1.05 });
     wt.dimHighlightBlocks = [layout.idxObj, layout.tokEmbedObj, layout.residual0];
     let cfg = layout.shape.full;
     let exampleIdx = layout.shape.T - 1;
@@ -85,7 +85,7 @@ ${c_dimRef('_T_', DimStyle.T)} 是序列长度（${c_dimRef('_时间_', DimStyle
     cleanup(t9_cleanupInstant, [t3_moveTokenEmbed, t7_addAnim, t8_placeAnim]);
     cleanup(t10_fadeAnim, [t0_splitEmbedAnim, t1_fadeEmbedAnim, t2_highlightTokenEmbed]);
 
-    moveCameraTo(state, t_moveCamera, new Vec3(7.6, 0, -33.1), new Vec3(290, 15.5, 0.8));
+    frameTo(state, t_moveCamera, [args.layout.idxObj, args.layout.residual0], 290, 15.5, { fill: 1.25 });
 
     let residCol: IBlkDef = null!;
     if ((t0_splitEmbedAnim.t > 0.0 || t10_fadeAnim.t > 0.0) && t11_fillRest.t === 0) {

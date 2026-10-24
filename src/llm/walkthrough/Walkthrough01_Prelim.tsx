@@ -1,6 +1,6 @@
 import React from 'react';
 import { Phase } from "./Walkthrough";
-import { commentary, embed, IWalkthroughArgs, setInitialCamera } from "./WalkthroughTools";
+import { commentary, embed, IWalkthroughArgs, setInitialCamera, initialFrame } from "./WalkthroughTools";
 import s from './Walkthrough.module.scss';
 import { Vec3 } from '@/src/utils/vector';
 
@@ -11,7 +11,7 @@ export function walkthrough01_Prelim(args: IWalkthroughArgs) {
         return;
     }
 
-    setInitialCamera(state, new Vec3(184.744, 0.000, -636.820), new Vec3(296.000, 16.000, 13.500));
+    initialFrame(state, args.layout.cubes, 296, 16, { fill: 1.0 });
 
     let c0 = commentary(wt, null, 0)`
 在深入细节之前，先退一步看几个基本概念。

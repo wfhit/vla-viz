@@ -7,7 +7,7 @@ import { lerp } from "@/src/utils/math";
 import { Dim, Vec3 } from "@/src/utils/vector";
 import { Phase } from "./Walkthrough";
 import { processUpTo, startProcessBefore } from "./Walkthrough00_Intro";
-import { commentary, DimStyle, IWalkthroughArgs, moveCameraTo, setInitialCamera } from "./WalkthroughTools";
+import { commentary, DimStyle, IWalkthroughArgs, moveCameraTo, setInitialCamera, frameTo, initialFrame } from "./WalkthroughTools";
 
 export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
     let { walkthrough: wt, layout, state, tools: { afterTime, c_str, c_blockRef, c_dimRef, breakAfter, cleanup } } = args;
@@ -19,7 +19,7 @@ export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
 
     let ln = layout.blocks[0].ln1;
 
-    setInitialCamera(state, new Vec3(-6.680, 0.000, -65.256), new Vec3(281.000, 9.000, 2.576));
+    initialFrame(state, [args.layout.residual0, ...args.layout.blocks[0].ln1.cubes], 281, 9, { fill: 1.0 });
     wt.dimHighlightBlocks = [layout.residual0, ...ln.cubes];
 
     commentary(wt, null, 0)`
@@ -85,7 +85,7 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
     let t_runAggFull = afterTime(null, 2.0);
     let t_runNormFull = afterTime(null, 6.0);
 
-    moveCameraTo(state, t_moveCamera, new Vec3(21.2, 0, -102.9), new Vec3(281.5, 11, 1.7));
+    frameTo(state, t_moveCamera, args.layout.blocks[0].ln1.cubes, 281.5, 11, { fill: 1.1 });
 
     let exampleIdx = 3;
     let ln1 = layout.blocks[0].ln1;
@@ -118,7 +118,7 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
         inputBlock.highlight = lerp(0.3, 0.0, t_moveInputEmbed.t);
     }
 
-    moveCameraTo(state, t_moveCameraClose, new Vec3(-14.1, 0, -187.1), new Vec3(270, 4, 0.7));
+    frameTo(state, t_moveCameraClose, [args.layout.blocks[0].ln1.lnAgg1, args.layout.blocks[0].ln1.lnAgg2, args.layout.blocks[0].ln1.lnResid], 270, 4, { fill: 1.2 });
 
     let splitAmt = lerp(0.0, 2.0, t_focusColumn.t);
     let splitPos = exampleIdx + 0.5;

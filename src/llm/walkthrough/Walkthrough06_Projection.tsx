@@ -1,6 +1,6 @@
 import { Vec3 } from "@/src/utils/vector";
 import { Phase } from "./Walkthrough";
-import { commentary, DimStyle, IWalkthroughArgs, moveCameraTo, setInitialCamera } from "./WalkthroughTools";
+import { commentary, DimStyle, IWalkthroughArgs, moveCameraTo, setInitialCamera, frameTo, initialFrame } from "./WalkthroughTools";
 import { lerp, lerpSmoothstep } from "@/src/utils/math";
 import { processUpTo, startProcessBefore } from "./Walkthrough00_Intro";
 
@@ -11,7 +11,7 @@ export function walkthrough06_Projection(args: IWalkthroughArgs) {
         return;
     }
 
-    setInitialCamera(state, new Vec3(-73.167, 0.000, -270.725), new Vec3(293.606, 2.613, 1.366));
+    initialFrame(state, [...args.layout.blocks[0].heads.map(h => h.vOutBlock), args.layout.blocks[0].projWeight, args.layout.blocks[0].attnOut], 293.6, 2.6, { fill: 1.05 });
     let block = layout.blocks[0];
     wt.dimHighlightBlocks = [...block.heads.map(h => h.vOutBlock), block.projBias, block.projWeight, block.attnOut];
 
@@ -97,7 +97,7 @@ k005b 中 head 数 × head 维度（16 × 128）恰好等于 ${c_dimRef('C = 204
         processUpTo(state, t_process, block.attnOut, processInfo);
     }
 
-    moveCameraTo(state, t_zoomOut, new Vec3(-8.304, 0.000, -175.482), new Vec3(293.606, 2.623, 2.618));
+    frameTo(state, t_zoomOut, [...args.layout.blocks[0].heads.map(h => h.vOutBlock), args.layout.blocks[0].projWeight, args.layout.blocks[0].attnOut, args.layout.blocks[0].attnResidual, args.layout.residual0], 293.6, 2.6, { fill: 1.0 });
 
     if (t_processResid.active) {
         processUpTo(state, t_processResid, block.attnResidual, processInfo);

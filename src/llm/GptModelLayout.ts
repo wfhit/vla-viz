@@ -370,6 +370,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
     }
 
     let lnLeftX = leftX - (T + 2) * cell - 3 * margin;
+    let resMidX = 0;
 
     function createLayer(src: IBlkDef, target: IBlockLayerLink | undefined) {
         let ln1 = createLn(0, src, target?.ln_1);
@@ -378,6 +379,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         let qkvMargin = 1 * margin + (C * cell) / 16;
         let slot = B * cell + qkvMargin;           // z pitch inside a kv group
         let groupWidth = (groupSize + 2) * slot + interGroupMargin;
+        let groupSlots = groupSize + 2;
 
         let attn1Y = y + A * cell + margin;
         let vOutY = attn1Y + T * cell + margin;
@@ -388,8 +390,8 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
         // z order inside group g: q(2g) | K_g | V_g | q(2g+1)
         let groupZ0 = (g: number) => groupWidth * g - (nKvHeads - 1) * groupWidth / 2;
-        let slotZ = (g: number, s: number) => groupZ0(g) + (s - (groupSize + 1) / 2) * slot;
-        let qSlot = (j: number) => j === 0 ? 0 : groupSize + 1 - (groupSize - j); // 0, 3 for groupSize 2
+        let slotZ = (g: number, s: number) => groupZ0(g) + (s - (groupSlots - 1) / 2) * slot;
+        let qSlot = (j: number) => j === 0 ? 0 : j + 2; // q | K | V | q … (slots 0, 3, 4, …)
 
         let groups = [];
         for (let g = 0; g < nKvHeads; g++) {
@@ -595,7 +597,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
         let attnResidual = mk({
             t: 'i', cx: T, cz: B, cy: C, y: vFinalZ,
-            xM: 0, zM: 0,
+            xM: resMidX, zM: 0,
             access: acc(target?.attnResid, [0, 1, 0], [1, 0, 0]),
             deps: { add: [[attnOut, 'xy'], [src, 'xy']] },
             dimX: DimStyle.T, dimY: DimStyle.C,
@@ -690,7 +692,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
         let mlpResidual = mk({
             t: 'i', cx: T, cz: B, cy: C, y: y,
-            xM: 0, zM: 0,
+            xM: resMidX, zM: 0,
             access: acc(target?.mlpResid, [0, 1, 0], [1, 0, 0]),
             deps: { add: [[mlpResult, 'xy'], [attnResidual, 'xy']] },
             dimX: DimStyle.T, dimY: DimStyle.C,
@@ -750,6 +752,19 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
     let blocks: ReturnType<typeof createLayer>[] = [];
     let blockSrc = residual0;
+
+    // the action expert runs beside the trunk: layer-pair i = trunk layer i + expert layer i,
+    // sharing ONE attention. Its column sits just right of the trunk's residual stream.
+    let nAttnKeys = T + nSuffix;
+    let expertX = () => resMidX + T * cell / 2 + 2 * margin;
+    let expertIn = mk({
+        t: 'i', cx: nSuffix, cy: C, cz: B, y: residual0.y,
+        xL: expertX(), zM: 0,
+        access: acc(m?.expertIn, [0, 1, 0], [1, 0, 0]),
+        dimX: DimStyle.T, dimY: DimStyle.C,
+        name: 'Expert Suffix In',
+    });
+    let expertLayers: { attn: IBlkDef, out: IBlkDef, layer: number }[] = [];
     for (let i = 0; i < nBlocks; i++) {
         if (blockIdxInColumn >= blocksPerColumn) {
             blockIdxInColumn = 0;
@@ -757,6 +772,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
             lnLeftX += columnWidth;
             leftX += columnWidth;
             rightX += columnWidth;
+            resMidX += columnWidth;
         }
 
         y += blockHalfMargin;
@@ -767,6 +783,23 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
             columnWidth = (maxX - minX) + 8 * margin;
         }
         blocks.push(block);
+        let el = m?.expertLayers[i];
+        let eAttn = mk({
+            t: 'i', cx: nAttnKeys, cy: nSuffix, cz: B, y: block.ln1.lnResid.y,
+            xL: expertX(), zM: 0,
+            access: acc(el?.attn, [1, 0, 0], [0, 1, 0]),
+            dimX: DimStyle.T, dimY: DimStyle.None,
+            special: BlkSpecial.Attention,
+            name: `Joint Attn (expert ${i})`,
+        });
+        let eOut = mk({
+            t: 'i', cx: nSuffix, cy: C, cz: B, y: block.attnResidual.y,
+            xL: expertX(), zM: 0,
+            access: acc(el?.out, [0, 1, 0], [1, 0, 0]),
+            dimX: DimStyle.T, dimY: DimStyle.C,
+            name: `Expert ${i} Out`,
+        });
+        expertLayers.push({ attn: eAttn, out: eOut, layer: i });
         blockSrc = block.mlpResidual;
         y += blockHalfMargin;
         blockIdxInColumn++;
@@ -840,7 +873,8 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
     });
 
     // done head, to the right of the residual column
-    let doneX = rightX;
+    // done head right of the expert column (the expert chain runs straight down to the action group)
+    let doneX = expertX() + nAttnKeys * cell + 2 * margin;
     let doneWeight = mk({
         t: 'w', cx: C, cy: nDone, cz: 1, y: knackY,
         xL: doneX + 2 * cell + margin, zM: 0,
@@ -885,23 +919,24 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
     // action expert suffix → action_out_proj → velocity; action = x1 − velocity
     let actY = headsBottom + 2 * margin;
+    let ax = expertX();
     let expertOut = mk({
         t: 'i', cx: nSuffix, cy: C, cz: B, y: actY,
-        xM: 0, zM: 0,
+        xL: ax, zM: 0,
         access: acc(m?.expertOut, [0, 1, 0], [1, 0, 0]),
         dimX: DimStyle.T, dimY: DimStyle.C,
         name: 'Expert Suffix Out',
     });
     let actionWeight = mk({
         t: 'w', cx: C, cy: actD, cz: 1, y: actY + C * cell + margin,
-        xR: -nSuffix * cell / 2 - margin, zM: 0,
+        xR: ax - margin, zM: 0,
         access: acc(m?.actionWeight, [1, 0, 0], [0, 1, 0]),
         dimX: DimStyle.C, dimY: DimStyle.None,
         name: 'action_out_proj Weights',
     });
     let actionVelocity = mk({
         t: 'i', cx: actH, cy: actD, cz: B, y: actY + C * cell + margin,
-        xL: -nSuffix * cell / 2 + cell, zM: 0,
+        xL: ax + cell, zM: 0,
         access: acc(m?.actionVelocity, [0, 1, 0], [1, 0, 0]),
         deps: { dot: [[actionWeight, 'iy'], [expertOut, 'xi']], dotLen: C },
         dimX: DimStyle.T, dimY: DimStyle.None,
@@ -909,14 +944,14 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
     });
     let actionX1 = mk({
         t: 'i', cx: actH, cy: actD, cz: B, y: actY + C * cell + actD * cell + 2 * margin,
-        xR: -nSuffix * cell / 2 - margin, zM: 0,
+        xR: ax - margin, zM: 0,
         access: acc(m?.actionX1, [0, 1, 0], [1, 0, 0]),
         dimX: DimStyle.T, dimY: DimStyle.None,
         name: 'x1 (t=1 noise)',
     });
     let actionChunk = mk({
         t: 'i', cx: actH, cy: actD, cz: B, y: actY + C * cell + actD * cell + 2 * margin,
-        xL: -nSuffix * cell / 2 + cell, zM: 0,
+        xL: ax + cell, zM: 0,
         access: acc(m?.actionChunk, [0, 1, 0], [1, 0, 0]),
         deps: { add: [[actionX1, 'xy'], [actionVelocity, 'xy']] },
         dimX: DimStyle.T, dimY: DimStyle.None,
@@ -925,12 +960,27 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
     y = actY + C * cell + 2 * actD * cell + 3 * margin;
 
+    // 3D bar field of the action chunk (drawn by components/ActionViz.ts): dims along x,
+    // the 16 steps receding along z, bar height = real value
+    let barPitch = 4;
+    let actionField = {
+        x: actionChunk.x + actionChunk.dx + 4 * margin,
+        y: actionChunk.y + actionChunk.dy,
+        z: -actH * barPitch / 2,
+        pitch: barPitch,
+        heightScale: 12,
+        nSteps: actH,
+        nDims: actD,
+    };
+
     let full = shape.full;
     let weightCount = full ? full.n_params : 0;
 
     let headCubes = [hStar, lmHeadWeight, logits, logitsAgg1, logitsAgg2, logitsSoftmax,
         doneWeight, doneLogits, doneAgg1, doneAgg2, doneProbs];
+    let expertCubes = [expertIn, ...expertLayers.flatMap(e => [e.attn, e.out])];
     let actionCubes = [expertOut, actionWeight, actionVelocity, actionX1, actionChunk];
+    cubes.push(...expertCubes);
     cubes.push(...headCubes, ...actionCubes);
 
     for (let i = 0; i < cubes.length; i++) {
@@ -939,6 +989,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
     let headsLabel = mkLabel(1.0, headCubes);
     let actionLabel = mkLabel(1.0, actionCubes);
+    let expertLabel = mkLabel(1.0, expertCubes);
 
     return {
         cubes,
@@ -965,6 +1016,10 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         actionVelocity,
         actionX1,
         actionChunk,
+        actionField,
+        expertIn,
+        expertLayers,
+        expertLabel,
         embedLabel,
         headsLabel,
         actionLabel,
@@ -972,7 +1027,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         height: y,
         logitsTransposed: false,
         model: gptGpuModel,
-        labels: [embedLabel, ...blocks.flatMap(b => b.labels), headsLabel, actionLabel],
+        labels: [embedLabel, ...blocks.flatMap(b => b.labels), headsLabel, actionLabel, expertLabel],
         weightCount,
         shape,
         extraSources: {

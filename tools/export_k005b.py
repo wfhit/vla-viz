@@ -47,6 +47,13 @@ WD = 32   # head dims [0, WD)
 WF = 64   # SwiGLU intermediate channels [0, WF)
 WV = 64   # embed-table rows, starting at the h* token's id
 
+# data/schema.py: base 3 + trunk 4 + L-arm 7 + L-grip 1 + R-arm 7 + R-grip 1 (dims 0-2 are
+# velocities, 3-22 positions; fused_serve closes a gripper on negative values)
+ACTION_DIM_NAMES = (["base_vx", "base_vy", "base_yaw"]
+                    + [f"trunk_{i}" for i in range(1, 5)]
+                    + [f"L_arm_j{i}" for i in range(1, 8)] + ["L_gripper"]
+                    + [f"R_arm_j{i}" for i in range(1, 8)] + ["R_gripper"])
+
 
 def stats(t):
     import torch
@@ -206,6 +213,25 @@ def main():
     hooks.append(expert.norm.register_forward_hook(
         lambda m, a, o: priv.__setitem__("expert_out", o[0])))
 
+    # the action expert's own stream: suffix in, and each run layer's suffix output
+    def expert_in_pre(mod, a, kw):
+        if kw.get("compute_qkv"):
+            x = a[0][0]
+            put("expert_in", x[:, :WC], x, [0, 0],
+                f"expert suffix input [state_proj(state75) | action_time_mlp(x1, t=1)] [{x.shape[0]}, {x.shape[1]}]")
+    hooks.append(expert.layers[0].register_forward_pre_hook(expert_in_pre, with_kwargs=True))
+
+    def expert_hooks(i, layer):
+        def post(mod, a, kw, o):
+            if kw.get("output_atten"):
+                x = o[0] if isinstance(o, (tuple, list)) else o
+                x = x[0] if x.dim() == 3 else x
+                put(f"E{i}.out", x[:, :WC], x, [0, 0], f"expert layer {i} suffix output (residual stream)")
+        hooks.append(layer.register_forward_hook(post, with_kwargs=True))
+
+    for i in range(NL):
+        expert_hooks(i, expert.layers[i])
+
     orig_attn = fba.our_eager_attention_forward
     scale = 1.0 / math.sqrt(HD)
 
@@ -236,8 +262,33 @@ def main():
         put(f"L{i}.attn_out", o[tw, :, :WD].permute(1, 0, 2), o.permute(1, 0, 2), [0, t0w, 0],
             f"layer {i} per-head attention output Σp·V [head, token, dim]")
         priv[f"p_star_probs_{i}"] = p[:, -1].clone()
+        # the expert's half of the SAME shared attention: suffix queries over all keys
+        L = q.shape[1]
+        sq = torch.einsum("thd,shd->hts", q[0, T:], kr) * scale      # [H, n_suf, L]
+        sm = mask[0, T:]
+        sq = sq.masked_fill(~sm[None], float("-inf"))
+        ps = torch.softmax(sq, dim=-1)
+        vr = v[0].repeat_interleave(H // v.shape[2], dim=1)
+        o_suf = torch.einsum("hts,shd->thd", ps, vr)
+        assert torch.allclose(o_suf, out[0, T:].view(L - T, H, HD), atol=1e-4), "suffix attention mismatch"
+        pm = ps.mean(0)                                                # [n_suf, L] head-mean
+        put(f"E{i}.attn", torch.cat([pm[:, tw], pm[:, T:]], dim=-1), pm, [0, t0w],
+            f"layer pair {i}: expert suffix queries' head-mean attention; cols = prefix window "
+            f"[{t0w},{p_star}] then the {L - T} suffix keys; stats over [n_suf, L_joint]")
+        mass = torch.stack([pm[:, :16].sum(-1), pm[:, :T][:, vis_cols].sum(-1),
+                            pm[:, :T][:, txt_cols].sum(-1), pm[:, T:].sum(-1)], dim=-1)
+        put(f"E{i}.attn_mass", mass, mass, [0, 0],
+            f"layer pair {i}: suffix attention mass on [state tokens | visual | text | suffix]")
+        if i == 0:
+            priv["suffix_visible"] = int(sm[0, :T].sum())
+            priv["suffix_visible_vis"] = int(sm[0, :T][vis_cols].sum())
         return out
 
+    is_vis = torch.zeros(T, dtype=torch.bool)
+    is_vis[16:] = tensors["visual_pos_mask"][0].bool().cpu()
+    vis_cols = is_vis
+    txt_cols = ~is_vis
+    txt_cols[:16] = False
     fba.our_eager_attention_forward = attn_capture
     t1 = time.time()
     with torch.no_grad():
@@ -317,6 +368,9 @@ def main():
         wput("action_b", aop.bias, aop.bias, [0], "action_out_proj bias")
 
     # ---------------- config / sample metadata ---------------- #
+    from data.schema import ACTION_DIM
+    from vla.prepare_input import load_norm_stats
+    norm_stats = load_norm_stats()["action.r1pro"]   # the serve path's bounds99 stats
     n_params = sum(p.numel() for p in model.parameters())
     n_trunk = sum(p.numel() for p in trunk.parameters())
     n_expert = sum(p.numel() for p in expert.parameters())
@@ -342,7 +396,16 @@ def main():
         "window_token_ids": win_ids,
         "window_tokens": [proc.tokenizer.decode([t]) for t in win_ids],
         "knack_names": list(CANONICAL_KNACKS), "done_names": ["NOT_DONE", "DONE"],
+        # the expert checkpoint carries more layers than the trunk; the forward runs
+        # len(trunk.layers) layer-pairs (QwenvlWithExpertModel.forward), the rest are unused
+        "expert_n_layer": len(expert.layers), "n_layer_pairs": NL,
+        # §3.2 mask: suffix queries see the suffix + valid non-answer prompt columns,
+        # never the 16 behavior-state columns
+        "suffix_visible_prefix": priv["suffix_visible"], "suffix_visible_visual": priv["suffix_visible_vis"],
         "action_dim": int(vel.shape[-1]), "action_horizon": int(vel.shape[0]),
+        "action_dim_names": ACTION_DIM_NAMES,
+        "action_q01": [float(x) for x in norm_stats["q01"][:ACTION_DIM]],
+        "action_q99": [float(x) for x in norm_stats["q99"][:ACTION_DIM]],
         "n_params": n_params, "n_params_trunk": n_trunk, "n_params_expert": n_expert,
         "n_params_vision": n_vision,
         "sample": {

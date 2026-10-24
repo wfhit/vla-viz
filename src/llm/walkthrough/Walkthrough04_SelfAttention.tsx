@@ -12,7 +12,7 @@ import { Dim, Vec3, Vec4 } from "@/src/utils/vector";
 import { Phase } from "./Walkthrough";
 import { processUpTo, startProcessBefore } from "./Walkthrough00_Intro";
 import { embedInline } from "./Walkthrough01_Prelim";
-import { Colors, commentary, DimStyle, dimStyleColor, IWalkthroughArgs, moveCameraTo, setInitialCamera } from "./WalkthroughTools";
+import { Colors, commentary, DimStyle, dimStyleColor, IWalkthroughArgs, moveCameraTo, setInitialCamera, frameTo, initialFrame } from "./WalkthroughTools";
 import { BlockText } from '../components/CommentaryHelpers';
 import clsx from 'clsx';
 
@@ -27,7 +27,7 @@ export function walkthrough04_SelfAttention(args: IWalkthroughArgs) {
     let block0 = layout.blocks[0];
     let head2 = block0.heads[2];
 
-    setInitialCamera(state, new Vec3(-125.258, 0.000, -178.805), new Vec3(294.000, 12.800, 2.681));
+    initialFrame(state, [block0.ln1.lnResid, ...block0.heads.flatMap(h => h.cubes)], 294, 12.8, { fill: 1.0 });
     wt.dimHighlightBlocks = [layout.residual0, block0.ln1.lnResid, ...head2.cubes];
 
     commentary(wt, null, 0)`
@@ -200,8 +200,8 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 // Running this process for all the columns produces our self-attention matrix, which is a square
 // matrix, T x T, and due to the causal nature of the process, is a lower triangular matrix.
 
-    moveCameraTo(state, t_moveCamera, new Vec3(-192.1, 0, -214.8), new Vec3(293.5, 49, 2.3));
-    moveCameraTo(state, t_moveCamera2, new Vec3(-92.7, 0, -219), new Vec3(286, 12.8, 1.4));
+    frameTo(state, t_moveCamera, block0.heads.flatMap(h => h.cubes), 293.5, 49, { fill: 1.0 });
+    frameTo(state, t_moveCamera2, [block0.ln1.lnResid, ...head2.cubes], 286, 12.8, { fill: 1.1 });
 
 
     if (t_highlightHeads.t > 0.0) {
@@ -233,8 +233,8 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
     focusSelfAttentionHead(args, t_focusHeads);
 
-    moveCameraTo(state, t_dotCellsZoomClose, new Vec3(-53, 0, -155.5), new Vec3(274.1, 8.5, 0.4));
-    moveCameraTo(state, t_dotCellsZoomOut, new Vec3(-92.7, 0, -219), new Vec3(286, 12.8, 1.4));
+    frameTo(state, t_dotCellsZoomClose, [block0.ln1.lnResid, head2.qBlock], 274.1, 8.5, { fill: 1.1 });
+    frameTo(state, t_dotCellsZoomOut, [block0.ln1.lnResid, ...head2.cubes], 286, 12.8, { fill: 1.1 });
 
     let exampleIdx = 3;
     if (t_focusQCol.t > 0) {
@@ -414,7 +414,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
         head2.vBlock.opacity = 1.0;
     }
 
-    moveCameraTo(state, t_focusQKVCols, new Vec3(-91.5, 0, -227.9), new Vec3(270.1, -38.4, 0.8));
+    frameTo(state, t_focusQKVCols, [head2.qBlock, head2.kBlock, head2.vBlock, head2.attnMtx, head2.attnMtxSm], 270.1, -38.4, { fill: 1.15 });
 
     if (t_processAttnRow.t > 0 && t_processRemain.t <= 0) {
         let aIdx = clamp(Math.floor(t_processAttnRow.t * (attnExampleIdx + 1)), 0, attnExampleIdx);
@@ -457,7 +457,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
     // Do the attn_sm times V vectors to get the output vectors animation
     {
-        moveCameraTo(state, t_zoomVOutput, new Vec3(-91.9, 0, -267.9), new Vec3(270.1, -7.5, 0.7));
+        frameTo(state, t_zoomVOutput, [head2.vBlock, head2.attnMtxSm, head2.vOutBlock], 270.1, -7.5, { fill: 1.2 });
 
         let topLeftPos = getBlkDimensions(head2.vBlock).tl.add(new Vec3(0, 4, 5));
         let midLeftPos = topLeftPos.add(new Vec3(0, layout.cell * (A / 2 - 0.5)));
@@ -545,7 +545,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
         }
     }
 
-    moveCameraTo(state, t_processRemainZoom, new Vec3(-99.7, 0, -230.1), new Vec3(275.6, -4.4, 1.2));
+    frameTo(state, t_processRemainZoom, head2.cubes, 275.6, -4.4, { fill: 1.1 });
 
     if (t_processRemain.t > 0) {
         for (let blk of [head2.attnMtx, head2.attnMtxSm, head2.attnMtxAgg1, head2.attnMtxAgg2, head2.vOutBlock]) {

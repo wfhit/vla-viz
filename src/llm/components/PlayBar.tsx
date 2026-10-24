@@ -20,7 +20,8 @@ function commentaryToText(c: ICommentary) {
             out += v.str;
         }
     }
-    return out.replace(/[_*]/g, '').replace(/\s+/g, ' ').trim();
+    // strip _emphasis_ / *bold* markers only; keep underscores inside identifiers like base_vx
+    return out.replace(/(^|[^A-Za-z0-9])_([^_]+?)_(?![A-Za-z0-9])/g, '$1$2').replace(/\*/g, '').replace(/\s+/g, ' ').trim();
 }
 
 export const PlayBar: React.FC = () => {

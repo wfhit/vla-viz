@@ -1,7 +1,7 @@
 import React from "react";
 import { Dim, Vec3 } from "@/src/utils/vector";
 import { Phase } from "./Walkthrough";
-import { commentary, DimStyle, dimStyleColor, IWalkthroughArgs, setInitialCamera } from "./WalkthroughTools";
+import { commentary, DimStyle, dimStyleColor, IWalkthroughArgs, setInitialCamera, initialFrame } from "./WalkthroughTools";
 import { dimProps, findSubBlocks, splitGrid } from "../Annotations";
 import { lerp } from "@/src/utils/math";
 import { IBlkDef, getBlkDimensions } from "../GptModelLayout";
@@ -19,7 +19,7 @@ export function walkthrough07_Mlp(args: IWalkthroughArgs) {
 
     let block = layout.blocks[0];
 
-    setInitialCamera(state, new Vec3(-154.755, 0.000, -460.042), new Vec3(289.100, -8.900, 2.298));
+    { let b = args.layout.blocks[0]; initialFrame(state, [...b.ln2.cubes, b.mlpFcWeight, b.mlpUpWeight, b.mlpFc, b.mlpUp, b.mlpAct, b.mlpProjWeight, b.mlpResult, b.mlpResidual], 289.1, -8.9, { fill: 1.0 }); }
     wt.dimHighlightBlocks = [block.ln2.lnResid, block.mlpAct, block.mlpFc, block.mlpFcWeight, block.mlpUp, block.mlpUpWeight, block.mlpProjWeight, block.mlpResult, block.mlpResidual];
 
     commentary(wt)`

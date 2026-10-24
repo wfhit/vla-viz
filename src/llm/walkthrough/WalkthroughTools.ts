@@ -295,11 +295,10 @@ export function setInitialCamera(state: IProgramState, target: Vec3, rot: Vec3) 
         if (data.cameraT < 1) {
             let src = data.cameraSrc;
             let dest = wt.cameraInitial;
-            let t = data.cameraT;
+            // clamp so a slow frame can't overshoot 1 and leave the camera short of its target
+            let t = data.cameraT = Math.min(1, data.cameraT + wt.viewDt / 1000 * 1.5);
             state.camera.angle = src.angle.lerp(dest.angle, t);
             state.camera.center = src.center.lerp(dest.center, t);
-
-            data.cameraT = t + wt.viewDt / 1000 * 1.5;
             wt.markDirty();
         }
     }
@@ -460,4 +459,85 @@ export interface IPhaseGroup {
 export interface IPhaseDef {
     id: Phase;
     title: string;
+}
+
+// Camera that frames a set of blocks (layout coords) from a given orbit angle. The FOV is
+// the fixed 40° of Camera.ts — only the distance (zoom) and look-at point are derived.
+// `shiftX` moves the content left on screen by that fraction of its half-width (to leave
+// room for a side panel).
+export function frameCubes(cubes: (IBlkDef | { x: number, y: number, z: number, dx: number, dy: number, dz: number })[],
+        angleX: number, angleY: number, opts: { fill?: number, aspect?: number, shiftX?: number } = {}): ICameraPos {
+    let mn = new Vec3(Infinity, Infinity, Infinity), mx = new Vec3(-Infinity, -Infinity, -Infinity);
+    for (let c of cubes) {
+        if ('opacity' in c && c.opacity === 0) continue;
+        mn = new Vec3(Math.min(mn.x, c.x), Math.min(mn.y, c.y), Math.min(mn.z, c.z));
+        mx = new Vec3(Math.max(mx.x, c.x + c.dx), Math.max(mx.y, c.y + c.dy), Math.max(mx.z, c.z + c.dz));
+    }
+    let fill = opts.fill ?? 1.15;
+    let aspect = opts.aspect ?? 1.0; // the 3D canvas is about square (the text panel takes the left half)
+    let ax = angleX * Math.PI / 180, ay = angleY * Math.PI / 180;
+    let hx = (mx.x - mn.x) / 2, hy = (mx.y - mn.y) / 2, hz = (mx.z - mn.z) / 2;
+    // world = (x, −z, −y): extents seen across the screen / up the screen from this orbit angle
+    let across = Math.abs(Math.sin(ax)) * hx + Math.abs(Math.cos(ax)) * hz;
+    let depth = Math.abs(Math.cos(ax)) * hx + Math.abs(Math.sin(ax)) * hz;
+    let up = Math.cos(ay) * hy + Math.sin(ay) * depth;
+    let tanHalf = Math.tan(20 * Math.PI / 180);
+    let dist = Math.max(up, across / aspect) / tanHalf * fill + depth * Math.cos(ay);
+    let center = new Vec3((mn.x + mx.x) / 2, -(mn.z + mx.z) / 2, -(mn.y + mx.y) / 2);
+    if (opts.shiftX) {
+        let right = new Vec3(-Math.sin(ax), Math.cos(ax), 0);
+        center = center.add(right.mul(across * opts.shiftX));
+    }
+    return { center, angle: new Vec3(angleX, angleY, dist / 200) };
+}
+
+// Keyframed camera on a phase-local clock; stops steering after the last key so the user
+// can orbit freely. Key 0 eases in from wherever the camera was when the phase began.
+export function cameraKeyframes(state: IProgramState, time: number, keys: { t: number, cam: ICameraPos }[]) {
+    let wt = state.walkthrough;
+    let data = getPhaseTransitiveData(wt);
+    data.kfSrc ??= { angle: state.camera.angle, center: state.camera.center };
+    let last = keys[keys.length - 1];
+    if (data.kfDone && time >= last.t) return;
+    let prev: ICameraPos = data.kfSrc, prevT = 0;
+    for (let k of keys) {
+        if (time < k.t) {
+            let u = clamp((time - prevT) / Math.max(1e-6, k.t - prevT), 0, 1);
+            u = u * u * (3 - 2 * u);
+            state.camera.angle = prev.angle.lerp(k.cam.angle, u);
+            state.camera.center = prev.center.lerp(k.cam.center, u);
+            wt.markDirty();
+            return;
+        }
+        prev = k.cam;
+        prevT = k.t;
+    }
+    state.camera.angle = last.cam.angle;
+    state.camera.center = last.cam.center;
+    data.kfDone = true;
+}
+
+// A phase-local clock that keeps advancing while the walkthrough is paused (so a chapter
+// opened from the table of contents still plays its 3D animation).
+export function phaseClock(state: IProgramState, rate: number = 1) {
+    let wt = state.walkthrough;
+    let data = getPhaseTransitiveData(wt);
+    let now = performance.now();
+    data.clockStartMs ??= now;
+    let t = Math.max(wt.time, (now - data.clockStartMs) / 1000 * rate);
+    return t;
+}
+
+type IFrameCube = IBlkDef | { x: number, y: number, z: number, dx: number, dy: number, dz: number };
+type IFrameOpts = { fill?: number, aspect?: number, shiftX?: number };
+
+// layout-relative replacements for the hard-coded camera positions
+export function initialFrame(state: IProgramState, cubes: IFrameCube[], angleX: number, angleY: number, opts: IFrameOpts = {}) {
+    let c = frameCubes(cubes, angleX, angleY, opts);
+    setInitialCamera(state, c.center, c.angle);
+}
+
+export function frameTo(state: IProgramState, time: ITimeInfo, cubes: IFrameCube[], angleX: number, angleY: number, opts: IFrameOpts = {}) {
+    let c = frameCubes(cubes, angleX, angleY, opts);
+    moveCameraTo(state, time, c.center, c.angle);
 }

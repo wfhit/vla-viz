@@ -112,7 +112,7 @@ export function initWalkthrough() {
                 { id: Phase.Head_Knack, title: 'knack 分类头' },
                 { id: Phase.Head_Done, title: 'done 头' },
                 { id: Phase.Action_Expert, title: '动作专家' },
-                { id: Phase.Action_Denoise, title: '速度与动作解码' },
+                { id: Phase.Action_Denoise, title: '速度场与动作解码' },
                 { id: Phase.Harness_Law, title: 'Harness 法则' },
             ],
         }] as IPhaseGroup[],

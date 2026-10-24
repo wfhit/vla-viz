@@ -1,5 +1,6 @@
 import { genModelViewMatrices, ICamera, ICameraPos, updateCamera } from "./Camera";
 import { drawAllArrows } from "./components/Arrow";
+import { defaultActionViz, drawActionViz, IActionVizState } from "./components/ActionViz";
 import { drawBlockLabels } from "./components/SectionLabels";
 import { drawModelCard } from "./components/ModelCard";
 import { IGptModelLink, IModelShape } from "./GptModel";
@@ -66,6 +67,7 @@ export interface IDisplayState {
     hoverTarget: IHoverTarget | null;
     blkIdxHover: number[] | null;
     dimHover: DimStyle | null;
+    actionViz?: IActionVizState;
 }
 
 export interface IHoverTarget {
@@ -166,6 +168,7 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     state.display.hoverTarget = null;
     state.display.tokenColors = null;
     state.display.tokenIdxColors = null;
+    state.display.actionViz = defaultActionViz();
 
     // generate the base model, incorporating the gpu-side model if available
     state.layout = genGptModelLayout(state.shape, state.jsGptModel);
@@ -197,7 +200,8 @@ export function runProgram(view: IRenderView, state: IProgramState) {
 
     drawBlockInfo(state);
     // these will get modified by the walkthrough (stored where?)
-    drawAllArrows(state.render, state.layout);
+    drawAllArrows(state.render, state.layout, cubes => cubesInView(state, cubes));
+    drawActionViz(state);
 
     drawModelCard(state, state.layout, 'k005b VLA', new Vec3());
 
@@ -230,4 +234,25 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     state.render.gl.flush();
 
     state.render.lastJsMs = performance.now() - timer0;
+}
+
+// conservative frustum test of the bounding box of `cubes` (layout space)
+function cubesInView(state: IProgramState, cubes: IBlkDef[]) {
+    let mn = new Vec3(Infinity, Infinity, Infinity), mx = new Vec3(-Infinity, -Infinity, -Infinity);
+    for (let c of cubes) {
+        mn = new Vec3(Math.min(mn.x, c.x), Math.min(mn.y, c.y), Math.min(mn.z, c.z));
+        mx = new Vec3(Math.max(mx.x, c.x + c.dx), Math.max(mx.y, c.y + c.dy), Math.max(mx.z, c.z + c.dz));
+    }
+    let mtx = state.camera.viewMtx.mul(state.camera.modelMtx);
+    let out = [0, 0, 0, 0, 0]; // x<-w, x>w, y<-w, y>w, behind
+    for (let i = 0; i < 8; i++) {
+        let p = new Vec3(i & 1 ? mx.x : mn.x, i & 2 ? mx.y : mn.y, i & 4 ? mx.z : mn.z);
+        let v = mtx.mulVec4(new Vec4(p.x, p.y, p.z, 1));
+        if (v.x < -v.w) out[0]++;
+        if (v.x > v.w) out[1]++;
+        if (v.y < -v.w) out[2]++;
+        if (v.y > v.w) out[3]++;
+        if (v.w <= 0) out[4]++;
+    }
+    return !out.some(n => n === 8);
 }

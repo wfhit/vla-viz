@@ -60,6 +60,13 @@ export interface IK005bConfig {
     done_names: string[];
     action_dim: number;
     action_horizon: number;
+    action_dim_names: string[];
+    action_q01: number[];   // bounds99 stats (robot units) the serve path un-normalizes with
+    action_q99: number[];
+    expert_n_layer: number; // layers in the expert checkpoint
+    n_layer_pairs: number;  // layer-pairs the forward actually runs (= trunk layers)
+    suffix_visible_prefix: number; // prefix columns the §3.2 mask lets suffix queries see
+    suffix_visible_visual: number;
     n_params: number;
     n_params_trunk: number;
     n_params_expert: number;
@@ -147,6 +154,14 @@ export interface IBlockLayerLink {
     mlpResid: IRealTex;
 }
 
+// One layer-pair of the action expert: its suffix output and the suffix queries'
+// share of the SAME joint attention the trunk layer runs.
+export interface IExpertLayerLink {
+    out: IRealTex;      // [n_suf, Wc] expert residual stream after layer i
+    attn: IRealTex;     // [n_suf, Wt + n_suf] head-mean probs: prefix window keys | suffix keys
+    mass: Float32Array; // [n_suf, 4] attention mass on [state tokens | visual | text | suffix]
+}
+
 export interface IGptModelLink {
     gl: WebGL2RenderingContext;
     config: IK005bConfig;
@@ -167,6 +182,8 @@ export interface IGptModelLink {
     doneLogits: IRealTex;
     doneAgg: IRealTex;
     doneProbs: IRealTex;
+    expertIn: IRealTex;
+    expertLayers: IExpertLayerLink[];
     expertOut: IRealTex;
     actionWeight: IRealTex;
     actionBias: IRealTex;
@@ -395,6 +412,12 @@ export function createK005bGpuModel(gl: WebGL2RenderingContext, data: IK005bData
         doneLogits: a('done_logits'),
         doneAgg: a('done_agg'),
         doneProbs: a('done_probs'),
+        expertIn: a('expert_in'),
+        expertLayers: Array.from({ length: config.n_layer_pairs }, (_, i) => ({
+            out: a(`E${i}.out`),
+            attn: a(`E${i}.attn`),
+            mass: get(A, `E${i}.attn_mass`).data,
+        })),
         expertOut: a('expert_out'),
         actionWeight: w('action_w'),
         actionBias: w('action_b'),

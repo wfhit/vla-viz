@@ -30,8 +30,12 @@ import { addPrimitiveRestart, addQuad, addVert } from "../render/triRender";
 import { bezierCurveBuild } from "@/src/utils/bezier";
 import { Mat4f } from "@/src/utils/matrix";
 import { Vec3, Vec3Buf, Vec4 } from "@/src/utils/vector";
+import { drawText, measureText } from "../render/fontRender";
+import { RenderPhase } from "../render/sharedRender";
 
-export function drawAllArrows(state: IRenderState, layout: IGptModelLayout) {
+// `isVisible` lets the caller skip a layer's detailed arrows when the layer is off-screen
+// (28 layers × ~100 arrows otherwise dominate the per-frame geometry upload)
+export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVisible?: (cubes: IBlkDef[]) => boolean) {
 
     let pad = 2.0;
     let prevResid = layout.residual0;
@@ -43,26 +47,38 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout) {
     drawHorizArrow(layout.tokEmbedObj, layout.residual0);
     drawArrowBetween(layout.posEmbedObj, BlockPos.Left, layout.residual0, BlockPos.Right);
 
-    for (let i = 0; i < 3; i++) { //layout.blocks.length; i++) {
+    for (let i = 0; i < layout.blocks.length; i++) {
         let block = layout.blocks[i];
+        if (Math.abs(prevResid.x - block.attnResidual.x) > 1) {
+            // column wrap: the stream continues at the top of the next column — no arrow
+            // runs back up across the scene; both ends are labelled instead
+            drawWrapLabel(prevResid, `continues: layer ${i} (next column) ->`, 1);
+            let entry = { ...block.attnResidual, y: block.ln1.lnAgg1.y - 4 * layout.margin, dy: 0 };
+            drawWrapLabel(entry, `<- from layer ${i - 1}`, -1);
+            prevResid = entry;
+        }
         drawVertArrow(prevResid, block.attnResidual);
+        if (isVisible && !isVisible(block.cubes)) {
+            drawVertArrow(block.attnResidual, block.mlpResidual);
+            prevResid = block.mlpResidual;
+            continue;
+        }
         drawArrowResidSplit(prevResid, block.ln1.lnResid);
         drawArrowResidSplit(prevResid, block.ln1.lnAgg2, 2);
         drawVertArrow(block.ln1.lnAgg2, block.ln1.lnResid, 2);
 
-        // let headIdx = 0;
+        // K/V are shared by the query heads of a kv group: one arrow per group
+        for (let g of block.kvGroups) {
+            drawArrowBetween(block.ln1.lnResid, BlockPos.Left, g.kBlock, BlockPos.Right);
+            drawArrowBetween(block.ln1.lnResid, BlockPos.Left, g.vBlock, BlockPos.Right);
+            drawHorizArrow(g.kWeightBlock, g.kBlock);
+            drawHorizArrow(g.vWeightBlock, g.vBlock);
+        }
+
         for (let head of block.heads) {
             drawArrowBetween(block.ln1.lnResid, BlockPos.Left, head.qBlock, BlockPos.Right);
-            drawArrowBetween(block.ln1.lnResid, BlockPos.Left, head.kBlock, BlockPos.Right);
-            drawArrowBetween(block.ln1.lnResid, BlockPos.Left, head.vBlock, BlockPos.Right);
-
-            drawHorizArrow(head.qBiasBlock, head.qWeightBlock);
-            drawHorizArrow(head.kBiasBlock, head.kWeightBlock);
-            drawHorizArrow(head.vBiasBlock, head.vWeightBlock);
-
+            // q_norm/k_norm γ act AFTER the projection (they have no arrow into W)
             drawHorizArrow(head.qWeightBlock, head.qBlock);
-            drawHorizArrow(head.kWeightBlock, head.kBlock);
-            drawHorizArrow(head.vWeightBlock, head.vBlock);
 
             drawArrowBotToSide(head.qBlock, head.attnMtx, 0, undefined, head.qBlock.y !== head.kBlock.y);
             drawArrowBotToSide(head.kBlock, head.attnMtx, 0, undefined, head.kBlock.y !== head.qBlock.y);
@@ -73,31 +89,28 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout) {
             drawArrowBetween(head.attnMtxSm, BlockPos.Bot, head.vOutBlock, BlockPos.Left);
 
             drawArrowBetween(head.vOutBlock, BlockPos.Bot, block.attnOut, BlockPos.Top);
-            // drawArrowBotToSide(head.vOutBlock, block.attnOut, headIdx * head.vOutBlock.cy, undefined, true);
-            // headIdx += 1;
         }
 
         drawVertArrow(block.attnResidual, block.mlpResidual);
         drawHorizArrow(block.attnOut, block.attnResidual);
 
-        drawHorizArrow(block.projBias, block.projWeight);
         drawHorizArrow(block.projWeight, block.attnOut);
 
-        drawHorizArrow(block.ln1.lnMu, block.ln1.lnSigma);
         drawHorizArrow(block.ln1.lnSigma, block.ln1.lnResid);
 
         drawArrowResidSplit(block.attnResidual, block.ln2.lnAgg2, 2);
         drawVertArrow(block.ln2.lnAgg2, block.ln2.lnResid, 2);
-        drawHorizArrow(block.ln2.lnMu, block.ln2.lnSigma);
         drawHorizArrow(block.ln2.lnSigma, block.ln2.lnResid);
 
         drawArrowResidSplit(block.attnResidual, block.ln2.lnResid);
         drawArrowBetween(block.ln2.lnResid, BlockPos.Bot, block.mlpFc, BlockPos.Right);
+        drawArrowOverTo(block.ln2.lnResid, block.mlpUp);
 
-        drawVertArrow(block.mlpFcBias, block.mlpFcWeight);
+        // SwiGLU: gate & up branches meet in silu(gate)·up
         drawVertArrow(block.mlpFcWeight, block.mlpFc, 12);
+        drawVertArrow(block.mlpUpWeight, block.mlpUp, 12);
         drawVertArrow(block.mlpFc, block.mlpAct, 12);
-        drawHorizArrow(block.mlpProjBias, block.mlpProjWeight);
+        drawArrowBetween(block.mlpUp, BlockPos.Bot, block.mlpAct, BlockPos.Left);
         drawHorizArrow(block.mlpProjWeight, block.mlpResult);
         drawHorizArrow(block.mlpResult, block.mlpResidual);
         drawArrowBetween(block.mlpAct, BlockPos.Right, block.mlpResult, BlockPos.Top);
@@ -108,22 +121,25 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout) {
     drawArrowResidSplit(prevResid, layout.ln_f.lnAgg2, 2);
     drawArrowBetween(prevResid, BlockPos.Bot, layout.ln_f.lnResid, BlockPos.Right);
     drawVertArrow(layout.ln_f.lnAgg2, layout.ln_f.lnResid);
-    drawHorizArrow(layout.ln_f.lnMu, layout.ln_f.lnSigma);
     drawHorizArrow(layout.ln_f.lnSigma, layout.ln_f.lnResid);
 
-    if (layout.logitsTransposed) {
-        drawArrowBetween(layout.ln_f.lnResid, BlockPos.Bot, layout.logits, BlockPos.Right);
-        drawVertArrow(layout.lmHeadWeight, layout.logits);
+    // h* → knack head (below) and done head (right)
+    drawVertArrow(layout.ln_f.lnResid, layout.hStar, 2);
+    drawVertArrow(layout.hStar, layout.logits, 2);
+    drawHorizArrow(layout.lmHeadWeight, layout.logits);
+    drawVertArrow(layout.logits, layout.logitsAgg2, 2);
+    drawVertArrow(layout.logitsAgg1, layout.logitsSoftmax, 2);
 
-        drawVertArrow(layout.logits, layout.logitsSoftmax);
-        drawHorizArrow(layout.logits, layout.logitsAgg1, 2);
-        drawArrowBetween(layout.logitsAgg2, BlockPos.Bot, layout.logitsSoftmax, BlockPos.Right, 2);
-    } else {
-        drawVertArrow(layout.ln_f.lnResid, layout.logits);
-        drawHorizArrow(layout.lmHeadWeight, layout.logits);
-        drawVertArrow(layout.logits, layout.logitsAgg2);
-        drawVertArrow(layout.logitsAgg1, layout.logitsSoftmax);
-    }
+    drawArrowBetween(layout.hStar, BlockPos.Right, layout.doneLogits, BlockPos.Top, 2);
+    drawArrowBetween(layout.doneWeight, BlockPos.Left, layout.doneLogits, BlockPos.Right, 2);
+    drawVertArrow(layout.doneLogits, layout.doneAgg2, 2);
+    drawVertArrow(layout.doneAgg1, layout.doneProbs, 2);
+
+    // expert suffix → action_out_proj → velocity; x1 − v → action chunk
+    drawVertArrow(layout.expertOut, layout.actionVelocity);
+    drawHorizArrow(layout.actionWeight, layout.actionVelocity);
+    drawVertArrow(layout.actionVelocity, layout.actionChunk);
+    drawHorizArrow(layout.actionX1, layout.actionChunk);
 
     function blkColor(src: IBlkDef) {
         return src.t === 'w' ? weightColor : dataColor;
@@ -135,6 +151,36 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout) {
 
     function drawHorizArrow(src: IBlkDef, dest: IBlkDef, width: number = 6) {
         drawArrowBetween(src, BlockPos.Right, dest, BlockPos.Left, width);
+    }
+
+    // over-the-top route: down from src, across above dest (in the gap above it), down into dest
+    function drawArrowOverTo(src: IBlkDef, dest: IBlkDef, width: number = 6) {
+        let opacity = Math.min(src.opacity, dest.opacity);
+        if (opacity === 0) {
+            return;
+        }
+        let normal = new Vec3(0, 0, 1);
+        let color = blkColor(src).mul(opacity);
+        let start = blockPos(src, BlockPos.Bot);
+        let end = blockPos(dest, BlockPos.Top);
+        let yMid = dest.y - layout.margin / 2;
+        let z = dest.z + dest.dz / 2;
+        drawArrow(state, start, new Vec3(start.x, yMid - width / 2, z), width, normal, color, false);
+        drawArrow(state, new Vec3(start.x - width / 2, yMid, z), new Vec3(end.x + width / 2, yMid, z), width, normal, color, false, CornerMode.Left);
+        drawArrow(state, new Vec3(end.x, yMid + width / 2, z), end, width, normal, color, true, CornerMode.Left);
+    }
+
+    function drawWrapLabel(blk: IBlkDef, text: string, dir: number) {
+        let size = 6;
+        let x = blk.x + blk.dx / 2;
+        let y = dir > 0 ? blk.y + blk.dy + 3 * size : blk.y - size;
+        let mtx = Mat4f.fromTranslation(new Vec3(x, y, blk.z + blk.dz / 2));
+        let opts = { color: new Vec4(0.3, 0.3, 0.35, 1), size, mtx };
+        let w = measureText(state.modelFontBuf, text, opts);
+        let prev = state.sharedRender.activePhase;
+        state.sharedRender.activePhase = RenderPhase.Overlay;
+        drawText(state.modelFontBuf, text, -w / 2, 0, opts);
+        state.sharedRender.activePhase = prev;
     }
 
     function blockPos(block: IBlkDef, pos: BlockPos) {
@@ -307,7 +353,10 @@ export function drawArrow(state: IRenderState, start: Vec3, end: Vec3, width: nu
             p2 = end.mulAdd(endDir, -headDepth - dist);
             p3 = end.mulAdd(endDir, -headDepth);
         }
-        let steps = bezierCurveBuild(p0, p1, p2, p3, 0.1);
+        // the flatness test is absolute (∝ L²), so long arrows (28 layers of K/V links) would get
+        // thousands of segments; scale it to keep the per-arrow segment count roughly size-independent
+        let chord = p3.sub(p0).len();
+        let steps = bezierCurveBuild(p0, p1, p2, p3, 0.1 * Math.max(1, (chord / 10) ** 2));
         let nPts = steps.length / 3;
 
         let headNPts = drawHead ? 3 : 0;
