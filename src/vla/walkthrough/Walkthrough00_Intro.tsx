@@ -57,7 +57,18 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
     layout.towersLabel.visible = 1;
 
     let cfg = layout.shape.full;
-    let c0 = commentary(wt, null, 0)`欢迎来到 _k005b_ VLA 网络的可视化讲解。k005b 把相机画面、语言指令和机器人状态放进同一个 Qwen3-VL-2B 主干，再分出输出：knack 分类头（说"现在该做什么"）、done 头，以及动作专家（生成 16×23 的动作块）。
+    let f = state.page.facts!;
+    let pi0 = f.id === 'pi0';
+    let c0 = pi0 ? commentary(wt, null, 0)`欢迎来到 _π0.5_ 的可视化讲解。这是 openpi-comet 在 BEHAVIOR-1K 上微调的 π0.5（${cfg?.name ?? '…'}）：${f.visionName} 把相机画面变成 ${cfg?.n_visual_tokens ?? '…'} 个视觉 token，与提示词一起进入 ${f.trunkName} 主干（${f.nLayer} 层）；旁边是一座同样 ${f.nLayer} 层的 Gemma 动作专家（d=${f.expertD}），两者逐层联合注意力，用 ${f.K} 步 Euler 流匹配生成 ${f.actH}×${f.actD} 的动作块（R1 Pro 实际用前 ${f.actDReal} 维，其余是补零维）。π0.5 没有分类头：主干的全部作用是为动作专家提供每层的 K/V。
+
+3D 场景里显示的全部是 _真实 π0.5 checkpoint（${cfg?.train_config ?? '…'}）_ 的权重，以及对一帧真实 BEHAVIOR 演示数据（"${cfg?.sample.goal_text ?? '…'}"）做前向时抓下来的真实激活。真实尺寸太大无法逐格画出，所以每个张量只画一个真实窗口：token ${cfg ? `${cfg.window.t0}–${cfg.window.t0 + cfg.window.Wt - 1}` : '…'}（前缀的最后 ${cfg?.window.Wt ?? 32} 个 token）、通道 0–${(cfg?.window.Wc ?? 64) - 1}（共 ${f.dModel}）、head 维 0–${(cfg?.window.Wd ?? 32) - 1}（共 ${f.headDim}）、FF 0–${(cfg?.window.Wf ?? 64) - 1}（共 ${f.ffn}）。鼠标悬停任意格子会显示真实张量名、完整形状、真实下标、数值和整张量统计。整体流程：
+1. 输入嵌入：${cfg?.n_visual_tokens ?? '…'} 个视觉 token + ${cfg?.T_text ?? '…'} 个语言 token（机器人状态以 ${f.actDReal} 个离散化数字写在提示词里），共 ${cfg?.T_prefix ?? '…'} 个前缀 token。
+2. ${f.trunkName} 主干：${f.nLayer} 层 Transformer（${f.nHead} 个 query 头、${f.nKv} 个 KV 头的 MQA，head_dim ${f.headDim}），前缀内双向注意力。
+3. 展开一层：RMSNorm → 联合注意力（前缀 + 动作后缀）→ o_proj → 残差 → RMSNorm → GeGLU MLP → 残差。
+4. 动作专家：${f.nSuffix} 个动作 token，门控 adaRMSNorm 注入时间 t，与主干逐层联合注意力。
+5. ${f.K} 步 Euler（t 从 1 到 0）积分出动作块。
+
+窗口里的真实输入 token：${embed(ExampleInputOutput)}` : commentary(wt, null, 0)`欢迎来到 _k005b_ VLA 网络的可视化讲解。k005b 把相机画面、语言指令和机器人状态放进同一个 Qwen3-VL-2B 主干，再分出输出：knack 分类头（说"现在该做什么"）、done 头，以及动作专家（生成 16×23 的动作块）。
 
 3D 场景里显示的全部是 _真实 k005b checkpoint（step ${cfg?.step ?? '…'}）_ 的权重，以及对一个真实训练样本（"${cfg?.sample.goal_text ?? '…'}"）做前向时用 hook 抓下来的真实激活。真实尺寸太大无法逐格画出，所以每个张量只画一个真实窗口：token ${cfg ? `${cfg.window.t0}–${cfg.window.t0 + cfg.window.Wt - 1}` : '…'}（以 h* 边界 token 结尾）、通道 0–${(cfg?.window.Wc ?? 64) - 1}（共 ${cfg?.n_embd ?? 2048}）、head 维 0–${(cfg?.window.Wd ?? 32) - 1}（共 ${cfg?.head_dim ?? 128}）、FF 0–${(cfg?.window.Wf ?? 64) - 1}（共 ${cfg?.intermediate ?? 6144}）。鼠标悬停任意格子会显示真实张量名、完整形状、真实下标、数值和整张量统计。整体流程：
 1. 输入嵌入：${cfg?.n_visual_tokens ?? '…'} 个视觉 token + 语言 token + ${cfg?.n_state_tokens ?? 16} 个状态 token，共 ${cfg?.T_prefix ?? '…'} 个前缀 token。
@@ -101,7 +112,10 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
     let tokenStr = c_str('_token_', 0, DimStyle.Token);
     let tokenIdxStr = c_str('_token index_', 0, DimStyle.TokenIdx);
 
-    commentary(wt, t6)`其中每一项叫做一个 ${tokenStr}。k005b 使用 Qwen 的 BPE 词表，共 ${cfg?.vocab_size ?? 151936} 个 token。
+    if (pi0) commentary(wt, t6)`其中每一项叫做一个 ${tokenStr}。π0.5 使用 PaliGemma 的 SentencePiece 词表，共 ${cfg?.vocab_size ?? '…'} 个 token。这个窗口正好落在提示词末尾：离散化的状态数字（每维 0–255）、分号、换行和 "Action:"。
+
+    每个 token 对应一个编号，即 ${tokenIdxStr}。窗口内的真实编号如下，它们被送入模型：${embed(ExampleTokenValues)}\n`;
+    else commentary(wt, t6)`其中每一项叫做一个 ${tokenStr}。k005b 使用 Qwen 的 BPE 词表，共 ${cfg?.vocab_size ?? 151936} 个 token。
 
     每个 token 对应一个编号，即 ${tokenIdxStr}。窗口内的真实编号如下，它们被送入模型：${embed(ExampleTokenValues)}\n`;
     breakAfter();
@@ -171,7 +185,8 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
     }
 
     breakAfter();
-    commentary(wt)`嵌入向量随后依次穿过全部 ${cfg?.n_layer ?? 28} 层 Transformer（3D 中每层都是真实权重与激活），最终到达底部的读出位置 h*。`;
+    if (pi0) commentary(wt)`嵌入向量随后依次穿过全部 ${f.nLayer} 层 Transformer（3D 中每层都是真实权重与激活）。主干最后一层之后不接任何输出头。`;
+    else commentary(wt)`嵌入向量随后依次穿过全部 ${cfg?.n_layer ?? 28} 层 Transformer（3D 中每层都是真实权重与激活），最终到达底部的读出位置 h*。`;
     breakAfter();
 
     {
@@ -199,9 +214,11 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
 
 
         let t_output = afterTime(null, 1.0, 0.5);
-        frameTo(state, t_output, [args.layout.ln_f.lnResid, args.layout.hStar, args.layout.lmHeadWeight, args.layout.logits, args.layout.logitsSoftmax, args.layout.doneWeight, args.layout.doneProbs], 271.3, 6.4, { fill: 1.2 });
+        let lastT = layout.blocks[layout.blocks.length - 1];
+        frameTo(state, t_output, pi0 ? [...lastT.cubes, ...layout.expertLayers[layout.expertLayers.length - 1].cubes]
+            : [args.layout.ln_f.lnResid, args.layout.hStar, args.layout.lmHeadWeight, args.layout.logits, args.layout.logitsSoftmax, args.layout.doneWeight, args.layout.doneProbs], 271.3, 6.4, { fill: 1.2 });
         let t_outputWalk = afterTime(null, 2.0, 0.5);
-        processUpTo(state, t_outputWalk, layout.logitsSoftmax, processState);
+        processUpTo(state, t_outputWalk, pi0 ? lastT.mlpResidual : layout.logitsSoftmax, processState);
 
         let t_outputToks = afterTime(null, 1.0, 0.5);
 
@@ -219,9 +236,12 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
         }
     }
 
+    if (pi0) commentary(wt)`输出是什么？π0.5 的主干没有分类头，它的输出只是每层交给动作专家的 K/V。真正的输出来自动作专家：${f.nSuffix} 个动作 token 经 action_out_proj 得到速度 v，Euler ${f.K} 步把噪声 x(t=1) 积分到 x(t=0)，即 ${f.actH}×${f.actD} 动作块（R1 Pro 用前 ${f.actDReal} 维）。接下来逐步展开每个环节。`;
+    else {
     commentary(wt)`输出是什么？在答案边界 h* 处读出：knack 头对 ${cfg?.knack_names.length ?? 17} 个 knack 做 softmax（本样本预测 ${cfg?.pred_knack ?? '…'}，目标 ${cfg?.sample.target_knack ?? '…'}），done 头输出 ${cfg?.pred_done ?? '…'}。`
 
     commentary(wt)`另一路是动作专家（d=${cfg?.expert_hidden ?? 768}）：它与主干逐层联合注意力，输出速度 v，动作块 = x1 − v（16×23）。模型只负责汇报，切换子任务由 Harness 决定。接下来逐步展开每个环节。`;
+    }
 
     breakAfter();
 }

@@ -37,14 +37,15 @@ export function walkthrough08_Transformer(args: IWalkthroughArgs) {
     let nL = L.blocks.length;
     initialFrame(state, [L.residual0, ...mainPath(L, 0)], 270, 3, { fill: 1.5 });
 
+    let f = state.page.facts!;
     commentary(wt, null, 0)`
 
 前面几章把一层拆开讲完了。现在把真实数据整体推过整个 ${nL} 层的主干堆叠，看一次前向到底怎么走。
 
 拼接好的主干 token 流（${c_blockRef('嵌入', L.residual0)}）从顶部进入第 0 层。黄色是正在计算的子层，后面还没算到的块保持空白、箭头变淡。每一层都按同一顺序走：
-RMSNorm → Q/K/V → 注意力 → softmax·V → o_proj → ⊕残差 → RMSNorm → gate/up → SiLU·up → down_proj → ⊕残差。
+RMSNorm → Q/K/V → 注意力 → softmax·V → o_proj → ⊕残差 → RMSNorm → gate/up → ${f.mlpAct}·up → down_proj → ⊕残差。
 
-本章只看主干。主干右边还有第二座塔：DiT 动作专家，它的第 i 层与主干第 i 层共用一次联合注意力；那座塔的逐层展开在 D 章组（D2–D6）。
+本章只看主干。主干右边还有第二座塔：${f.expertName}，它的第 i 层与主干第 i 层共用一次联合注意力；那座塔的逐层展开在 D 章组（D2–D6）。
 `;
     breakAfter();
     let tEnter = afterTime(null, 1.5);
@@ -60,7 +61,7 @@ RMSNorm → Q/K/V → 注意力 → softmax·V → o_proj → ⊕残差 → RMSN
     breakAfter();
     commentary(wt)`
 
-${nL} 层全部穿过，主干最后一层的输出将去往 h* 和 knack / done 头。
+${f.heads ? `${nL} 层全部穿过，主干最后一层的输出将去往 h* 和 knack / done 头。` : `${nL} 层全部穿过。主干到这里就结束了：π0.5 不读最后一层的输出，没有分类头；每一层的 K/V 已经在各自的层对里交给了动作专家。`}
 
 与深度学习中常见的情形一样，很难精确说出每一层在做什么，但有一个大致的规律：
 靠前的层主要处理局部、视觉层面的特征（如图像 patch 中的边缘、物体轮廓），

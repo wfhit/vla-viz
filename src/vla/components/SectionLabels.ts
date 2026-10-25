@@ -1,3 +1,4 @@
+import { IModelFacts } from "../ModelFacts";
 import { TextAlignHoriz, TextAlignVert } from "../Annotations";
 import { IBlkDef, IBlkLabel, IVlaModelLayout } from "../VlaModelLayout";
 import { measureTextWidth, writeTextToBuffer } from "../render/fontRender";
@@ -8,7 +9,7 @@ import { Vec3, Vec4 } from "@/src/utils/vector";
 
 export type IFitsView = (mn: Vec3, mx: Vec3) => boolean;
 
-export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout, focus?: Vec3, fits?: IFitsView) {
+export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout, facts: IModelFacts, focus?: Vec3, fits?: IFitsView) {
     // same-text labels: only the one nearest the camera focus is drawn; a label (block + its text)
     // that does not fit entirely on screen is dropped: up close it would only be a giant fragment
     let pend = new Map<string, { d: number, draw: () => void }>();
@@ -47,8 +48,8 @@ export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout, fo
     // per pair spanning trunk layer i and expert layer i (they share layer i's joint attention)
     let nPairs = Math.min(layout.blocks.length, layout.expertLayers.length);
     let towerTitles: [IExtent | null, string[]][] = [
-        [extent(layout.blocks[0]?.transformerLabel.cubes ?? []), ['Qwen3-VL trunk', `x${layout.blocks.length} layers`]],
-        [extent(layout.expertLayers[0]?.transformerLabel.cubes ?? []), ['DiT action expert', `x${layout.expertLayers.length} layers`]],
+        [extent(layout.blocks[0]?.transformerLabel.cubes ?? []), [facts.trunkLabel, `x${layout.blocks.length} layers`]],
+        [extent(layout.expertLayers[0]?.transformerLabel.cubes ?? []), [facts.expertLabel, `x${layout.expertLayers.length} layers`]],
     ];
     let tVis = layout.towersLabel.visible;
     // titles sit in the empty space beside the column: trunk on the left, expert on the right
@@ -75,6 +76,7 @@ export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout, fo
         if (fits && !fits(new Vec3(e.minX, e.minY - 12 - fs, e.midZ), new Vec3(e.maxX, e.maxY, e.midZ))) continue;
         drawPairHeader(state, `Layer pair ${i}:  trunk L${i}  <->  expert E${i}`, e, [eT, eE], baseColor.mul(vis), fs);
     }
+    let mlpLbl = `MLP (${facts.mlpName})`;
     let towers: ILayerLike[][] = [layout.blocks, layout.expertLayers];
     for (let layers of towers) {
         layers.forEach((L) => {
@@ -87,7 +89,7 @@ export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout, fo
             let eProj = extent(L.projLabel.cubes.filter(c => c !== L.attnResidual));
             if (eProj && L.projLabel.visible > 0) put('Out Proj', eProj, () => pinLeft(state, 'Out Proj', eProj!, baseColor.mul(eProj!.op * L.projLabel.visible), 10, eProj!.midZ), 10, 10);
             let eMlp = extent(L.mlpLabel.cubes);
-            if (eMlp && L.mlpLabel.visible > 0) put('MLP (SwiGLU)', eMlp, () => pinLeft(state, 'MLP (SwiGLU)', eMlp!, baseColor.mul(eMlp!.op * L.mlpLabel.visible), 12, eMlp!.midZ), 12, 10);
+            if (eMlp && L.mlpLabel.visible > 0) put(mlpLbl, eMlp, () => pinLeft(state, mlpLbl, eMlp!, baseColor.mul(eMlp!.op * L.mlpLabel.visible), 12, eMlp!.midZ), 12, 10);
 
             L.heads.forEach((head, hi) => {
                 let z = head.qBlock.z + head.qBlock.dz / 2;

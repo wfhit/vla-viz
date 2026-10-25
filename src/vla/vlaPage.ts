@@ -1,9 +1,9 @@
 import { Vec3 } from "@/src/utils/vector";
 import { IPageSpec } from "./PageSpec";
 import { cubesInView, IProgramState, vlaLayout } from "./Program";
-import { createK005bGpuModel, fetchK005bData, fetchK005bFm, shapeFromConfig } from "./VlaModel";
+import { createModelGpuLink, fetchModelData, fetchModelFm, shapeFromConfig } from "./VlaModel";
 import { genVlaModelLayout } from "./VlaModelLayout";
-import { Phase, runWalkthrough, vlaPhaseList } from "./walkthrough/Walkthrough";
+import { enginePhaseList, Phase, runWalkthrough } from "./walkthrough/Walkthrough";
 import { auditArrows, drawAllArrows } from "./components/Arrow";
 import { drawActionViz } from "./components/ActionViz";
 import { drawModelCard } from "./components/ModelCard";
@@ -11,6 +11,9 @@ import { drawBlockLabels } from "./components/SectionLabels";
 import { cameraToMatrixView } from "./Camera";
 import { clamp } from "@/src/utils/data";
 import { IVlaModelLayout } from "./VlaModelLayout";
+import { IModelFacts, modelFacts } from "./ModelFacts";
+import { ICameraPos } from "./Camera";
+import { PageId } from "./PageSpec";
 
 function cameraBasis(state: IProgramState) {
     let { camPos } = cameraToMatrixView(state.camera);
@@ -90,57 +93,72 @@ function hideRepeatedHeads(layout: IVlaModelLayout) {
     }
 }
 
-export const vlaPage: IPageSpec = {
-    id: 'vla',
-    phaseList: vlaPhaseList,
-    firstPhase: Phase.Intro_Intro,
-    initialCamera: { angle: new Vec3(296, 16, 13.5), center: new Vec3(-8.4, 0, -481.5) },
+// blocks of tensors this model does not have (absent placeholders) are never drawn
+function hideAbsent(layout: IVlaModelLayout) {
+    for (let c of layout.cubes) if (c.absent) c.opacity = 0;
+}
 
-    async loadData(state: IProgramState) {
-        let data = await fetchK005bData();
-        let model = createK005bGpuModel(state.render.gl, data);
-        state.vlaModel = model;
-        state.shape = shapeFromConfig(model.config);
-        state.mainExample.shape = state.shape;
-        (window as any).__k005b = model;
-        state.markDirty();
-        // the per-Euler-step capture is only needed by the DiT decode chapters: load it after
-        model.fmSteps = await fetchK005bFm(state.render.gl);
-    },
+// One instance of the shared VLA engine: the same scene layout, walkthrough chapters, arrows
+// and play bar for every model; `prefix` selects the exported tensors (public/<prefix>-*.json)
+// and `facts` the model's structural numbers the chapter texts quote.
+export function makeEnginePage(id: PageId, prefix: string, facts: IModelFacts, initialCamera: ICameraPos): IPageSpec {
+    return {
+        id,
+        facts,
+        phaseList: enginePhaseList(facts),
+        firstPhase: Phase.Intro_Intro,
+        initialCamera,
 
-    prepare(state, view) {
-        state.layout = genVlaModelLayout(state.shape, state.vlaModel);
-        for (let example of state.examples) {
-            if (example.enabled && !example.layout) {
-                example.layout = genVlaModelLayout(example.shape, null, example.offset);
+        async loadData(state: IProgramState) {
+            let data = await fetchModelData(prefix);
+            let model = createModelGpuLink(state.render.gl, data);
+            state.vlaModel = model;
+            state.shape = shapeFromConfig(model.config);
+            state.mainExample.shape = state.shape;
+            (window as any).__model = model;
+            state.markDirty();
+            // the per-Euler-step capture is only needed by the expert decode chapters: load it after
+            model.fmSteps = await fetchModelFm(state.render.gl, prefix);
+        },
+
+        prepare(state, view) {
+            state.layout = genVlaModelLayout(state.shape, state.vlaModel);
+            for (let example of state.examples) {
+                if (example.enabled && !example.layout) {
+                    example.layout = genVlaModelLayout(example.shape, null, example.offset);
+                }
             }
-        }
-        if (state.inWalkthrough) {
-            runWalkthrough(state, view);
-        }
-        hideRepeatedHeads(state.layout as IVlaModelLayout);
-    },
-
-    drawScene(state) {
-        let layout = vlaLayout(state);
-        fadeOccluders(state, layout);
-        drawAllArrows(state.render, layout, cubes => cubesInView(state, cubes));
-        drawActionViz(state, cubes => cubesInView(state, cubes));
-        // self-check hooks for the headless probes: visible data blocks without an in / out arrow
-        if (typeof window !== 'undefined') {
-            (window as any).__arrowAudit = () => auditArrows(layout);
-            (window as any).__k005bState = state;
-        }
-        drawModelCard(state, layout, 'k005b VLA', new Vec3());
-        for (let example of state.examples) {
-            if (example.enabled && example.layout) {
-                drawModelCard(state, example.layout, example.name, example.offset.add(example.modelCardOffset));
+            if (state.inWalkthrough) {
+                runWalkthrough(state, view);
             }
-        }
-    },
+            hideRepeatedHeads(state.layout as IVlaModelLayout);
+            hideAbsent(state.layout as IVlaModelLayout);
+        },
 
-    drawLabels(state) {
-        let c = state.camera.center;
-        drawBlockLabels(state.render, vlaLayout(state), new Vec3(c.x, -c.z, -c.y), fitsView(state));
-    },
-};
+        drawScene(state) {
+            let layout = vlaLayout(state);
+            fadeOccluders(state, layout);
+            drawAllArrows(state.render, layout, cubes => cubesInView(state, cubes));
+            drawActionViz(state, cubes => cubesInView(state, cubes));
+            // self-check hooks for the headless probes: visible data blocks without an in / out arrow
+            if (typeof window !== 'undefined') {
+                (window as any).__arrowAudit = () => auditArrows(layout);
+                (window as any).__engineState = state;
+            }
+            drawModelCard(state, layout, facts.modelName, new Vec3());
+            for (let example of state.examples) {
+                if (example.enabled && example.layout) {
+                    drawModelCard(state, example.layout, example.name, example.offset.add(example.modelCardOffset));
+                }
+            }
+        },
+
+        drawLabels(state) {
+            let c = state.camera.center;
+            drawBlockLabels(state.render, vlaLayout(state), facts, new Vec3(c.x, -c.z, -c.y), fitsView(state));
+        },
+    };
+}
+
+export const vlaPage = makeEnginePage('vla', 'k005b', modelFacts.k005b,
+    { angle: new Vec3(296, 16, 13.5), center: new Vec3(-8.4, 0, -481.5) });

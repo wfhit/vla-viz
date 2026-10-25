@@ -18,6 +18,7 @@ import { walkthrough08_Transformer } from "./Walkthrough08_Transformer";
 import { walkthrough09_Output } from "./Walkthrough09_Output";
 import { walkthrough10_Heads } from "./Walkthrough10_Heads";
 import { walkthrough11_FlowMatching } from "./Walkthrough11_FlowMatching";
+import { IModelFacts } from "../ModelFacts";
 
 
 /**
@@ -122,48 +123,55 @@ export enum Phase {
     D7_Euler,
 }
 
-export const vlaPhaseList: IPhaseGroup[] = [{
-    groupId: PhaseGroup.Intro,
-    title: '概览',
-    phases: [
-        { id: Phase.Intro_Intro, title: '总览' },
-        { id: Phase.Intro_Prelim, title: '预备知识' },
-    ],
-}, {
-    groupId: PhaseGroup.Detailed_Input,
-    title: '主干：一层展开',
-    phases: [
-        { id: Phase.Input_Detail_Embedding, title: '输入嵌入' },
-        { id: Phase.Input_Detail_LayerNorm, title: 'RMSNorm' },
-        { id: Phase.Input_Detail_SelfAttention, title: 'GQA 联合注意力' },
-        { id: Phase.Input_Detail_Softmax, title: '前缀 Softmax' },
-        { id: Phase.Input_Detail_Projection, title: '输出投影与残差' },
-        { id: Phase.Input_Detail_Mlp, title: 'MLP (SwiGLU)' },
-        { id: Phase.Input_Detail_Transformer, title: '28 层主干堆叠' },
-        { id: Phase.Input_Detail_Output, title: 'h* 答案边界读出' },
-    ],
-}, {
-    groupId: PhaseGroup.Heads,
-    title: '输出头',
-    phases: [
-        { id: Phase.Head_Knack, title: 'knack 分类头' },
-        { id: Phase.Head_Done, title: 'done 头' },
-        { id: Phase.Harness_Law, title: 'Harness 法则' },
-    ],
-}, {
-    groupId: PhaseGroup.FlowMatching,
-    title: 'DiT 动作专家与流匹配',
-    phases: [
-        { id: Phase.D0_Towers, title: 'D0 两座塔' },
-        { id: Phase.D1_SuffixInput, title: 'D1 后缀输入嵌入' },
-        { id: Phase.D2_AdaNorm, title: 'D2 AdaRMSNorm' },
-        { id: Phase.D3_JointAttn, title: 'D3 联合注意力' },
-        { id: Phase.D4_Projection, title: 'D4 输出投影与残差' },
-        { id: Phase.D5_Mlp, title: 'D5 MLP (SwiGLU)' },
-        { id: Phase.D6_Stack, title: 'D6 28 层堆叠与输出' },
-        { id: Phase.D7_Euler, title: 'D7 10 步 Euler 与动作块' },
-    ],
-}];
+// the chapter list of one engine instance: the same chapters for every model, titled with its
+// own structure; chapters about parts a model does not have (k005b's h* heads) are left out
+export function enginePhaseList(f: IModelFacts): IPhaseGroup[] {
+    let groups: IPhaseGroup[] = [{
+        groupId: PhaseGroup.Intro,
+        title: '概览',
+        phases: [
+            { id: Phase.Intro_Intro, title: '总览' },
+            { id: Phase.Intro_Prelim, title: '预备知识' },
+        ],
+    }, {
+        groupId: PhaseGroup.Detailed_Input,
+        title: '主干：一层展开',
+        phases: [
+            { id: Phase.Input_Detail_Embedding, title: '输入嵌入' },
+            { id: Phase.Input_Detail_LayerNorm, title: 'RMSNorm' },
+            { id: Phase.Input_Detail_SelfAttention, title: `${f.attnName} 联合注意力` },
+            { id: Phase.Input_Detail_Softmax, title: '前缀 Softmax' },
+            { id: Phase.Input_Detail_Projection, title: '输出投影与残差' },
+            { id: Phase.Input_Detail_Mlp, title: `MLP (${f.mlpName})` },
+            { id: Phase.Input_Detail_Transformer, title: `${f.nLayer} 层主干堆叠` },
+            ...(f.heads ? [{ id: Phase.Input_Detail_Output, title: 'h* 答案边界读出' }] : []),
+        ],
+    }];
+    if (f.heads) groups.push({
+        groupId: PhaseGroup.Heads,
+        title: '输出头',
+        phases: [
+            { id: Phase.Head_Knack, title: 'knack 分类头' },
+            { id: Phase.Head_Done, title: 'done 头' },
+            { id: Phase.Harness_Law, title: 'Harness 法则' },
+        ],
+    });
+    groups.push({
+        groupId: PhaseGroup.FlowMatching,
+        title: `${f.expertName}与流匹配`,
+        phases: [
+            { id: Phase.D0_Towers, title: 'D0 两座塔' },
+            { id: Phase.D1_SuffixInput, title: 'D1 后缀输入嵌入' },
+            { id: Phase.D2_AdaNorm, title: `D2 ${f.adaName}` },
+            { id: Phase.D3_JointAttn, title: 'D3 联合注意力' },
+            { id: Phase.D4_Projection, title: 'D4 输出投影与残差' },
+            { id: Phase.D5_Mlp, title: `D5 MLP (${f.mlpName})` },
+            { id: Phase.D6_Stack, title: `D6 ${f.nLayer} 层堆叠与输出` },
+            { id: Phase.D7_Euler, title: `D7 ${f.K} 步 Euler 与动作块` },
+        ],
+    });
+    return groups;
+}
 
 
 export function phaseToGroup(wt: IWalkthrough) {

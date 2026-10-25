@@ -2,6 +2,7 @@ import type { ICameraPos } from "./Camera";
 import type { IProgramState } from "./Program";
 import type { IRenderView } from "./render/modelRender";
 import type { IPhaseGroup } from "./walkthrough/WalkthroughTools";
+import type { IModelFacts } from "./ModelFacts";
 
 export type PageId = 'vla' | 'groot' | 'pi0';
 
@@ -9,6 +10,8 @@ export type PageId = 'vla' | 'groot' | 'pi0';
 // top of the shared renderer (blocks, arrows, text, camera, commentary panel).
 export interface IPageSpec {
     id: PageId;
+    // the structural facts the chapter texts quote (engine instances only)
+    facts?: IModelFacts;
     phaseList: IPhaseGroup[];
     firstPhase: number;
     initialCamera: ICameraPos;

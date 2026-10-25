@@ -61,7 +61,11 @@ export function auditArrows(layout: IVlaModelLayout) {
     // the bottom x1 which is the same tensor as the FM input x1 (a skip, not a new source)
     let srcOk = new Set<IBlkDef>([layout.idxObj, layout.fm.state75, layout.fm.x1, layout.fm.timeEmb,
         layout.actionX1, layout.strip[0], ...layout.expertLayers.flatMap(e => [e.ada, e.ada2])]);
+    if (layout.expertNorm.ada) srcOk.add(layout.expertNorm.ada);
     let sinkOk = new Set<IBlkDef>([layout.logitsSoftmax, layout.doneProbs, layout.actionChunk, layout.strip[layout.strip.length - 1]]);
+    // without a final trunk norm (pi0) the last trunk layer's output is computed but never read:
+    // the expert only reads the trunk's per-layer K/V
+    if (layout.ln_f.lnResid.absent) sinkOk.add(layout.blocks[layout.blocks.length - 1].mlpResidual);
     return auditEdges(layout.cubes, srcOk, sinkOk);
 }
 
@@ -121,6 +125,11 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
     drawArrowBetween(fm.timeHidden, BlockPos.Left, fm.timeOutW, BlockPos.Right, 4);
     drawArrowBetween(fm.timeOutW, BlockPos.Left, fm.actionTime, BlockPos.Right, 4);
     drawArrowBetween(fm.actionTime, BlockPos.Left, layout.expertIn, BlockPos.Right, 4);
+    if (!layout.variant.time_into_tokens) {
+        // pi0: the action tokens are action_in_proj(x_t) alone; the time MLP ends in cond
+        drawArrowBetween(fm.actionInW, BlockPos.Left, layout.expertIn, BlockPos.Right, 4);
+        drawArrowBetween(fm.timeOutW, BlockPos.Left, fm.cond, BlockPos.Right, 4);
+    }
 
     drawEulerStrip();
 
@@ -144,6 +153,7 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
 
         drawLn(prev, L.ln1);
         let lnR = L.ln1.lnResid;
+        let gated = layout.variant.ada_rows === 3 && !!L.ln1.ada;
 
         // K/V are shared by the query heads of a kv group: one arrow per group
         for (let grp of L.kvGroups) {
@@ -178,7 +188,8 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
         drawHorizArrow(oB, r1);
         drawHorizArrow(L.projWeight, L.attnOut);
         // ⊕ = o_proj out + the layer input: the skip is a label, not a line past the sublayers
-        drawSkip(prev, r1, '+ skip: layer input');
+        drawSkip(prev, r1, gated ? '+ skip: x + gate1 * attn' : '+ skip: layer input');
+        if (gated) drawGate(L.ln1.ada!, r1);
 
         drawLn(r1, L.ln2);
         let ln2R = L.ln2.lnResid;
@@ -194,7 +205,8 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
         drawHorizArrow(L.mlpProjWeight, L.mlpResult);
         drawHorizArrow(L.mlpResult, L.mlpResidual);
         drawArrowBetween(L.mlpAct, BlockPos.Right, L.mlpResult, BlockPos.Top);
-        drawSkip(r1, L.mlpResidual, '+ skip: attn residual');
+        drawSkip(r1, L.mlpResidual, gated ? '+ skip: x + gate2 * mlp' : '+ skip: attn residual');
+        if (gated) drawGate(L.ln2.ada!, L.mlpResidual);
         return L.mlpResidual;
     }
 
@@ -235,12 +247,31 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
 
     drawEulerReturn();
 
-    // te(t) → every DiT layer's γβ slots: one bus per column, just right of the γβ slots
+    // the gate row of a gated AdaNorm (pi0) scales the sublayer output in its residual add:
+    // down out of the modulation block, into the ⊕ block's left face above the sublayer arrow
+    function drawGate(src: IBlkDef, dst: IBlkDef) {
+        let opacity = Math.min(src.opacity, dst.opacity);
+        if (opacity === 0) return;
+        rec(src, dst);
+        let w = 1.6;
+        let normal = new Vec3(0, 0, 1);
+        let col = arrowColor(src, dst, opacity);
+        let start = blockPos(src, BlockPos.Bot);
+        start.x = src.x + src.dx * 5 / 6;
+        let yEnd = dst.y + dst.dy * 0.25;
+        drawA(state, start, new Vec3(start.x, yEnd - w / 2, start.z), w, normal, col, false, CornerMode.None, new Vec3(0, 1, 0));
+        drawA(state, new Vec3(start.x + w / 2, yEnd, start.z), new Vec3(dst.x - pad, yEnd, start.z), w, normal, col, true, CornerMode.Right);
+    }
+
+    // te(t) (pi0: cond) → every expert layer's modulation slots: one bus per column, just right of them
     function drawTimeBus() {
-        let te = layout.fm.timeEmb;
+        let te = layout.fm.busSrc;
         let els = layout.expertLayers;
-        let cols: (typeof els)[] = [];
-        for (let e of els) {
+        type IBusEnd = { ada: IBlkDef, ada2: IBlkDef | null, attnResidual: IBlkDef };
+        let all: IBusEnd[] = [...els];
+        if (layout.expertNorm.ada) all.push({ ada: layout.expertNorm.ada, ada2: null, attnResidual: layout.expertNorm.lnResid });
+        let cols: IBusEnd[][] = [];
+        for (let e of all) {
             let last = cols[cols.length - 1];
             if (last && Math.abs(last[0].ada.x - e.ada.x) < 1) last.push(e);
             else cols.push([e]);
@@ -249,7 +280,7 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
         let normal = new Vec3(0, 0, 1);
         for (let c = 0; c < cols.length; c++) {
             let col = cols[c];
-            let ends = col.flatMap(e => [e.ada, e.ada2]).filter(b => b.opacity > 0 && te.opacity > 0);
+            let ends = col.flatMap(e => [e.ada, e.ada2]).filter((b): b is IBlkDef => !!b && b.opacity > 0 && te.opacity > 0);
             if (ends.length === 0) continue;
             let res = col[0].attnResidual;
             let busX = (ends[0].x + ends[0].dx + res.x) / 2;
@@ -261,7 +292,7 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
             let yStart: number;
             if (c === 0) {
                 // from te: up out of te, across above the input cluster, down the bus
-                let yTop = layout.fm.state75.y - layout.margin;
+                let yTop = layout.fm.topY - layout.margin;
                 let tx = te.x + te.dx / 2;
                 yStart = yTop;
                 drawA(state, new Vec3(tx, te.y - pad, z), new Vec3(tx, yTop + w / 2, z), w, normal, col4, false);

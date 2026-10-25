@@ -28,7 +28,13 @@ export function walkthrough04_SelfAttention(args: IWalkthroughArgs) {
     initialFrame(state, [block0.ln1.lnResid, ...block0.heads.flatMap(h => h.cubes)], 294, 12.8, { fill: 1.0 });
     wt.dimHighlightBlocks = [layout.residual0, block0.ln1.lnResid, ...head0.cubes];
 
-    commentary(wt, null, 0)`
+    let f = state.page.facts!;
+    let pi0 = f.id === 'pi0';
+    if (pi0) commentary(wt, null, 0)`
+注意力是 transformer 层的核心：输入嵌入矩阵中的各列在这里相互“交流”。在其他阶段，各列都是相互独立处理的。
+
+π0.5（Gemma-2B）的注意力是 MQA：每层 ${f.nHead} 个 query head 共享 _同一组_ key/value head（${f.nKv} 个 KV 头），head 维度 ${f.headDim}。图中只画 L0 的 head 0（真实数值，显示 ${layout.shape.T} 个 token × ${layout.shape.A} 维的窗口）：其余 ${f.nHead - 1} 个 head 与它结构相同、K/V 完全共用，只是 Q 权重不同，所以不重复铺开，标注为 ×${f.nHead}。Gemma 没有 q_norm / k_norm，Q/K 在点积前只做 RoPE 旋转。`;
+    else commentary(wt, null, 0)`
 注意力是 transformer 层的核心：输入嵌入矩阵中的各列在这里相互“交流”。在其他阶段，各列都是相互独立处理的。
 
 k005b 的注意力是 GQA：每层 16 个 query head、8 个 key/value head（每 2 个 query head 共享一组 K/V），head 维度 128。图中只画 L0 的 head 0（真实数值，显示 32 个 token × 64 维的窗口）：其余 15 个 head 与 7 组 K/V 结构完全相同，只是权重不同，所以不重复铺开，标注为 ×16。Q/K 在点积前还要经过 q_norm / k_norm（RMSNorm）和 RoPE 旋转。`;
@@ -48,7 +54,7 @@ ${embedInline(<ul>
     <li>V: <BlockText blk={head0.vBlock}>值向量 (Value)</BlockText></li>
 </ul>)}
 
-每个向量都由一次矩阵-向量乘法得到（Qwen3 的 QKV 没有偏置），每个输出单元格都是输入向量的线性组合。例如${c_blockRef('Q 向量', head0.qBlock)}，是${c_blockRef('Q 权重矩阵', head0.qWeightBlock)}的一行与${c_blockRef('输入矩阵', block0.ln1.lnResid)}的一列做点积。`;
+每个向量都由一次矩阵-向量乘法得到（${pi0 ? 'Gemma' : 'Qwen3'} 的 QKV 没有偏置），每个输出单元格都是输入向量的线性组合。例如${c_blockRef('Q 向量', head0.qBlock)}，是${c_blockRef('Q 权重矩阵', head0.qWeightBlock)}的一行与${c_blockRef('输入矩阵', block0.ln1.lnResid)}的一列做点积。`;
     breakAfter();
 
     let t_focusQCol = afterTime(null, 1.0);
@@ -145,7 +151,7 @@ ${embedInline((() => {
     commentary(wt)`
 查找表中的 {K, V} 条目是它可见的各列，Q 是当前这一列。
 
-先计算当前列（${c_dimRef('t = 5', DimStyle.T)}）的${c_blockRef('Q 向量', head0.qBlock)}与之前各列的${c_blockRef('K 向量', head0.kBlock)}的点积，结果存入${c_blockRef('注意力矩阵', head0.attnMtx)}的对应行（${c_dimRef('t = 5', DimStyle.T)}）。`;
+先计算当前列（${c_dimRef('t = 5', DimStyle.T)}）的${c_blockRef('Q 向量', head0.qBlock)}与之前各列的${c_blockRef('K 向量', head0.kBlock)}的点积${pi0 ? '（π0.5 的前缀是双向注意力，所以这里是与窗口内的 _所有_ 列，不分先后）' : ''}，结果存入${c_blockRef('注意力矩阵', head0.attnMtx)}的对应行（${c_dimRef('t = 5', DimStyle.T)}）。`;
     breakAfter();
 
     let t_processAttnRow = afterTime(null, 3.0);
@@ -154,9 +160,9 @@ ${embedInline((() => {
     commentary(wt)`
 点积衡量两个向量的相似度：越相似，点积越大；差异越大，点积越小甚至为负。
 
-在 k005b 中，后缀流（动作专家）的查询可以关注前缀流的全部 K/V，也可以关注后缀自身；前缀流不会“看到”后缀。图中被掩码的位置是真实的 -inf（softmax 后为 0）。
+${pi0 ? '在 π0.5 中，前缀内部是双向注意力：每个前缀 token 都能看到全部前缀 token，所以主干的注意力矩阵没有三角掩码。后缀流（动作专家）的查询可以关注全部前缀和全部后缀；前缀流不会“看到”后缀。' : '在 k005b 中，后缀流（动作专家）的查询可以关注前缀流的全部 K/V，也可以关注后缀自身；前缀流不会“看到”后缀。图中被掩码的位置是真实的 -inf（softmax 后为 0）。'}
 
-点积之后还要除以 sqrt(${c_dimRef('A', DimStyle.A)}) = sqrt(128)，其中 ${c_dimRef('A', DimStyle.A)} 是 Q/K/V 向量的长度。这样可避免较大的数值在下一步 softmax 中占据主导。
+点积之后还要除以 sqrt(${c_dimRef('A', DimStyle.A)}) = sqrt(${f.headDim})，其中 ${c_dimRef('A', DimStyle.A)} 是 Q/K/V 向量的长度。这样可避免较大的数值在下一步 softmax 中占据主导。
 
 softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和为 1。`;
     breakAfter();

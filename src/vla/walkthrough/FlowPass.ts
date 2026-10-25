@@ -18,7 +18,8 @@ export const nFlowStages = flowStageNames.length;
 function layerStages(L: IVlaModelLayout, i: number): IFlowStage[] {
     let b = L.blocks[i];
     let e = L.expertLayers[i];
-    let st = (k: number, trunk: IBlkDef[], expert: IBlkDef[]) => ({ name: flowStageNames[k], trunk, expert });
+    let st = (k: number, trunk: IBlkDef[], expert: IBlkDef[]) => ({ name: k === 8 && L.variant.trunk_mlp === 'geglu'
+        ? 'GELU · up' : flowStageNames[k], trunk, expert });
     let eh = e ? e.heads : [];
     return [
         st(0, b.ln1.cubes, e ? e.ln1.cubes : []),
@@ -112,6 +113,8 @@ export function applyFmStep(L: IVlaModelLayout, m: IVlaModelLink | null, k: numb
     }
     set(L.expertIn, 'expert_in');
     set(L.expertOut, 'expert_out');
+    if (L.expertNorm.ada) set(L.expertNorm.ada, 'expert_final_ada');
+    set(L.fm.cond, 'fm_cond');
     if (k > 0) [L.expertNorm.lnAgg1, L.expertNorm.lnAgg2].forEach(disable);
     set(L.fm.x1, 'x');
     set(L.fm.actionEmb, 'fm_action_emb');

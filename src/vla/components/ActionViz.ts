@@ -115,8 +115,10 @@ function drawNormCompare(state: IProgramState, layout: IVlaModelLayout, m: IVlaM
     let blk = viz.normWhich === 1 ? e.ada : e.ada2;
     let out = (viz.normWhich === 1 ? el.ln_1 : el.ln_2).output.localBuffer;
     if (blk.opacity <= 0) return;
-    let wc = ada.localBuffer.length / 4; // rows: g1, b1, g2, b2
-    let g0 = (viz.normWhich - 1) * 2;
+    // rows per norm: [g, b] (k005b) or [scale, shift, gate] (pi0); the gate acts at the residual
+    let R = layout.variant.ada_rows, gated = R === 3;
+    let wc = ada.localBuffer.length / (2 * R);
+    let g0 = (viz.normWhich - 1) * R;
     let nTok = out.length / wc, t = Math.min(viz.normTok, nTok - 1);
     let a = viz.normCmp;
     let cell = layout.cell;
@@ -143,10 +145,10 @@ function drawNormCompare(state: IProgramState, layout: IVlaModelLayout, m: IVlaM
     state.render.sharedRender.activePhase = prev;
     let txt = new Vec4(0.1, 0.1, 0.15, 1).mul(a);
     let ty = blk.y - 13;
-    let nm = viz.normWhich === 1 ? 'AdaRMSNorm1' : 'AdaRMSNorm2';
+    let nm = `${gated ? 'adaRMS' : 'AdaRMSNorm'}${viz.normWhich}`;
     sceneText(state, `${nm} layer ${i}, suffix token ${t}, ch 0-${wc - 1}`, x0 - lim, ty, z, 2.4, txt);
-    sceneText(state, 'grey  : RMSNorm(x)*w  (before t-modulation)', x0 - lim, ty + 3.5, z, 2.2, grey);
-    sceneText(state, 'orange: (1+g(t))*n + b(t)  (after)', x0 - lim, ty + 6.5, z, 2.2, orange);
+    sceneText(state, gated ? 'grey  : RMSNorm(x)  (before t-modulation)' : 'grey  : RMSNorm(x)*w  (before t-modulation)', x0 - lim, ty + 3.5, z, 2.2, grey);
+    sceneText(state, gated ? 'orange: (1+scale(t))*n + shift(t)  (after)' : 'orange: (1+g(t))*n + b(t)  (after)', x0 - lim, ty + 6.5, z, 2.2, orange);
     let lr = state.render.lineRender;
     addLine(lr, 0.6, txt, new Vec3(x0, blk.y, z), new Vec3(x0, blk.y + blk.dy, z), undefined, undefined, 0);
 }

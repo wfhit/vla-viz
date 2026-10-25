@@ -17,11 +17,12 @@ visible; it follows openpi/models/{pi0,gemma,siglip}.py line by line. Checks:
 cached-prefix sampling == one joint (non-cached) forward of both streams, Euler
 identity, and (--jax-ref) the official openpi Pi0.sample_actions in JAX on CPU.
 
-Outputs (public/): pi0-weights.json, pi0-acts.json, pi0-fm.json (per-step,
-float16), pi0-check.json (spot values from the live tensors).
+Outputs (public/), in the same schema as tools/export_k005b.py (the /pi0 page runs on
+the shared VLA engine; config.variant carries pi0.5's structural differences):
+pi0-weights.json, pi0-acts.json (every layer, step 0 = t 1), pi0-fm.json (every
+Euler step, float16), pi0-check.json (spot values from the live tensors).
 """
 import argparse
-import base64
 import importlib.util
 import json
 import math
@@ -40,12 +41,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CAMS = [("base_0_rgb", "head", "observation.rgb.zed_link_camera_0"),
         ("left_wrist_0_rgb", "left_wrist", "observation.rgb.left_realsense_link_camera_0"),
         ("right_wrist_0_rgb", "right_wrist", "observation.rgb.right_realsense_link_camera_0")]
+WT = 32       # token window: the last WT prefix tokens
 WC = 64       # hidden-channel window [0, WC)
-WD = 64       # head-dim window (head_dim 256)
+WD = 32       # head-dim window (head_dim 256)
 WF = 64       # MLP hidden window
-WS = 32       # channel window of the per-layer prefix stack
-PR = 16       # image rows per view shipped for prefix walls (all text rows are shipped)
-THUMB = 128
+NPART = 8     # one-step particles (seeds) at t = 1
 SEED = 0
 NSTEP = 10
 HOR, ADIM = 32, 32
@@ -53,9 +53,10 @@ HOR, ADIM = 32, 32
 # openpi-comet b1k_policy.extract_state_from_proprio (R1Pro PROPRIOCEPTION_INDICES)
 STATE23 = [("base_qvel", 0, 3), ("trunk_qpos", 53, 57), ("arm_left_qpos", 3, 10),
            ("arm_right_qpos", 28, 35), ("gripper_left_width", 24, 26), ("gripper_right_width", 49, 51)]
-ACTION_DIM_NAMES = (["base_vx", "base_vy", "base_yaw"] + [f"torso_{i}" for i in range(1, 5)]
-                    + [f"L_arm_j{i}" for i in range(1, 8)] + [f"R_arm_j{i}" for i in range(1, 8)]
-                    + ["L_gripper", "R_gripper"])
+# BEHAVIOR R1 Pro native action order (openpi configs/robots/b1k.py: grippers at 14 and 22)
+ACTION_DIM_NAMES = (["base_vx", "base_vy", "base_yaw"] + [f"trunk_{i}" for i in range(1, 5)]
+                    + [f"L_arm_j{i}" for i in range(1, 8)] + ["L_gripper"]
+                    + [f"R_arm_j{i}" for i in range(1, 8)] + ["R_gripper"])
 
 
 def load_module(name, path):
@@ -145,7 +146,6 @@ def main():
     import sentencepiece
     import torch
     import torch.nn.functional as F
-    from PIL import Image
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     dev = torch.device(args.device)
@@ -191,15 +191,12 @@ def main():
     NV, VW, VH = 27, 1152, 16
     VD = VW // VH
 
-    def siglip(img_u8, keep):
+    def siglip(img_u8):
         x = torch.from_numpy(img_u8).to(dev).float() / 255.0 * 2.0 - 1.0          # [224,224,3]
         k = Pm(P + "img.embedding.kernel").permute(3, 2, 0, 1)                    # HWIO -> OIHW
         x = F.conv2d(x.permute(2, 0, 1)[None], k, Pm(P + "img.embedding.bias"), stride=14)
         x = x[0].flatten(1).T                                                      # [256, 1152] row-major
-        keep["stem"] = x.clone()
         x = x + Pm(P + "img.pos_embedding")[0]
-        keep["posemb"] = x.clone()
-        outs = []
         for l in range(NV):
             y = ln(x, VB + "LayerNorm_0", l)
             A = VB + "MultiHeadDotProductAttention_0."
@@ -213,19 +210,11 @@ def main():
             M = VB + "MlpBlock_0."
             y = F.gelu(y @ Pm(M + "Dense_0.kernel")[l] + Pm(M + "Dense_0.bias")[l], approximate="tanh")
             x = x + y @ Pm(M + "Dense_1.kernel")[l] + Pm(M + "Dense_1.bias")[l]
-            outs.append(x)
-        keep["blocks"] = outs
         enc = ln(x, P + "img.Transformer.encoder_norm")
-        keep["enc"] = enc
         return enc @ Pm(P + "img.head.kernel") + Pm(P + "img.head.bias")          # [256, 2048]
 
     with torch.no_grad():
-        vis = {}
-        img_tok = []
-        for name, view, _ in CAMS:
-            vis[view] = {}
-            img_tok.append(siglip(imgs224[name], vis[view]))
-        img_tok = torch.cat(img_tok, 0)                                            # [768, 2048]
+        img_tok = torch.cat([siglip(imgs224[name]) for name, _, _ in CAMS], 0)                                            # [768, 2048]
     print(f"[siglip] {tuple(img_tok.shape)} ({time.time() - t0:.0f}s)", flush=True)
 
     # ---------------- Gemma prefix + expert ---------------- #
@@ -235,7 +224,6 @@ def main():
 
     emb_table = Params(CKPT, "cpu")(P + "llm.embedder.input_embedding")
     txt_emb = (emb_table[torch.tensor(ids)] * math.sqrt(DP)).to(dev)              # [T, 2048]
-    emb_rows = {"ids": ids, "rows": emb_table[torch.tensor(ids)][:, :WC].clone()}
     prefix0 = torch.cat([img_tok, txt_emb], 0)
     Np = prefix0.shape[0]
     NIMG = img_tok.shape[0]
@@ -287,64 +275,119 @@ def main():
         si = t * (1.0 / period * 2 * math.pi)
         pe = torch.cat([si.sin(), si.cos()])
         h = F.silu(pe @ Pm("time_mlp_in.kernel") + Pm("time_mlp_in.bias"))
-        return pe, F.silu(h @ Pm("time_mlp_out.kernel") + Pm("time_mlp_out.bias"))
+        return pe, h, F.silu(h @ Pm("time_mlp_out.kernel") + Pm("time_mlp_out.bias"))
 
     pos_p = torch.arange(Np, device=dev)
     pos_s = Np + torch.arange(HOR, device=dev)
+
+    # the shown token window: the last WT prefix tokens (the tail of the text prompt: the
+    # discretised state tokens and "Action: ")
+    assert T >= WT, "prompt shorter than the token window"
+    t0w = Np - WT
+    tw = slice(t0w, Np)
+    pieces = [sp.id_to_piece(i) for i in ids]
+    state_start = next(i for i in range(T) if "".join(pieces[:i + 1]).endswith("State:"))
+    state_end = next(i for i in range(state_start + 1, T) if ";" in pieces[i])
+    # prefix key groups for the attention-mass split [state tokens | image | other text]
+    col_state = torch.zeros(Np, dtype=torch.bool, device=dev)
+    col_state[NIMG + state_start + 1:NIMG + state_end] = True
+    col_img = torch.zeros(Np, dtype=torch.bool, device=dev)
+    col_img[:NIMG] = True
+    col_txt = ~(col_state | col_img)
+    Wx, A = {}, {}
+
+    def put(D, name, window, full, offset, desc):
+        D[name] = ent(window, full, offset, desc)
+
+    def norm_agg(x):  # [T, C] -> [T, 2]: mean(x^2) over the FULL C | rsqrt(mean+eps)
+        ms = x.pow(2).mean(-1)
+        return torch.stack([ms, torch.rsqrt(ms + 1e-6)], -1), ms
+
+    def heads_first(x):  # [T, N, H] -> [N, T, H]
+        return x.permute(1, 0, 2)
 
     with torch.no_grad():
         # prefix pass (fills the KV cache); prefix mask is all-True after trimming text padding
         mp = torch.ones(Np, Np, dtype=torch.bool, device=dev)
         x = prefix0
-        Kc, Vc, pre_in, pre_mass, pre_txt_attn, pre_keep = [], [], [], [], {}, {}
+        Kc, Vc = [], []
         for l in range(NL):
-            pre_in.append(x)
+            x_in = x
             xn, _, _ = rms(x, W("pre_attention_norm.scale", l, ""))
             q, k, v = qkv(xn, l, "", pos_p)
             enc, pr = attend(q, k, v, mp)
             ao = torch.einsum("tnh,nhd->td", enc, W("attn.attn_vec_einsum#.w", l, ""))
             r1 = x + ao
             xn2, _, _ = rms(r1, W("pre_ffw_norm.scale", l, ""))
-            kp = {} if l == 0 else None
-            fo = mlp(xn2, l, "", kp)
-            if l == 0:
-                pre_keep = dict(xn=xn, q=q, k=k, v=v, probs=pr[0], ao=ao, r1=r1, xn2=xn2, ff=fo, mlp_h=kp["mlp_h"], out=r1 + fo)
+            gg = W("mlp#.gating_einsum", l, "")
+            gate, up = xn2 @ gg[0], xn2 @ gg[1]
+            fo = mlp(xn2, l, "")
             x = r1 + fo
             Kc.append(k)
             Vc.append(v)
-            pre_mass.append(pr.mean((0, 1)))
-            if l in (0, NL - 1):
-                pre_txt_attn[l] = pr[:, NIMG:].mean(0)                             # [T, Np] text queries
-        pre_in.append(x)
+
+            # ---- layer l, k005b schema: window rows tw, channel / head-dim / FF windows ----
+            Ln = f"L{l}"
+            put(A, f"{Ln}.x_in", x_in[tw, :WC], x_in, [t0w, 0], f"layer {l} residual stream in [Np, 2048]")
+            agg, ms = norm_agg(x_in)
+            put(A, f"{Ln}.ln1_agg", agg[tw], ms, [t0w, 0], "RMSNorm agg over the full 2048: mean(x^2) | rsqrt(mean+1e-6)")
+            put(A, f"{Ln}.ln1_out", xn[tw, :WC], xn, [t0w, 0], f"layer {l} pre_attention_norm out = RMS(x)(1+scale)")
+            qu = q * math.sqrt(HD)                                                 # q after RoPE, before 1/sqrt(d)
+            put(A, f"{Ln}.q", heads_first(qu[tw, :, :WD]), heads_first(qu), [0, t0w, 0], f"layer {l} Q after RoPE [head, token, dim]")
+            put(A, f"{Ln}.k", heads_first(k[tw, :, :WD]), heads_first(k), [0, t0w, 0], f"layer {l} K after RoPE (1 shared kv head)")
+            put(A, f"{Ln}.v", heads_first(v[tw, :, :WD]), heads_first(v), [0, t0w, 0], f"layer {l} V (1 shared kv head)")
+            s = torch.einsum("tnh,skh->nts", q[tw], k)                            # [H, Wt, Np] = q.k / 16
+            mx = s.max(-1).values
+            inv = 1.0 / torch.exp(s - mx[..., None]).sum(-1)
+            put(A, f"{Ln}.attn_scores", s[:, :, tw], s, [0, t0w, t0w], f"layer {l} q.k/sqrt(256) (bidirectional prefix: no mask)")
+            put(A, f"{Ln}.attn_agg", torch.stack([mx, inv], -1), mx, [0, t0w, 0], f"softmax agg over all {Np} keys: max | 1/sum exp(s-max)")
+            put(A, f"{Ln}.attn_probs", pr[:, tw, tw], pr[:, tw], [0, t0w, t0w], f"layer {l} attention probs (rows normalised over all {Np} keys)")
+            put(A, f"{Ln}.attn_out", heads_first(enc[tw, :, :WD]), heads_first(enc), [0, t0w, 0], f"layer {l} per-head sum p.V")
+            for nm, tns, d in (("o_out", ao, "attn_vec_einsum out"), ("attn_resid", r1, "x + attn (plain residual)"),
+                               ("ln2_out", xn2, "pre_ffw_norm out"), ("mlp_out", fo, "GeGLU MLP out (linear)"),
+                               ("mlp_resid", x, "x + MLP (layer out)")):
+                put(A, f"{Ln}.{nm}", tns[tw, :WC], tns, [t0w, 0], f"layer {l} {d}")
+            agg, ms = norm_agg(r1)
+            put(A, f"{Ln}.ln2_agg", agg[tw], ms, [t0w, 0], "RMSNorm agg over the full 2048: mean(x^2) | rsqrt(mean+1e-6)")
+            hh = F.gelu(gate, approximate="tanh") * up
+            for nm, tns, d in (("mlp_gate", gate, "gating_einsum[0] out"), ("mlp_up", up, "gating_einsum[1] out"),
+                               ("mlp_act", hh, "gelu_tanh(gate) * up")):
+                put(A, f"{Ln}.{nm}", tns[tw, :WF], tns, [t0w, 0], f"layer {l} {d} [Np, 16384]")
         prefix_final, _, _ = rms(x, Pm(P + "llm.final_norm.scale"))                # not used by the expert
         print(f"[prefix] Np={Np} ({time.time() - t0:.0f}s)", flush=True)
 
-        def suffix(x_t, t, keep_all=False):
-            pe, cond = time_cond(torch.tensor(float(t), device=dev))
+        def suffix(x_t, t):
+            pe, th, cond = time_cond(torch.tensor(float(t), device=dev))
             a_tok = x_t @ Pm("action_in_proj.kernel") + Pm("action_in_proj.bias")
             xs = a_tok
-            rec = dict(x_t=x_t.clone(), t=t, pe=pe, cond=cond, a_tok=a_tok, layers=[])
+            rec = dict(x_t=x_t.clone(), t=t, pe=pe, th=th, cond=cond, a_tok=a_tok, layers=[])
             ms = torch.ones(HOR, Np + HOR, dtype=torch.bool, device=dev)
             for l in range(NL):
                 xn, ga, (sa, ha, _) = rms(xs, dense=ada(l, "pre_attention_norm"), cond=cond)
                 q, k, v = qkv(xn, l, "_1", pos_s)
-                enc, pr = attend(q, torch.cat([Kc[l], k]), torch.cat([Vc[l], v]), ms)
+                Kj, Vj = torch.cat([Kc[l], k]), torch.cat([Vc[l], v])
+                enc, pr = attend(q, Kj, Vj, ms)
+                lg = torch.einsum("tnh,skh->nts", q, Kj)
                 ao = torch.einsum("tnh,nhd->td", enc, W("attn.attn_vec_einsum#.w", l, "_1"))
                 r1 = xs + ao * ga
                 xn2, gf, (sf, hf, _) = rms(r1, dense=ada(l, "pre_ffw_norm"), cond=cond)
+                gg = W("mlp#.gating_einsum", l, "_1")
+                gate, up = xn2 @ gg[0], xn2 @ gg[1]
                 kp = {}
                 fo = mlp(xn2, l, "_1", kp)
                 out = r1 + fo * gf
+                pm = pr.mean(0)                                                    # [32, Np+32] head-mean
+                mass4 = torch.stack([pm[:, :Np][:, col_state].sum(-1), pm[:, :Np][:, col_img].sum(-1),
+                                     pm[:, :Np][:, col_txt].sum(-1), pm[:, Np:].sum(-1)], -1)
                 L = dict(x_in=xs, out=out, scale_a=sa, shift_a=ha, gate_a=ga, scale_f=sf, shift_f=hf, gate_f=gf,
-                         mass=pr.mean((0, 1)), prefix_share=pr[..., :Np].sum(-1).mean(0))
-                if keep_all or l == 0:
-                    L.update(xn=xn, q=q, k=k, v=v, probs=pr, ao=ao, r1=r1, xn2=xn2, ff=fo, mlp_h=kp["mlp_h"])
+                         xn=xn, q=q, k=k, v=v, probs=pr, lg=lg, enc=enc, ao=ao, r1=r1, xn2=xn2, gate=gate, up=up,
+                         ff=fo, mlp_h=kp["mlp_h"], pm=pm, mass4=mass4)
                 rec["layers"].append(L)
                 xs = out
             fin, _, (fs, fh, fg) = rms(xs, dense=(Pm(P + "llm.final_norm_1.Dense_0.kernel"),
                                                   Pm(P + "llm.final_norm_1.Dense_0.bias")), cond=cond)
             v_t = fin @ Pm("action_out_proj.kernel") + Pm("action_out_proj.bias")
-            rec.update(final=fin, final_scale=fs, final_shift=fh, v=v_t)
+            rec.update(x_out=xs, final=fin, final_scale=fs, final_shift=fh, v=v_t)
             return rec
 
         g = torch.Generator().manual_seed(SEED)
@@ -360,6 +403,14 @@ def main():
             x_t, t = rec["x_next"], t + dt
         action_n = x_t                                                             # [32, 32] normalised
         print(f"[euler] done |a|max={float(action_n.abs().max()):.3f} ({time.time() - t0:.0f}s)", flush=True)
+
+        # NPART one-step particles at t = 1 (seeds 0..NPART-1; seed 0 = the decode's own noise):
+        # x1 | v | x1 - v, and each layer's suffix attention mass
+        parts = []
+        for sd in range(NPART):
+            n_s = torch.randn(HOR, ADIM, generator=torch.Generator().manual_seed(sd)).to(dev)
+            r = suffix(n_s, 1.0)
+            parts.append(dict(x1=n_s, v=r["v"], chunk=n_s - r["v"], mass=torch.stack([L["mass4"] for L in r["layers"]])))
 
         # joint (non-cached) forward of both streams at step 0: the two streams share one
         # attention per layer; prefix rows cannot see the suffix (make_attn_mask with ar=[0..0 | 1, 0..0])
@@ -422,201 +473,183 @@ def main():
     if max(asserts.values()) > 2e-3:
         raise SystemExit("re-implementation disagrees with itself / the official openpi model")
 
-    # ---------------- export ---------------- #
-    Wx, A = {}, {}
+    # ---------------- export (the shared VLA schema of public/k005b-*.json) ---------------- #
+    def tw_(x, cw=WC):
+        return x[tw, :cw]
 
-    def wput(name, full, window, desc):
-        Wx[name] = ent(window, full, [0] * window.dim(), desc)
+    # embed: the WT window tokens' rows of the 257152-row table (gathered, `row_ids`)
+    wids = ids[t0w - NIMG:]
+    put(Wx, "embed", emb_table[torch.tensor(wids)][:, :WC], emb_table, [0, 0],
+        "input_embedding [257152, 2048]: the rows of the window's tokens (gathered); embed_out = row x sqrt(2048)")
+    Wx["embed"]["row_ids"] = wids
+    put(A, "embed_out", prefix0[tw, :WC], prefix0, [t0w, 0], "prefix input = [image tokens | text rows x sqrt(2048)] [Np, 2048]")
 
-    def aput(name, full, window, desc):
-        A[name] = ent(window, full, [0] * window.dim(), desc)
+    def put_layer_w(tag, l, sfx, Dm):
+        qe = W("attn.q_einsum#.w", l, sfx).permute(0, 2, 1)                       # [8, 256, D]
+        kv = W("attn.kv_einsum#.w", l, sfx).permute(0, 1, 3, 2)                   # [2, 1, 256, D]
+        o = W("attn.attn_vec_einsum#.w", l, sfx).reshape(NH * HD, Dm).T           # [D, 2048] (out, in)
+        gg = W("mlp#.gating_einsum", l, sfx)                                       # [2, D, F]
+        li = W("mlp#.linear", l, sfx)                                              # [F, D]
+        put(Wx, f"{tag}{l}.q_w", qe[:, :WD, :WC], qe, [0, 0, 0], f"q_einsum{sfx} [8, {Dm}, 256] as [head, dim, in]")
+        put(Wx, f"{tag}{l}.k_w", kv[0][:, :WD, :WC], kv[0], [0, 0, 0], f"kv_einsum{sfx} K [1, 256, {Dm}]")
+        put(Wx, f"{tag}{l}.v_w", kv[1][:, :WD, :WC], kv[1], [0, 0, 0], f"kv_einsum{sfx} V [1, 256, {Dm}]")
+        put(Wx, f"{tag}{l}.o_w", o[:WC, :WC], o, [0, 0], f"attn_vec_einsum{sfx} [8, 256, {Dm}] as [out, in]")
+        put(Wx, f"{tag}{l}.gate_w", gg[0].T[:WF, :WC], gg[0].T, [0, 0], f"gating_einsum{sfx}[0] as [F, in]")
+        put(Wx, f"{tag}{l}.up_w", gg[1].T[:WF, :WC], gg[1].T, [0, 0], f"gating_einsum{sfx}[1] as [F, in]")
+        put(Wx, f"{tag}{l}.down_w", li.T[:WC, :WF], li.T, [0, 0], f"mlp{sfx}.linear as [out, F]")
 
-    def a2(name, x, desc, cw=WC):
-        aput(name, x, x[:, :cw], desc)
+    for l in range(NL):
+        put_layer_w("L", l, "", DP)
+        put_layer_w("E", l, "_1", DE)
+        for nm, key in (("ln1_w", "pre_attention_norm.scale"), ("ln2_w", "pre_ffw_norm.scale")):
+            g1 = 1.0 + W(key, l, "")
+            put(Wx, f"L{l}.{nm}", g1, g1, [0], f"1 + {key} (Gemma RMSNorm multiplies by 1 + scale)")
 
-    # vision
-    for view in vis:
-        a2(f"vit.{view}.patch", vis[view]["posemb"], f"{view}: conv 14x14 patch embed + learned pos [256, 1152]")
-    hv = vis["head"]
-    a2("vit.head.stem", hv["stem"], "head: conv 14x14 stride 14 output (before pos) [256, 1152]")
-    for i in (0, NV - 1):
-        a2(f"vit.head.B{i}", hv["blocks"][i], f"head view, SigLIP block {i} output [256, 1152]")
-    a2("vit.head.enc", hv["enc"], "head view, encoder_norm output [256, 1152]")
-    vnorm = torch.stack([torch.cat([vis[v]["blocks"][i].norm(dim=-1) for v in vis]) for i in range(NV)])
-    aput("vit.block_norm", vnorm, vnorm, "per-patch residual norm after each of the 27 SigLIP blocks [27, 768]")
-    A["img_tok"] = ent16(img_tok[:, :WS], "image tokens = head(encoder_norm(...)) 1152->2048 [768, 2048]", img_tok)
-    a2("txt_emb", txt_emb, f"text embeddings x sqrt(2048) [{T}, 2048]")
-
-    # prefix stream
-    # prefix rows shipped for walls: the first PR patches of each view + every text token
-    prow = [v * 256 + i for v in range(3) for i in range(PR)] + list(range(NIMG, Np))
-    pix = torch.tensor(prow, device=dev)
-
-    def ar(name, x, desc, cw=WC):  # prefix tensor [Np, ...] -> shipped rows, channel window
-        A[name] = ent16(x[pix][:, :cw], desc, x)
-
-    for l in range(NL + 1):
-        ar(f"pre.L{l}.x_in" if l < NL else "pre.out", pre_in[l],
-           f"prefix residual stream into layer {l} [Np, 2048]" if l < NL else "prefix stream after layer 17", WS)
-    pn = torch.stack([x.norm(dim=-1) for x in pre_in])
-    aput("pre.token_norm", pn, pn, "per-token prefix residual norm into each layer; last row = after layer 17 [19, Np]")
-    pm = torch.stack(pre_mass)
-    aput("pre.key_mass", pm, pm, "prefix self-attention: mean prob per key (heads, queries) per layer [18, Np]")
-    for l, a in pre_txt_attn.items():
-        A[f"pre.L{l}.txt_attn"] = ent16(a, f"layer {l}: text-query rows, mean over 8 heads [T, Np]")
-    K0 = pre_keep
-    ar("pre.L0.xn", K0["xn"], "RMSNorm(x)(1+scale) [Np, 2048]")
-    A["pre.L0.q"] = ent16(K0["q"][pix][:, 0, :WD], "Q head 0 after RoPE, x 256^-0.5 [Np, 8, 256]", K0["q"])
-    A["pre.L0.k"] = ent16(K0["k"][pix][:, 0, :WD], "K (1 shared KV head) after RoPE [Np, 1, 256]", K0["k"])
-    A["pre.L0.v"] = ent16(K0["v"][pix][:, 0, :WD], "V (1 shared KV head) [Np, 1, 256]", K0["v"])
-    A["pre.L0.probs"] = ent16(K0["probs"][pix], f"head 0: prefix queries over the {Np} prefix keys (bidirectional)",
-                              K0["probs"])
-    ar("pre.L0.ao", K0["ao"], "attn_vec_einsum output [Np, 2048]")
-    ar("pre.L0.r1", K0["r1"], "x + attn (plain residual)")
-    ar("pre.L0.xn2", K0["xn2"], "pre_ffw RMSNorm")
-    ar("pre.L0.mlp_h", K0["mlp_h"], "GeGLU hidden gelu(xW0) * xW1 [Np, 16384]", WF)
-    ar("pre.L0.ff", K0["ff"], "MLP output")
-    ar("pre.L0.out", K0["out"], "prefix layer 0 out")
-
-    # expert, step 0 (t = 1) layer 0 anatomy
+    # expert anatomy at Euler step 0 (t = 1, x_t = the noise)
     s0 = steps[0]
-    L0 = s0["layers"][0]
-    aput("x0", noise, noise, f"noise x_1 = randn(32, 32), seed {SEED}")
-    aput("s0.pe", s0["pe"], s0["pe"][:WC], "posemb_sincos(t=1, 1024, 4e-3, 4.0)")
-    aput("s0.cond", s0["cond"], s0["cond"][:WC], "adaRMS condition = swish(time_mlp_out(swish(time_mlp_in(pe))))")
-    a2("s0.a_tok", s0["a_tok"], "action tokens = action_in_proj(x_t) 32->1024 [32, 1024]")
-    for nm, desc in (("x_in", "expert layer 0 in"), ("xn", "adaRMS(x) = RMS(x)(1+scale)+shift"),
-                     ("ao", "attn_vec_einsum_1 output"), ("r1", "x + attn * gate_a"),
-                     ("xn2", "pre_ffw adaRMS"), ("ff", "GeGLU MLP output"), ("out", "x + mlp * gate_f")):
-        a2(f"s0.L0.{nm}", L0[nm], desc)
-    for nm in ("scale_a", "shift_a", "gate_a", "scale_f", "shift_f", "gate_f"):
-        aput(f"s0.L0.{nm}", L0[nm], L0[nm][:WC], f"adaRMS {nm} = chunk(Dense_0(cond)) [1024]")
-    aput("s0.L0.q", L0["q"], L0["q"][:, 0, :WD], "expert Q head 0 after RoPE [32, 8, 256]")
-    aput("s0.L0.k", L0["k"], L0["k"][:, 0, :WD], "expert K [32, 1, 256]")
-    aput("s0.L0.v", L0["v"], L0["v"][:, 0, :WD], "expert V [32, 1, 256]")
-    A["s0.L0.probs"] = ent16(L0["probs"][0], f"head 0: 32 action queries over [{Np} prefix | 32 action] keys", L0["probs"])
-    aput("s0.L0.mlp_h", L0["mlp_h"], L0["mlp_h"][:, :WF], "GeGLU hidden [32, 4096]")
-    jm = joint0["mask"].float()
-    aput("joint.mask", jm, jm[::8, ::8].contiguous(), "joint attention mask [Np+32]^2, every 8th row/col")
+    put(A, "expert_in", s0["a_tok"][:, :WC], s0["a_tok"], [0, 0], "expert input = action_in_proj(x_t) [32, 1024]")
+    for l, L in enumerate(s0["layers"]):
+        En = f"E{l}"
+        agg, ms = norm_agg(L["x_in"])
+        put(A, f"{En}.ln1_agg", agg, ms, [0, 0], "adaRMSNorm agg over the full 1024: mean(x^2) | rsqrt(mean+1e-6)")
+        put(A, f"{En}.ln1", L["xn"][:, :WC], L["xn"], [0, 0], f"expert layer {l} adaRMS(x) = RMS(x)(1+scale)+shift")
+        adas = torch.stack([L[k] for k in ("scale_a", "shift_a", "gate_a", "scale_f", "shift_f", "gate_f")])
+        put(A, f"{En}.ada", adas[:, :WC], adas, [0, 0],
+            f"layer {l}: Dense_0(cond) chunks [scale, shift, gate] of pre_attention_norm_1 | pre_ffw_norm_1 [6, 1024]")
+        qu = L["q"] * math.sqrt(HD)
+        put(A, f"{En}.q", heads_first(qu[:, :, :WD]), heads_first(qu), [0, 0, 0], f"expert layer {l} Q after RoPE")
+        put(A, f"{En}.k", heads_first(L["k"][:, :, :WD]), heads_first(L["k"]), [0, 0, 0], f"expert layer {l} K (1 kv head)")
+        put(A, f"{En}.v", heads_first(L["v"][:, :, :WD]), heads_first(L["v"]), [0, 0, 0], f"expert layer {l} V (1 kv head)")
+        lg, pr = L["lg"], L["probs"]
+        put(A, f"{En}.scp", lg[:, :, tw], lg, [0, 0, t0w], f"action queries . prefix-window keys / 16 (keys = layer {l}'s prefix KV cache)")
+        put(A, f"{En}.scs", lg[:, :, Np:], lg, [0, 0, Np], "action queries . action keys / 16")
+        mx = lg.max(-1).values
+        inv = 1.0 / torch.exp(lg - mx[..., None]).sum(-1)
+        put(A, f"{En}.attn_agg", torch.stack([mx, inv], -1), mx, [0, 0, 0], f"softmax agg over all {Np + HOR} keys")
+        put(A, f"{En}.pp", pr[:, :, tw], pr, [0, 0, t0w], f"probs on the prefix-window keys (rows over all {Np + HOR} keys)")
+        put(A, f"{En}.ps", pr[:, :, Np:], pr, [0, 0, Np], "probs on the 32 action keys")
+        put(A, f"{En}.vo", heads_first(L["enc"][:, :, :WD]), heads_first(L["enc"]), [0, 0, 0], "per-head sum p.V")
+        put(A, f"{En}.attn", torch.cat([L["pm"][:, tw], L["pm"][:, Np:]], -1), L["pm"], [0, t0w],
+            "head-mean attention of the 32 action queries: prefix window | 32 action keys")
+        put(A, f"{En}.attn_mass", L["mass4"], L["mass4"], [0, 0], "attention mass on [state text tokens | image | other text | actions]")
+        agg, ms = norm_agg(L["r1"])
+        put(A, f"{En}.ln2_agg", agg, ms, [0, 0], "adaRMSNorm agg over the full 1024")
+        for nm, k, d in (("o", "ao", "attn_vec_einsum_1 out (before the gate)"), ("res1", "r1", "x + attn * gate_a"),
+                         ("ln2", "xn2", "pre_ffw adaRMS out"), ("mlp", "ff", "GeGLU MLP out"), ("out", "out", "x + mlp * gate_f")):
+            put(A, f"{En}.{nm}", L[k][:, :WC], L[k], [0, 0], f"expert layer {l} {d}")
+        for nm, k, d in (("gate", "gate", "gating_einsum_1[0] out"), ("up", "up", "gating_einsum_1[1] out"),
+                         ("act", "mlp_h", "gelu_tanh(gate) * up")):
+            put(A, f"{En}.{nm}", L[k][:, :WF], L[k], [0, 0], f"expert layer {l} {d} [32, 4096]")
+    agg, ms = norm_agg(s0["x_out"])
+    put(A, "expert_out_agg", agg, ms, [0, 0], "final adaRMSNorm agg over the full 1024")
+    put(A, "expert_out", s0["final"][:, :WC], s0["final"], [0, 0], "final_norm_1 = RMS(x)(1+scale)+shift")
+    fa = torch.stack([s0["final_scale"], s0["final_shift"]])
+    put(A, "expert_final_ada", fa[:, :WC], fa, [0, 0], "final_norm_1.Dense_0(cond): [scale, shift] (its gate chunk is unused)")
+    aw = Pm("action_out_proj.kernel").T
+    put(Wx, "action_w", aw, aw, [0, 0], "action_out_proj [1024 -> 32] as [out, in]")
+    put(Wx, "action_b", Pm("action_out_proj.bias"), Pm("action_out_proj.bias"), [0], "action_out_proj bias")
+    put(A, "action_x1", noise, noise, [0, 0], f"x_1 = randn(32, 32), seed {SEED} (normalised action space)")
+    put(A, "action_velocity", s0["v"], s0["v"], [0, 0], "v(x_1, t=1) = action_out_proj(final_norm_1) [32, 32]")
+    c1 = noise - s0["v"]
+    put(A, "action_chunk", c1, c1, [0, 0], "one Euler step over the whole interval: x_1 - v (K = 1)")
+    put(A, "fm_time_emb", s0["pe"][:WC], s0["pe"], [0], "posemb_sincos(t=1, 1024, 4e-3, 4.0)")
+    put(A, "fm_time_mlp_hidden", s0["th"][None, :WC], s0["th"][None], [0, 0], "swish(time_mlp_in(pe)) [1, 1024]")
+    put(A, "fm_cond", s0["cond"][None, :WC], s0["cond"][None], [0, 0], "cond = swish(time_mlp_out(.)) [1, 1024]: the adaRMS input")
+    for nm, key in (("fm_action_in_w", "action_in_proj"), ("fm_time_in_w", "time_mlp_in"), ("fm_time_out_w", "time_mlp_out")):
+        w = Pm(key + ".kernel").T
+        put(A, nm, w[:WC, :WC], w, [0, 0], f"{key} as [out, in] {list(w.shape)}")
+    pt = torch.stack([torch.stack([p["x1"], p["v"], p["chunk"]]) for p in parts])
+    put(A, "fm_particles", pt, pt, [0, 0, 0, 0], f"{NPART} seeds at t=1: x_1 | v | x_1 - v [K, 3, 32, 32]")
+    pms = torch.stack([p["mass"] for p in parts])
+    put(A, "fm_particles_mass", pms, pms, [0, 0, 0, 0], f"{NPART} seeds: per layer, per action query attention mass [K, 18, 32, 4]")
+    mc = pt[:, 2].mean(0)
+    put(A, "fm_mean_chunk", mc, mc, [0, 0], "mean of the particles' x_1 - v")
 
-    # weights
-    wput("vit.embedding", Pm(P + "img.embedding.kernel"),
-         Pm(P + "img.embedding.kernel").reshape(-1, VW)[:WC, :WC], "conv kernel [14,14,3,1152] as [588, 1152]")
-    wput("vit.head", Pm(P + "img.head.kernel"), Pm(P + "img.head.kernel")[:WC, :WC], "head Dense 1152->2048")
-    wput("txt.embed", emb_table[:1], emb_rows["rows"], f"input_embedding [257152, 2048]: the {T} prompt rows")
-    for sfx, Dm, tag in (("", DP, "pre"), ("_1", DE, "exp")):
-        q = W("attn.q_einsum#.w", 0, sfx)
-        kv = W("attn.kv_einsum#.w", 0, sfx)
-        o = W("attn.attn_vec_einsum#.w", 0, sfx)
-        gg = W("mlp#.gating_einsum", 0, sfx)
-        li = W("mlp#.linear", 0, sfx)
-        wput(f"{tag}.L0.wq", q, q[0, :WC, :WD], f"q_einsum{sfx} [8, {Dm}, 256], head 0")
-        wput(f"{tag}.L0.wk", kv, kv[0, 0, :WC, :WD], f"kv_einsum{sfx} [2, 1, {Dm}, 256], K")
-        wput(f"{tag}.L0.wv", kv, kv[1, 0, :WC, :WD], f"kv_einsum{sfx} [2, 1, {Dm}, 256], V")
-        wput(f"{tag}.L0.wo", o, o[0, :WD, :WC], f"attn_vec_einsum{sfx} [8, 256, {Dm}], head 0")
-        wput(f"{tag}.L0.w_gate", gg, gg[0, :WC, :WF], f"gating_einsum [2, {Dm}, {gg.shape[-1]}], gate half")
-        wput(f"{tag}.L0.w_up", gg, gg[1, :WC, :WF], f"gating_einsum [2, {Dm}, {gg.shape[-1]}], up half")
-        wput(f"{tag}.L0.w_down", li, li[:WF, :WC], f"linear [{li.shape[0]}, {Dm}]")
-    ak = W("pre_attention_norm_1.Dense_0.kernel", 0, "")
-    wput("exp.L0.ada_attn", ak, ak[:WC, :WC], "pre_attention_norm_1.Dense_0 [1024, 3072] -> scale|shift|gate")
-    fk = W("pre_ffw_norm_1.Dense_0.kernel", 0, "")
-    wput("exp.L0.ada_ffw", fk, fk[:WC, :WC], "pre_ffw_norm_1.Dense_0 [1024, 3072]")
-    pns = Pm(LY + "pre_attention_norm.scale")
-    wput("pre.L0.norm_scale", pns, pns[0, :WC], "prefix pre_attention_norm.scale (plain RMSNorm)")
-    for nm in ("action_in_proj", "action_out_proj", "time_mlp_in", "time_mlp_out"):
-        w = Pm(nm + ".kernel")
-        wput(nm, w, w[:WC, :WC], f"{nm}.kernel {list(w.shape)}")
-
-    # per-step, float16
     fm_steps = []
     for s in steps:
-        Tt = {}
-        Tt["x_t"] = ent16(s["x_t"], "x_t [32, 32] (normalised action space)")
-        Tt["v"] = ent16(s["v"], "v = action_out_proj(final_norm_1(expert)) [32, 32]")
-        Tt["x_next"] = ent16(s["x_next"], "x_t - 0.1 v")
-        Tt["pe"] = ent16(s["pe"][:WC], "posemb_sincos(t) window", s["pe"])
-        Tt["cond"] = ent16(s["cond"][:WC], "adaRMS cond window", s["cond"])
-        Tt["a_tok"] = ent16(s["a_tok"][:, :WC], "action_in_proj(x_t) window", s["a_tok"])
-        Tt["final"] = ent16(s["final"][:, :WC], "final_norm_1 output window", s["final"])
-        Tt["final_scale"] = ent16(s["final_scale"][:WC], "final adaRMS scale", s["final_scale"])
-        Tt["final_shift"] = ent16(s["final_shift"][:WC], "final adaRMS shift", s["final_shift"])
+        Tt = {"x": ent16(s["x_t"], "x_t [32, 32]"), "v": ent16(s["v"], "v [32, 32]"),
+              "x_next": ent16(s["x_next"], "x_t + dt v (dt = -0.1)"),
+              "expert_in": ent16(s["a_tok"][:, :WC], "action_in_proj(x_t)", s["a_tok"]),
+              "expert_out": ent16(s["final"][:, :WC], "final_norm_1 out", s["final"]),
+              "fm_time_emb": ent16(s["pe"][:WC], "posemb_sincos(t)", s["pe"]),
+              "fm_time_mlp_hidden": ent16(s["th"][None, :WC], "swish(time_mlp_in(pe))", s["th"][None]),
+              "fm_cond": ent16(s["cond"][None, :WC], "adaRMS cond", s["cond"][None]),
+              "expert_final_ada": ent16(torch.stack([s["final_scale"], s["final_shift"]])[:, :WC], "final [scale, shift]")}
         for l, L in enumerate(s["layers"]):
-            Tt[f"L{l}.out"] = ent16(L["out"][:, :WC], f"expert layer {l} out [32, 1024]", L["out"])
-            for nm in ("scale_a", "shift_a", "gate_a", "gate_f"):
-                Tt[f"L{l}.{nm}"] = ent16(L[nm][:WC], f"layer {l} adaRMS {nm}", L[nm])
-            Tt[f"L{l}.mass"] = ent16(L["mass"], f"layer {l}: mean attention prob per key [Np+32]")
-        en = torch.stack([s["a_tok"].norm(dim=-1)] + [L["out"].norm(dim=-1) for L in s["layers"]])
-        Tt["layer_norm"] = ent16(en, "per-action-token residual norm: row 0 = input, row l+1 = after layer l [19, 32]")
-        ps = torch.stack([L["prefix_share"] for L in s["layers"]])
-        Tt["prefix_share"] = ent16(ps, "per layer, per action query: attention share on prefix keys [18, 32]")
-        fm_steps.append({"k": s["k"], "t": round(s["t"], 6), "tensors": Tt,
-                         "v_norm": float(s["v"].norm()), "v23_norm": float(s["v"][:, :23].norm())})
+            for nm, k in (("ln1", "xn"), ("o", "ao"), ("res1", "r1"), ("ln2", "xn2"), ("mlp", "ff"), ("out", "out")):
+                Tt[f"E{l}.{nm}"] = ent16(L[k][:, :WC], f"expert layer {l} {nm}", L[k])
+            Tt[f"E{l}.attn"] = ent16(torch.cat([L["pm"][:, tw], L["pm"][:, Np:]], -1), f"layer {l} head-mean attention", L["pm"])
+            Tt[f"E{l}.mass"] = ent16(L["mass4"], f"layer {l} attention mass")
+            adas = torch.stack([L[k] for k in ("scale_a", "shift_a", "gate_a", "scale_f", "shift_f", "gate_f")])
+            Tt[f"E{l}.ada"] = ent16(adas[:, :WC], f"layer {l} [scale, shift, gate] x 2", adas)
+        fm_steps.append({"k": s["k"], "t": round(s["t"], 6), "tensors": Tt})
 
-    thumbs = {}
-    for name, view, _ in CAMS:
-        im = Image.fromarray(imgs224[name]).resize((THUMB, THUMB), Image.BILINEAR)
-        thumbs[view] = base64.b64encode(np.asarray(im, dtype=np.uint8).tobytes()).decode("ascii")
-
-    pieces = [sp.id_to_piece(i) for i in ids]
-    state_start = next(i for i in range(T) if "".join(pieces[:i + 1]).endswith("State:"))
+    pchunk = pt[:, 2]
+    n_params = {"total": Pm.size(), "siglip": Pm.size(P + "img."),
+                "prefix_llm": sum(Pm.size(P + "llm.layers." + k) for k in
+                                  ("attn.q_einsum.", "attn.kv_einsum.", "attn.attn_vec_einsum.", "mlp.",
+                                   "pre_attention_norm.", "pre_ffw_norm.")) + Pm.size(P + "llm.embedder."),
+                "expert": sum(Pm.size(P + "llm.layers." + k) for k in
+                              ("attn.q_einsum_1", "attn.kv_einsum_1", "attn.attn_vec_einsum_1", "mlp_1",
+                               "pre_attention_norm_1", "pre_ffw_norm_1")) + Pm.size(P + "llm.final_norm_1")}
     config = {
-        "model": "pi0.5 (openpi-comet pi05-b1kpt12-cs32)", "checkpoint": CKPT,
+        "model_type": "pi05", "name": "pi0.5 (openpi-comet pi05-b1kpt12-cs32)", "checkpoint": CKPT, "step": None,
         "train_config": "pi05_b1k-pt12_cs32_bs64_lr2.5e-5_step50k",
-        "sample": {"episode": args.episode, "frame": args.frame, "task_index": fr["task"]["task_index"],
-                   "task": prompt, "video_hw": fr["video_hw"], "image_hw": [224, 224]},
-        "views": [v for _, v, _ in CAMS], "image_keys": [n for n, _, _ in CAMS],
-        "camera_keys": [k for _, _, k in CAMS], "thumbs": thumbs, "thumb_size": THUMB,
-        "prompt": full_prompt, "T": T, "token_ids": ids, "tokens": pieces, "state_token_start": state_start,
-        "Np": Np, "n_img": NIMG, "prefix_rows": prow, "n_img_per_view": 256,
-        "window": {"Wc": WC, "Wd": WD, "Wf": WF, "Ws": WS},
-        "vit": {"n_block": NV, "width": VW, "heads": VH, "head_dim": VD, "mlp": 4304, "patch": 14, "grid": 16},
-        "prefix": {"n_layer": NL, "width": DP, "heads": NH, "kv_heads": 1, "head_dim": HD, "mlp": 16384,
-                   "vocab": int(emb_table.shape[0])},
-        "expert": {"n_layer": NL, "width": DE, "heads": NH, "kv_heads": 1, "head_dim": HD, "mlp": 4096},
-        "action_horizon": HOR, "action_dim": ADIM, "behavior_action_dim": 23,
-        "action_dim_names": ACTION_DIM_NAMES, "state_groups": STATE23,
-        "state23": state23.tolist(), "state_norm": state_n.tolist(), "state_tokens": disc.tolist(),
-        "proprio61": proprio.tolist(),
-        "K": NSTEP, "dt": dt, "t": [s["t"] for s in steps], "seed": SEED,
+        "variant": {
+            "id": "pi0", "title": "pi0.5 b1k",
+            "trunk_qk_norm": False, "trunk_causal": False, "trunk_mlp": "geglu", "trunk_heads": False,
+            "embed_scale": math.sqrt(DP), "expert_bias": False, "expert_ada": "adarms_gated",
+            "expert_mlp": "geglu", "expert_final_ada": True, "state_token": False, "time_into_tokens": False,
+            "ada_rows": 3,
+        },
+        "n_layer": NL, "n_head": NH, "n_kv_head": 1, "head_dim": HD, "n_embd": DP, "intermediate": 16384,
+        "vocab_size": int(emb_table.shape[0]), "rms_norm_eps": 1e-6,
+        "expert_hidden": DE, "expert_heads": NH, "expert_kv_heads": 1, "expert_intermediate": 4096,
+        "T_prefix": Np, "T_text": T, "n_state_tokens": 0, "text_start": NIMG, "n_suffix": HOR, "L_joint": Np + HOR,
+        "n_visual_tokens": NIMG, "p_star": Np - 1, "boundary_column": Np - 1,
+        "window": {"t0": t0w, "Wt": WT, "Wc": WC, "Wd": WD, "Wf": WF, "Wv": WT, "v0": 0, "embed_gathered": True},
+        "window_token_ids": wids, "window_tokens": pieces[t0w - NIMG:],
+        "state_token_range": [NIMG + state_start + 1, NIMG + state_end],
+        "knack_names": [], "done_names": [],
+        "action_dim": ADIM, "action_horizon": HOR,
+        "action_dim_names": ACTION_DIM_NAMES + [f"pad_{i}" for i in range(23, ADIM)],
+        "action_q01": aq01.tolist(), "action_q99": aq99.tolist(), "behavior_action_dim": 23,
+        "expert_n_layer": NL, "n_layer_pairs": NL, "suffix_visible_prefix": Np, "suffix_visible_visual": NIMG,
+        "n_params": n_params["total"], "n_params_trunk": n_params["prefix_llm"],
+        "n_params_expert": n_params["expert"], "n_params_vision": n_params["siglip"],
+        "sample": {"row": None, "episode": args.episode, "frame": args.frame, "goal_text": prompt,
+                   "target_knack": None, "target_done": None, "task_index": fr["task"]["task_index"]},
+        "pred_knack": None, "pred_done": None,
+        "prompt": full_prompt, "state23": state23.tolist(), "state_tokens": disc.tolist(),
         "action_norm": action_n_np.tolist(), "action23": action23.tolist(),
-        "n_params": {"total": Pm.size(), "siglip": Pm.size(P + "img."),
-                     "prefix_llm": sum(Pm.size(P + "llm.layers." + k) for k in
-                                       ("attn.q_einsum.", "attn.kv_einsum.", "attn.attn_vec_einsum.", "mlp.",
-                                        "pre_attention_norm.", "pre_ffw_norm.")) + Pm.size(P + "llm.embedder."),
-                     "expert": sum(Pm.size(P + "llm.layers." + k) for k in
-                                   ("attn.q_einsum_1", "attn.kv_einsum_1", "attn.attn_vec_einsum_1", "mlp_1",
-                                    "pre_attention_norm_1", "pre_ffw_norm_1")) + Pm.size(P + "llm.final_norm_1"),
-                     "heads": sum(Pm.size(k) for k in ("action_in_proj", "action_out_proj", "time_mlp"))},
-        "asserts": asserts,
+        "fm": {"t": 1.0, "steps": NSTEP, "dt": dt, "t_list": [s["t"] for s in steps], "min_period": 4e-3,
+               "max_period": 4.0, "seeds": list(range(NPART)), "n_particles": NPART,
+               "particle_chunk_std": float(pchunk.std(0).mean()), "asserts": asserts},
         "notes": [
             "weights + activations are real: local openpi-comet pi05-b1kpt12-cs32 (pi0.5 fine-tuned on "
-            "BEHAVIOR-1K, 12 tasks incl. turning_on_radio), BEHAVIOR 2026-challenge-demos frame",
-            "R1 Pro embodiment: state 23 = base_qvel 3 + trunk 4 + arms 7+7 + gripper widths 2 extracted from "
-            "the 61-dim proprio; it enters as discretised text tokens (pi0.5), actions are 23 dims padded to 32",
-            "tokenizer: the public PaliGemma sentencepiece vocab (4 MB asset, ~/.cache/openpi/big_vision) - "
-            "the only fetched file; zero weight downloads",
-            "compute in float32 in torch (official runtime: bfloat16 JAX); text padding trimmed (masked, so "
-            "equivalent)",
-            f"noise seed {SEED}; Euler integrates t = 1 (noise) -> 0 with dt = -0.1 (openpi convention)",
-            "2026 demos: base_qvel may be world-frame vs the 2025 training data's local frame (serve_comet note)",
+            "BEHAVIOR-1K), BEHAVIOR 2026-challenge-demos frame (same episode/frame as the k005b export)",
+            "R1 Pro: state 23 (from the 61-dim proprio) enters as discretised text tokens; actions are 23 dims padded to 32",
+            "tokenizer: the public PaliGemma sentencepiece vocab (~/.cache/openpi/big_vision); zero weight downloads",
+            "compute in float32 torch, re-implementing openpi/models/{pi0,gemma,siglip}.py; asserts vs a joint "
+            "forward (and --jax-ref: the official openpi JAX model)",
+            f"noise seed {SEED}; Euler t = 1 (noise) -> 0, dt = -0.1",
         ],
     }
     os.makedirs(out_dir, exist_ok=True)
     Wx["config"] = config
     A["config"] = config
-    for fn, obj in (("pi0-weights.json", Wx), ("pi0-acts.json", A), ("pi0-fm.json", {"K": NSTEP, "steps": fm_steps})):
+    fm_out = {"K": NSTEP, "checkpoint_step": None, "in_distribution": True, "steps": fm_steps}
+    for fn, obj in (("pi0-weights.json", Wx), ("pi0-acts.json", A), ("pi0-fm.json", fm_out)):
         path = os.path.join(out_dir, fn)
         with open(path, "w") as f:
             json.dump(obj, f)
         print(f"[write] {path} {os.path.getsize(path) / 1e6:.1f} MB", flush=True)
 
+    L0 = s0["layers"][0]
     check = {
-        "W.exp.L0.ada_attn[r3,c9]": float(W("pre_attention_norm_1.Dense_0.kernel", 0, "")[3, 9]),
-        "W.pre.L0.wq[h0,r5,c7]": float(W("attn.q_einsum#.w", 0, "")[0, 5, 7]),
-        "A.s0.L0.scale_a[c7]": float(L0["scale_a"][7]),
-        "A.s0.L0.gate_a[c7]": float(L0["gate_a"][7]),
-        "A.s5.L17.gate_f[c3]": float(steps[5]["layers"][17]["gate_f"][3]),
-        "A.pre.L17.x_in[t5,c11]": float(pre_in[17][5, 11]),
+        "W.L0.q_w[h0,d5,c7]": float(W("attn.q_einsum#.w", 0, "")[0, 7, 5]),
+        "W.E0.gate_w[f3,c9]": float(W("mlp#.gating_einsum", 0, "_1")[0, 9, 3]),
+        "A.E0.ada[gate_a,c7]": float(L0["gate_a"][7]),
         "A.s1.v[0,:5]": steps[1]["v"][0, :5].tolist(),
         "A.action_norm[0,:5]": action_n_np[0, :5].tolist(),
         "A.action23[0,:5]": action23[0, :5].tolist(),

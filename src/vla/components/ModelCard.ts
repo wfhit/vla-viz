@@ -47,10 +47,11 @@ export function drawModelCard(state: IProgramState, layout: IVlaModelLayout, tit
     writeTextToBuffer(render.modelFontBuf, title, titleColor, midX - titleW / 2, tl.y + 2, titleFontScale, mtx);
 
     let cfg = layout.shape.full;
+    let hasHeads = !!layout.model && !layout.model.knackProbs.meta.absent;
     let paramOff = tl.y + titleHeight + 3;
 
     let nParamsText = `n_params = `;
-    let weightCountText = cfg ? numberToCommaSep(layout.weightCount) : 'loading real k005b checkpoint…';
+    let weightCountText = cfg ? numberToCommaSep(layout.weightCount) : `loading real ${state.page.facts?.modelName ?? ''} checkpoint…`;
     let weightSize = 6;
     let weightTitleW = measureTextWidth(render.modelFontBuf, nParamsText, paramFontScale);
     let weightCountW = measureTextWidth(render.modelFontBuf, weightCountText, weightSize);
@@ -61,12 +62,13 @@ export function drawModelCard(state: IProgramState, layout: IVlaModelLayout, tit
 
     if (cfg) {
         let w = cfg.window;
+        let mlp = cfg.variant?.trunk_mlp === 'geglu' ? 'GeGLU' : 'SwiGLU';
         let lines = [
-            `${cfg.name} · step ${cfg.step}`,
-            `trunk: ${cfg.n_layer} layers · d ${cfg.n_embd} · ${cfg.n_head} q / ${cfg.n_kv_head} kv heads × ${cfg.head_dim} · SwiGLU ${cfg.intermediate} · vocab ${cfg.vocab_size}`,
+            cfg.step != null ? `${cfg.name} · step ${cfg.step}` : `${cfg.name} · ${cfg.train_config ?? ""}`,
+            `trunk: ${cfg.n_layer} layers · d ${cfg.n_embd} · ${cfg.n_head} q / ${cfg.n_kv_head} kv heads × ${cfg.head_dim} · ${mlp} ${cfg.intermediate} · vocab ${cfg.vocab_size}`,
             `expert: d ${cfg.expert_hidden} · ${cfg.expert_heads} q / ${cfg.expert_kv_heads} kv heads · FF ${cfg.expert_intermediate} · ${cfg.n_suffix} suffix tokens → action ${cfg.action_horizon}×${cfg.action_dim}`,
-            `sample: row ${cfg.sample.row} · "${cfg.sample.goal_text}" · prefix ${cfg.T_prefix} tok (${cfg.n_visual_tokens} visual) · h* at p=${cfg.p_star}`,
-            `knack = ${cfg.pred_knack} (target ${cfg.sample.target_knack ?? '?'}) · done = ${cfg.pred_done} (target ${cfg.sample.target_done ?? '?'})`,
+            `sample: row ${cfg.sample.row} · "${cfg.sample.goal_text}" · prefix ${cfg.T_prefix} tok (${cfg.n_visual_tokens} visual)` + (hasHeads ? ` · h* at p=${cfg.p_star}` : ''),
+            ...(hasHeads ? [`knack = ${cfg.pred_knack} (target ${cfg.sample.target_knack ?? '?'}) · done = ${cfg.pred_done} (target ${cfg.sample.target_done ?? '?'})`] : []),
             `3D cells = real windows: tokens ${w.t0}–${w.t0 + w.Wt - 1}, channels 0–${w.Wc - 1}, head dims 0–${w.Wd - 1}, FF 0–${w.Wf - 1}, embed rows ${w.v0}–${w.v0 + w.Wv - 1}`,
         ];
         for (let line of lines) {
@@ -76,9 +78,9 @@ export function drawModelCard(state: IProgramState, layout: IVlaModelLayout, tit
         }
     }
 
-    renderOutputAtBottom(state);
+    if (hasHeads) renderOutputAtBottom(state);
 
-    renderInputAtTop(state);
+    renderInputAtTop(state, hasHeads);
 }
 
 function tokenDisplayString(tok: string) {
@@ -236,7 +238,7 @@ function numberToCommaSep(a: number) {
     return out;
 }
 
-function renderInputAtTop(state: IProgramState) {
+function renderInputAtTop(state: IProgramState, hasHeads: boolean) {
     let layout = vlaLayout(state);
     let render = state.render;
 
@@ -261,7 +263,7 @@ function renderInputAtTop(state: IProgramState) {
     let inputTitle = layout.model ? `Prompt tokens ${layout.model.config.window.t0}–${layout.model.config.window.t0 + layout.shape.T - 1} (of ${layout.model.config.T_prefix}-token prefix)` : "Prompt tokens";
     drawText(render.modelFontBuf, inputTitle, tl.x, tl.y - lineHeight(titleTextOpts), titleTextOpts);
 
-    {
+    if (hasHeads) {
         let outCellH = 12;
         let outBr = new Vec3(br.x, tl.y - 4);
         let outTl = new Vec3(tl.x, outBr.y - outCellH);

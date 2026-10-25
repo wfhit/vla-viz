@@ -209,9 +209,9 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     state.render.lastJsMs = performance.now() - timer0;
 }
 
-// the /vla page's scene (only valid while that page is shown)
+// the engine pages' scene (only valid while an engine page is shown)
 export function vlaLayout(state: IProgramState): IVlaModelLayout {
-    if (state.page.id !== 'vla') throw new Error(`vlaLayout() on page ${state.page.id}`);
+    if (!(state.layout as IVlaModelLayout | null)?.variant) throw new Error(`vlaLayout() on page ${state.page.id}`);
     return state.layout as IVlaModelLayout;
 }
 

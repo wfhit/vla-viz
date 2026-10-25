@@ -17,15 +17,16 @@ export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
     }
 
     let ln = layout.blocks[0].ln1;
+    let f = state.page.facts!;
 
     initialFrame(state, [args.layout.residual0, ...args.layout.blocks[0].ln1.cubes], 281, 9, { fill: 1.0 });
     wt.dimHighlightBlocks = [layout.residual0, ...ln.cubes];
 
     commentary(wt, null, 0)`
 
-上一节得到的${c_blockRef('_输入嵌入_', layout.residual0)}矩阵是 Qwen3-VL 第一个 transformer 层（L0）的输入（共 28 层，这里展开其中一层）。
+上一节得到的${c_blockRef('_输入嵌入_', layout.residual0)}矩阵是 ${f.trunkName} 第一个 transformer 层（L0）的输入（共 ${f.nLayer} 层，这里展开其中一层）。
 
-层内第一步是 _RMSNorm_：对矩阵的每一列分别做归一化。图中数值均为 L0 input_layernorm 的真实值。`;
+层内第一步是 _RMSNorm_：对矩阵的每一列分别做归一化。图中数值均为 L0 ${f.id === 'pi0' ? 'pre_attention_norm' : 'input_layernorm'} 的真实值。`;
     breakAfter();
 
     let t_moveCamera = afterTime(null, 1.0);
@@ -47,7 +48,7 @@ export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
     breakAfter();
     commentary(wt)`
 RMSNorm 用该列的均方根（root-mean-square）去缩放整列，使其尺度为 1；与 LayerNorm 不同，它不减去均值，也没有偏置 β。
-图中两个聚合格分别是真实的 ${c_blockRef('mean(x²)', ln.lnAgg1)} 与 ${c_blockRef('rsqrt(mean(x²) + ε)', ln.lnAgg2)}，均对完整的 2048 个通道计算（不仅是图中显示的 64 个）。`;
+图中两个聚合格分别是真实的 ${c_blockRef('mean(x²)', ln.lnAgg1)} 与 ${c_blockRef('rsqrt(mean(x²) + ε)', ln.lnAgg2)}，均对完整的 ${f.dModel} 个通道计算（不仅是图中显示的 64 个）。`;
 
     breakAfter();
 
@@ -62,7 +63,7 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
 
 这些聚合值只需对整列算一次，因此存放在聚合层中。
 
-最后把每个元素乘以可学习的${c_blockRef('增益 (\u03b3)', ln.lnSigma)}，得到${c_blockRef('归一化结果', ln.lnResid)}。RMSNorm 没有偏置 β。`;
+最后把每个元素乘以可学习的${c_blockRef(f.id === 'pi0' ? '增益 (1 + \u03b3)' : '增益 (\u03b3)', ln.lnSigma)}，得到${c_blockRef('归一化结果', ln.lnResid)}。RMSNorm 没有偏置 β。${f.id === 'pi0' ? 'Gemma 的 checkpoint 存的是 γ，前向时乘以 1 + γ，图中显示的就是 1 + γ。' : ''}`;
 
     breakAfter();
 

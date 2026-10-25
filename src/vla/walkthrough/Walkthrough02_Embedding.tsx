@@ -21,7 +21,14 @@ export function walkthrough02_Embedding(args: IWalkthroughArgs) {
     let exampleTok = cfg ? JSON.stringify(cfg.window_tokens[exampleIdx]) : '…';
     let exampleId = cfg ? cfg.window_token_ids[exampleIdx] : 0;
 
-    commentary(wt)`
+    let f = state.page.facts!;
+    let pi0 = f.id === 'pi0';
+    if (pi0) commentary(wt)`
+π0.5 的前缀由两类 token 组成：${cfg?.n_visual_tokens ?? '…'} 个视觉 token（3 路相机各 256 个，经 ${f.visionName} 和投影层），以及 ${cfg?.T_text ?? '…'} 个语言 token（"Task: …, State: …;\nAction: "，状态是其中的离散化数字），共 ${cfg?.T_prefix ?? '…'} 个。
+3D 中的${c_blockRef('_输入索引_', layout.idxObj, DimStyle.TokenIdx)}是真实提示词里 token ${cfg ? `${cfg.window.t0}–${cfg.window.t0 + cfg.window.Wt - 1}` : '…'} 的 id（前缀的最后 ${cfg?.window.Wt ?? 32} 个 token）。
+
+下面以窗口最后一个 token（${exampleTok}，id ${exampleId}）为例，看看它如何生成${c_blockRef('_输入嵌入_', layout.residual0)}的最后一列。`;
+    else commentary(wt)`
 k005b 的前缀由三类 token 组成：${cfg?.n_visual_tokens ?? '…'} 个视觉 token（3 路相机经 Qwen3-VL 视觉塔）、语言 token（目标、"Last knack" 等提示词），以及 ${cfg?.n_state_tokens ?? 16} 个状态 token，共 ${cfg?.T_prefix ?? '…'} 个。
 3D 中的${c_blockRef('_输入索引_', layout.idxObj, DimStyle.TokenIdx)}是真实提示词里 token ${cfg ? `${cfg.window.t0}–${cfg.window.t0 + cfg.window.Wt - 1}` : '…'} 的 id（窗口末尾就是 h* 边界 token）。
 
@@ -33,7 +40,12 @@ k005b 的前缀由三类 token 组成：${cfg?.n_visual_tokens ?? '…'} 个视�
 
     breakAfter();
 
-    commentary(wt)`
+    if (pi0) commentary(wt)`
+用该 token 的 id（${c_dimRef(String(exampleId), DimStyle.TokenIdx)}）从左侧的${c_blockRef('_嵌入表_', layout.tokEmbedObj)}（真实形状 ${cfg?.vocab_size ?? '…'} × ${f.dModel}）中取出对应的一行。词表有 25 万行，图中只画窗口里这 ${cfg?.window.Wv ?? 32} 个 token 各自查到的那一行（通道 0–${(cfg?.window.Wc ?? 64) - 1}），悬停可见真实行号。
+
+Gemma 把取出的行再乘以 √${f.dModel} ≈ ${Math.sqrt(f.dModel).toFixed(2)}，结果是一个长度为 ${c_dimRef(`_C_ = ${f.dModel}`, DimStyle.C)} 的向量，称为输入嵌入。Gemma 没有可学习的位置表：位置信息在注意力里通过 RoPE 旋转 Q/K 注入。
+    `;
+    else commentary(wt)`
 用该 token 的 id（${c_dimRef(String(exampleId), DimStyle.TokenIdx)}）从左侧的${c_blockRef('_嵌入表_', layout.tokEmbedObj)}（真实形状 ${cfg?.vocab_size ?? 151936} × ${cfg?.n_embd ?? 2048}，图中显示第 ${cfg?.window.v0 ?? '…'}–${(cfg?.window.v0 ?? 0) + (cfg?.window.Wv ?? 64) - 1} 行、通道 0–${(cfg?.window.Wc ?? 64) - 1}）中取出对应的一行。
 
 结果是一个长度为 ${c_dimRef(`_C_ = ${cfg?.n_embd ?? 2048}`, DimStyle.C)} 的向量，称为输入嵌入。Qwen3-VL 没有可学习的位置表：位置信息在注意力里通过 RoPE 旋转 Q/K 注入。
@@ -45,7 +57,10 @@ k005b 的前缀由三类 token 组成：${cfg?.n_visual_tokens ?? '…'} 个视�
 
     breakAfter();
 
-    commentary(wt)`
+    if (pi0) commentary(wt)`
+嵌入表是训练得到的（蓝色表示可学习参数）。取出的这一行乘以 √${f.dModel} 后成为输入嵌入的这一列。
+`;
+    else commentary(wt)`
 嵌入表是训练得到的（蓝色表示可学习参数；k005b 的嵌入表与输出层权重共享）。取出的这一行直接成为输入嵌入的这一列。
 `;
 
@@ -60,7 +75,7 @@ k005b 的前缀由三类 token 组成：${cfg?.n_visual_tokens ?? '…'} 个视�
     breakAfter();
 
     commentary(wt)`
-对窗口中的每个 token 重复同样的查表（id 不在显示行范围内的 token，其嵌入行没有画出，但输入嵌入列仍是真实值）。
+对窗口中的每个 token 重复同样的查表${pi0 ? '' : '（id 不在显示行范围内的 token，其嵌入行没有画出，但输入嵌入列仍是真实值）'}。
 `;
 
     breakAfter();
@@ -75,7 +90,7 @@ k005b 的前缀由三类 token 组成：${cfg?.n_visual_tokens ?? '…'} 个视�
 处理完所有 token 后得到一个 ${c_dimRef('_T_', DimStyle.T)} x ${c_dimRef('_C_', DimStyle.C)} 的矩阵。
 ${c_dimRef('_T_', DimStyle.T)} 是序列长度（${c_dimRef('_时间_', DimStyle.T)} / 位置维），${c_dimRef('_C_', DimStyle.C)} 是${c_dimRef('_通道_', DimStyle.C)}数，也叫特征维或嵌入维度，是模型的超参数。
 
-这个${c_blockRef('_输入嵌入_', layout.residual0)}将被送入后面的 Qwen3-VL 主干（共 ${cfg?.n_layer ?? 28} 层 transformer）。
+这个${c_blockRef('_输入嵌入_', layout.residual0)}将被送入后面的 ${f.trunkName} 主干（共 ${f.nLayer} 层 transformer）。
 这种 ${c_dimRef('T', DimStyle.T)} 列、每列长 ${c_dimRef('C', DimStyle.C)} 的结构会在后文反复出现。
 `;
 
