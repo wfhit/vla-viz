@@ -179,8 +179,8 @@ export function runProgram(view: IRenderView, state: IProgramState) {
 
     updateCamera(state, view);
 
-    drawBlockInfo(state);
     state.page.drawScene(state);
+    drawBlockInfo(state);
     if (typeof window !== 'undefined') {
         (window as any).__vizState = state;
     }

@@ -10,18 +10,21 @@ export function walkthrough06_Projection(args: IWalkthroughArgs) {
         return;
     }
 
-    initialFrame(state, [...args.layout.blocks[0].heads.map(h => h.vOutBlock), args.layout.blocks[0].projWeight, args.layout.blocks[0].attnOut], 293.6, 2.6, { fill: 1.05 });
     let block = layout.blocks[0];
-    wt.dimHighlightBlocks = [...block.heads.map(h => h.vOutBlock), block.projBias, block.projWeight, block.attnOut];
+    let vOut0 = block.heads[0].vOutBlock;
+    // one representative head: the other 15 share its slot and are not drawn ("x16 heads")
+    let work = [vOut0, block.projWeight, block.attnOut];
+    initialFrame(state, work, 284, 6, { fill: 1.15 });
+    wt.dimHighlightBlocks = [vOut0, block.projBias, block.projWeight, block.attnOut];
 
-    let outBlocks = block.heads.map(h => h.vOutBlock);
+    let outBlocks = [vOut0];
 
     commentary(wt, null, 0)`
 
 注意力计算完成后，每个 head 都得到了自己的输出：由 Q/K 决定权重、对 V 向量加权混合后的结果。
 
-要合并各 head 的${c_blockRef('输出向量', outBlocks)}，只需把它们首尾相接（concat）。每个 token 位置上，
-16 个长度为 ${c_dimRef('A = 128', DimStyle.A)} 的向量被拼成 1 个长度为 ${c_dimRef('16 × 128 = 2048', DimStyle.C)} 的向量。`;
+图中只画 head 0 的${c_blockRef('输出向量', outBlocks)}（其余 15 个 head 形状相同，标注 ×16，不重复铺开）。
+要合并 16 个 head，只需把它们首尾相接（concat）：每个 token 位置上，16 个长度为 ${c_dimRef('A = 128', DimStyle.A)} 的向量被拼成 1 个长度为 ${c_dimRef('16 × 128 = 2048', DimStyle.C)} 的向量。`;
 
     breakAfter();
 
@@ -70,23 +73,13 @@ k005b 中 head 数 × head 维度（16 × 128）恰好等于 ${c_dimRef('C = 204
     breakAfter();
 
     if (t_fadeOut.active) {
-        for (let head of block.heads) {
-            for (let blk of head.cubes) {
-                if (blk !== head.vOutBlock) {
-                    blk.opacity = lerpSmoothstep(1, 0, t_fadeOut.t);
-                }
-            }
+        for (let blk of block.heads[0].cubes) {
+            if (blk !== vOut0) blk.opacity = lerpSmoothstep(1, 0.15, t_fadeOut.t);
         }
     }
 
     if (t_stack.active) {
-        let targetZ = block.attnOut.z;
-        for (let headIdx = 0; headIdx < block.heads.length; headIdx++) {
-            let head = block.heads[headIdx];
-            let targetY = head.vOutBlock.y + head.vOutBlock.dy * (headIdx - block.heads.length + 1);
-            head.vOutBlock.y = lerp(head.vOutBlock.y, targetY, t_stack.t);
-            head.vOutBlock.z = lerp(head.vOutBlock.z, targetZ, t_stack.t);
-        }
+        vOut0.z = lerp(vOut0.z, block.attnOut.z, t_stack.t);
     }
 
     let processInfo = startProcessBefore(state, block.attnOut);
@@ -95,7 +88,7 @@ k005b 中 head 数 × head 维度（16 × 128）恰好等于 ${c_dimRef('C = 204
         processUpTo(state, t_process, block.attnOut, processInfo);
     }
 
-    frameTo(state, t_zoomOut, [...args.layout.blocks[0].heads.map(h => h.vOutBlock), args.layout.blocks[0].projWeight, args.layout.blocks[0].attnOut, args.layout.blocks[0].attnResidual, args.layout.residual0], 293.6, 2.6, { fill: 1.0 });
+    frameTo(state, t_zoomOut, [...work, block.attnResidual, layout.residual0], 284, 6, { fill: 1.1 });
 
     if (t_processResid.active) {
         processUpTo(state, t_processResid, block.attnResidual, processInfo);

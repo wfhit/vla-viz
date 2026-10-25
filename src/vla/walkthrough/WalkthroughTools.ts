@@ -329,8 +329,10 @@ export function frameCubes(cubes: (IBlkDef | { x: number, y: number, z: number, 
     let depth = Math.abs(Math.cos(ax)) * hx + Math.abs(Math.sin(ax)) * hz;
     let up = Math.cos(ay) * hy + Math.sin(ay) * depth;
     let tanHalf = Math.tan(20 * Math.PI / 180);
-    let dist = Math.max(up, across / aspect) / tanHalf * fill + depth * Math.cos(ay);
-    let center = new Vec3((mn.x + mx.x) / 2, -(mn.z + mx.z) / 2, -(mn.y + mx.y) / 2);
+    // 1.2: perspective (near faces look larger) + room for the caption bar at the bottom
+    let dist = Math.max(up, across / aspect) / tanHalf * fill * 1.2 + depth * Math.cos(ay);
+    // aim slightly below the box centre so the working set sits above the caption bar
+    let center = new Vec3((mn.x + mx.x) / 2, -(mn.z + mx.z) / 2, -(mn.y + mx.y) / 2 - 0.08 * dist * tanHalf);
     if (opts.shiftX) {
         let right = new Vec3(-Math.sin(ax), Math.cos(ax), 0);
         center = center.add(right.mul(across * opts.shiftX));
@@ -342,12 +344,24 @@ type IFrameCube = IBlkDef | { x: number, y: number, z: number, dx: number, dy: n
 type IFrameOpts = { fill?: number, aspect?: number, shiftX?: number };
 
 // layout-relative replacements for the hard-coded camera positions
+export function setFocus(state: IProgramState, cubes: IFrameCube[]) {
+    let mn = new Vec3(Infinity, Infinity, Infinity), mx = new Vec3(-Infinity, -Infinity, -Infinity);
+    for (let c of cubes) {
+        if ('opacity' in c && c.opacity === 0) continue;
+        mn = new Vec3(Math.min(mn.x, c.x), Math.min(mn.y, c.y), Math.min(mn.z, c.z));
+        mx = new Vec3(Math.max(mx.x, c.x + c.dx), Math.max(mx.y, c.y + c.dy), Math.max(mx.z, c.z + c.dz));
+    }
+    if (mn.x <= mx.x) state.walkthrough.focus = { mn, mx };
+}
+
 export function initialFrame(state: IProgramState, cubes: IFrameCube[], angleX: number, angleY: number, opts: IFrameOpts = {}) {
+    setFocus(state, cubes);
     let c = frameCubes(cubes, angleX, angleY, opts);
     setInitialCamera(state, c.center, c.angle);
 }
 
 export function frameTo(state: IProgramState, time: ITimeInfo, cubes: IFrameCube[], angleX: number, angleY: number, opts: IFrameOpts = {}) {
+    if (time.t > 0) setFocus(state, cubes);
     let c = frameCubes(cubes, angleX, angleY, opts);
     moveCameraTo(state, time, c.center, c.angle);
 }

@@ -147,14 +147,14 @@ export const TocDiagram: React.FC<{
     makeEntry(Phase.Harness_Law, 'Harness 法则', ['harness']);
 
     entryGroups.push({ groupName: 'DiT 动作专家与流匹配', entries: [] });
-    makeEntry(Phase.D0_TwoTransformers, 'D0 两个 Transformer', ['exIn', 'denoiser'], true);
-    makeEntry(Phase.D1_DitBlock, 'D1 DiT 块解剖', ['denoiser'], true);
-    makeEntry(Phase.D2_Concat, 'D2 拼接成一条序列', ['exIn'], true);
-    makeEntry(Phase.D3_JointAttn, 'D3 联合注意力 = 耦合', ['denoiser'], true);
-    makeEntry(Phase.D4_Forward, 'D4 一次前向穿过 28 层', ['denoiser', 'vt'], true);
-    makeEntry(Phase.D5_PrefixCache, 'D5 前缀只算一次', ['denoiser'], true);
-    makeEntry(Phase.D6_Decode, 'D6 10 次 DiT 穿行', ['vt', 'euler'], true);
-    makeEntry(Phase.D7_ActionChunk, 'D7 动作块', ['euler', 'chunk'], true);
+    makeEntry(Phase.D0_Towers, 'D0 两座塔', ['exIn', 'denoiser'], true);
+    makeEntry(Phase.D1_SuffixInput, 'D1 后缀输入嵌入', ['exIn'], true);
+    makeEntry(Phase.D2_AdaNorm, 'D2 AdaRMSNorm', ['denoiser'], true);
+    makeEntry(Phase.D3_JointAttn, 'D3 联合注意力', ['denoiser'], true);
+    makeEntry(Phase.D4_Projection, 'D4 输出投影与残差', ['denoiser'], true);
+    makeEntry(Phase.D5_Mlp, 'D5 MLP (SwiGLU)', ['denoiser'], true);
+    makeEntry(Phase.D6_Stack, 'D6 28 层堆叠与输出', ['denoiser', 'vt'], true);
+    makeEntry(Phase.D7_Euler, 'D7 10 步 Euler 与动作块', ['vt', 'euler', 'chunk'], true);
 
     let focusEntry = entries.find(e => e.id === (hoverId ?? activeId));
     let hasFocus = isNotNil(hoverId) || isNotNil(activePhase);

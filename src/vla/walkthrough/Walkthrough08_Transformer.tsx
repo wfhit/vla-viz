@@ -1,5 +1,5 @@
 import { Phase } from "./Walkthrough";
-import { commentary, frameCubes, IWalkthroughArgs, initialFrame } from "./WalkthroughTools";
+import { commentary, frameCubes, setFocus, IWalkthroughArgs, initialFrame } from "./WalkthroughTools";
 import { applyFlowPass, nFlowStages } from "./FlowPass";
 import { clamp } from "@/src/utils/data";
 import { IVlaModelLayout } from "../VlaModelLayout";
@@ -20,8 +20,9 @@ function followPass(state: IProgramState, L: IVlaModelLayout, pos: number) {
     let u = clamp(pos - i0, 0, 1);
     u = u * u * (3 - 2 * u);
     let cubesOf = (i: number) => mainPath(L, i);
-    let a = frameCubes(cubesOf(i0), 270, 3, { fill: 1.8 });
-    let b = frameCubes(cubesOf(i1), 270, 3, { fill: 1.8 });
+    let a = frameCubes(cubesOf(i0), 270, 3, { fill: 1.5 });
+    let b = frameCubes(cubesOf(i1), 270, 3, { fill: 1.5 });
+    setFocus(state, cubesOf(u < 0.5 ? i0 : i1));
     state.camera.center = a.center.lerp(b.center, u);
     state.camera.angle = a.angle.lerp(b.angle, u);
     state.walkthrough.markDirty();
@@ -34,7 +35,7 @@ export function walkthrough08_Transformer(args: IWalkthroughArgs) {
         return;
     }
     let nL = L.blocks.length;
-    initialFrame(state, [L.residual0, ...mainPath(L, 0)], 270, 3, { fill: 1.8 });
+    initialFrame(state, [L.residual0, ...mainPath(L, 0)], 270, 3, { fill: 1.5 });
 
     commentary(wt, null, 0)`
 
@@ -43,7 +44,7 @@ export function walkthrough08_Transformer(args: IWalkthroughArgs) {
 拼接好的主干 token 流（${c_blockRef('嵌入', L.residual0)}）从顶部进入第 0 层。黄色是正在计算的子层，后面还没算到的块保持空白、箭头变淡。每一层都按同一顺序走：
 RMSNorm → Q/K/V → 注意力 → softmax·V → o_proj → ⊕残差 → RMSNorm → gate/up → SiLU·up → down_proj → ⊕残差。
 
-本章只看主干。每一层右侧其实还紧贴着一条 DiT 动作专家泳道，它与主干同层共用一次联合注意力；两条流一起穿过 28 层的完整过程放在 D4 章。
+本章只看主干。主干右边还有第二座塔：DiT 动作专家，它的第 i 层与主干第 i 层共用一次联合注意力；那座塔的逐层展开在 D 章组（D2–D6）。
 `;
     breakAfter();
     let tEnter = afterTime(null, 1.5);

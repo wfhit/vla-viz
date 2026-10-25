@@ -1,13 +1,29 @@
 import { TextAlignHoriz, TextAlignVert } from "../Annotations";
-import { IVlaModelLayout } from "../VlaModelLayout";
+import { IBlkDef, IBlkLabel, IVlaModelLayout } from "../VlaModelLayout";
 import { measureTextWidth, writeTextToBuffer } from "../render/fontRender";
 import { addLine } from "../render/lineRender";
 import { IRenderState } from "../render/modelRender";
-import { lerp } from "@/src/utils/math";
 import { Mat4f } from "@/src/utils/matrix";
 import { Vec3, Vec4 } from "@/src/utils/vector";
 
-export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout) {
+export type IFitsView = (mn: Vec3, mx: Vec3) => boolean;
+
+export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout, focus?: Vec3, fits?: IFitsView) {
+    // same-text labels: only the one nearest the camera focus is drawn; a label (block + its text)
+    // that does not fit entirely on screen is dropped: up close it would only be a giant fragment
+    let pend = new Map<string, { d: number, draw: () => void }>();
+    let labelFits = (text: string, e: IExtent, fs: number, pad: number, z: number) => {
+        if (!fits) return true;
+        let tw = measureTextWidth(state.modelFontBuf, text, fs);
+        return fits(new Vec3(e.minX - tw - 2 * pad, e.minY, z), new Vec3(e.maxX, e.maxY, z));
+    };
+    let put = (text: string, e: IExtent | null, draw: () => void, fs = 10, pad = 10, z?: number) => {
+        if (!e) return;
+        if (!labelFits(text, e, fs, pad, z ?? e.midZ)) return;
+        let d = focus ? new Vec3((e.minX + e.maxX) / 2, (e.minY + e.maxY) / 2, e.midZ).sub(focus).len() : 0;
+        let cur = pend.get(text);
+        if (!cur || d < cur.d) pend.set(text, { d, draw });
+    };
 
     // probably should limit this to specific blocks (defined by walkthrough)
     // can configure this on the blocks themselves, or the layout object
@@ -20,95 +36,93 @@ export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout) {
         let color = baseColor.mul(layout.embedLabel.visible);
         let tl = new Vec3(layout.tokEmbedObj.x - layout.margin * 2, layout.tokEmbedObj.y, 0);
         let br = new Vec3(layout.tokEmbedObj.x - layout.margin * 2, layout.tokEmbedObj.y + layout.tokEmbedObj.dy, 0);
-        drawSectionLabel(state, "Input Embedding", tl, br, { color, fontSize: 6, pad: 4 });
+        let tw = measureTextWidth(state.modelFontBuf, "Input Embedding", 6);
+        if (!fits || fits(new Vec3(tl.x - tw - 8, tl.y, 0), new Vec3(tl.x, br.y, 0)))
+            drawSectionLabel(state, "Input Embedding", tl, br, { color, fontSize: 6, pad: 4 });
     }
 
-    let transformerIdx = 0;
-    for (let block of layout.blocks) {
-        let blockTop = block.ln1.lnResid.y - layout.margin / 2;
-        let blockBottom = block.mlpResult.y + block.mlpResult.dy + layout.margin / 2;
-        let mlpLeft = block.mlpProjBias.x - layout.margin * 3;
-        let headLeft = block.projBias.x - layout.margin;
-        let attnLabelLeft = headLeft - layout.margin * 3;
-        let attnLeft = lerp(headLeft, mlpLeft, 0.6);
+    // every label is pinned to the blocks it names: a bracket along their left edge (or a header
+    // line along their top edge) at their own position, never at a fixed offset in empty space
+    let towers: [ILayerLike[], string][] = [[layout.blocks, 'Layer'], [layout.expertLayers, 'DiT Layer']];
+    for (let [layers, prefix] of towers) {
+        layers.forEach((L, li) => {
+            let all = L.transformerLabel.cubes;
+            let eAll = extent(all);
+            if (eAll) {
+                let color = baseColor.mul(eAll.op * L.transformerLabel.visible);
+                let hdrBox = fits ? fits(new Vec3(eAll.minX, eAll.minY - 24, eAll.midZ), new Vec3(eAll.maxX, eAll.maxY, eAll.midZ)) : true;
+                if (color.w > 0 && hdrBox) drawHeader(state, `${prefix} ${li}`, eAll, color, 14);
+            }
+            let attnCubes = L.heads.flatMap(h => h.cubes);
+            let eAttn = extent(attnCubes);
+            if (eAttn) {
+                let color = baseColor.mul(eAttn.op * L.selfAttendLabel.visible);
+                if (color.w > 0) put('Joint Attention', eAttn, () => pinLeft(state, 'Joint Attention', eAttn!, color, 12, eAttn!.maxZ, 26), 12, 26, eAttn.maxZ);
+            }
+            let eProj = extent(L.projLabel.cubes.filter(c => c !== L.attnResidual));
+            if (eProj && L.projLabel.visible > 0) put('Out Proj', eProj, () => pinLeft(state, 'Out Proj', eProj!, baseColor.mul(eProj!.op * L.projLabel.visible), 10, eProj!.midZ), 10, 10);
+            let eMlp = extent(L.mlpLabel.cubes);
+            if (eMlp && L.mlpLabel.visible > 0) put('MLP (SwiGLU)', eMlp, () => pinLeft(state, 'MLP (SwiGLU)', eMlp!, baseColor.mul(eMlp!.op * L.mlpLabel.visible), 12, eMlp!.midZ), 12, 10);
 
-        let attnProjTop = block.attnOut.y - layout.margin / 2;
-        let attnProjBot = block.attnOut.y + block.attnOut.dy + layout.margin / 2;
-        let mlpTop = block.mlpFcBias.y - layout.margin / 2;
-
-        let blockLeft = mlpLeft - layout.margin * 6;
-
-        {
-            let color = baseColor.mul(block.mlpResidual.opacity * block.transformerLabel.visible);
-            let tl = new Vec3(blockLeft, blockTop, 0);
-            let br = new Vec3(blockLeft, blockBottom, 0);
-            drawSectionLabel(state, `Layer ${transformerIdx}`, tl, br, { color, fontSize: 26 });
-        }
-
-        {
-            let color = baseColor.mul(block.attnResidual.opacity * block.selfAttendLabel.visible);
-            let tl = new Vec3(attnLeft, blockTop, 0);
-            let br = new Vec3(attnLeft, attnProjBot, 0);
-            drawSectionLabel(state, `Joint Attention`, tl, br, { color, fontSize: 12 });
-        }
-
-        {
-            let color = baseColor.mul(block.mlpAct.opacity * block.mlpLabel.visible);
-            let tl = new Vec3(mlpLeft, mlpTop, 0);
-            let br = new Vec3(mlpLeft, blockBottom, 0);
-            drawSectionLabel(state, `MLP (SwiGLU)`, tl, br, { color, fontSize: 12 });
-        }
-
-        {
-            let color = baseColor.mul(block.attnOut.opacity * block.projLabel.visible);
-            let tl = new Vec3(attnLabelLeft, attnProjTop, 0);
-            let br = new Vec3(attnLabelLeft, attnProjBot, 0);
-            drawSectionLabel(state, `Out Proj`, tl, br, { color, fontSize: 10 });
-        }
-
-        let headIdx = 0;
-        for (let head of block.heads) {
-
-            {
-                let color = baseColor.mul(head.attnMtx.opacity * head.headLabel.visible);
-                let tl = new Vec3(attnLabelLeft, head.vBlock.y, head.vBlock.z + head.vBlock.dz / 2);
-                let br = new Vec3(attnLabelLeft, head.qBlock.y + head.qBlock.dy, head.qBlock.z + head.qBlock.dz / 2);
-                if (head.qBlock.y !== head.vBlock.y) {
-                    tl = new Vec3(attnLabelLeft, head.vBlock.y, head.vOutBlock.z + head.vOutBlock.dz / 2);
-                    br = new Vec3(attnLabelLeft, head.vOutBlock.y + head.vOutBlock.dy, head.vOutBlock.z + head.vOutBlock.dz / 2);
+            L.heads.forEach((head, hi) => {
+                let z = head.qBlock.z + head.qBlock.dz / 2;
+                let eHead = extent(head.cubes.filter(c => Math.abs(c.z + c.dz / 2 - z) < 1e-3));
+                let nH = L.heads.length;
+                let hText = `Head ${hi}  (x${nH} heads, same shape)`;
+                let hc = baseColor.mul(head.attnMtx.opacity * head.headLabel.visible);
+                if (eHead && hc.w > 0) put(hText, eHead, () => pinLeft(state, hText, eHead!, hc, 10, z, 18), 10, 18, z);
+                for (let [lbl, blk, txt] of [[head.qLabel, head.qBlock, 'Q'], [head.kLabel, head.kBlock, 'K'], [head.vLabel, head.vBlock, 'V']] as [IBlkLabel, IBlkDef, string][]) {
+                    let e = extent(lbl.cubes.filter(c => Math.abs(c.z + c.dz / 2 - (blk.z + blk.dz / 2)) < 1e-3));
+                    let lc = baseColor.mul(blk.opacity * lbl.visible);
+                    if (e && lc.w > 0) put(txt, e, () => pinLeft(state, txt, e!, lc, 6, blk.z + blk.dz / 2, 4), 6, 4, blk.z + blk.dz / 2);
                 }
-
-                drawSectionLabel(state, `Head ${headIdx}`, tl, br, { color, fontSize: 10 });
-            }
-
-
-            {
-                let color = baseColor.mul(head.qBlock.opacity * head.qLabel.visible);
-                let tl = new Vec3(headLeft, head.qBlock.y, head.qBlock.z + head.qBlock.dz / 2);
-                let br = new Vec3(headLeft, head.qBlock.y + head.qBlock.dy, head.qBlock.z + head.qBlock.dz / 2);
-                drawSectionLabel(state, `Q`, tl, br, { color, fontSize: 6, pad: 4 });
-            }
-
-            {
-                let color = baseColor.mul(head.kBlock.opacity * head.kLabel.visible);
-                let tl = new Vec3(headLeft, head.kBlock.y, head.kBlock.z + head.kBlock.dz / 2);
-                let br = new Vec3(headLeft, head.kBlock.y + head.kBlock.dy, head.kBlock.z + head.kBlock.dz / 2);
-                drawSectionLabel(state, `K`, tl, br, { color, fontSize: 6, pad: 4 });
-            }
-
-            {
-                let color = baseColor.mul(head.vBlock.opacity * head.vLabel.visible);
-                let tl = new Vec3(headLeft, head.vBlock.y, head.vBlock.z + head.vBlock.dz / 2);
-                let br = new Vec3(headLeft, head.vBlock.y + head.vBlock.dy, head.vBlock.z + head.vBlock.dz / 2);
-                drawSectionLabel(state, `V`, tl, br, { color, fontSize: 6, pad: 4 });
-            }
-
-            headIdx++;
-        }
-
-        transformerIdx++;
+            });
+        });
     }
+    for (let { draw } of pend.values()) draw();
+}
 
+interface ILayerLike {
+    transformerLabel: IBlkLabel; selfAttendLabel: IBlkLabel; projLabel: IBlkLabel; mlpLabel: IBlkLabel;
+    attnResidual: IBlkDef;
+    heads: { cubes: IBlkDef[], qBlock: IBlkDef, kBlock: IBlkDef, vBlock: IBlkDef, attnMtx: IBlkDef,
+        headLabel: IBlkLabel, qLabel: IBlkLabel, kLabel: IBlkLabel, vLabel: IBlkLabel }[];
+}
+
+interface IExtent { minX: number, maxX: number, minY: number, maxY: number, minZ: number, maxZ: number, midZ: number, op: number }
+
+function extent(cubes: IBlkDef[]): IExtent | null {
+    let e: IExtent = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity, midZ: 0, op: 0 };
+    for (let c of cubes) {
+        if (c.opacity <= 0) continue;
+        e.minX = Math.min(e.minX, c.x); e.maxX = Math.max(e.maxX, c.x + c.dx);
+        e.minY = Math.min(e.minY, c.y); e.maxY = Math.max(e.maxY, c.y + c.dy);
+        e.minZ = Math.min(e.minZ, c.z); e.maxZ = Math.max(e.maxZ, c.z + c.dz);
+        e.op = Math.max(e.op, c.opacity);
+    }
+    if (e.op <= 0) return null;
+    e.midZ = (e.minZ + e.maxZ) / 2;
+    return e;
+}
+
+// a bracket along the left edge of the blocks, text left of it
+function pinLeft(state: IRenderState, text: string, e: IExtent, color: Vec4, fontSize: number, z: number, pad = 10) {
+    if (color.w <= 0) return;
+    drawSectionLabel(state, text, new Vec3(e.minX, e.minY, z), new Vec3(e.minX, e.maxY, z), { color, fontSize, pad });
+}
+
+// a header above the blocks: text, then a line along their top edge with ticks down to it
+function drawHeader(state: IRenderState, text: string, e: IExtent, color: Vec4, fontSize: number) {
+    if (color.w <= 0) return;
+    let mtx = new Mat4f();
+    mtx[14] = e.midZ;
+    let y = e.minY - 6;
+    writeTextToBuffer(state.modelFontBuf, text, color, e.minX, y - fontSize - 2, fontSize, mtx);
+    let lc = color.mul(0.4);
+    let p0 = new Vec3(e.minX, y, e.midZ), p1 = new Vec3(e.maxX, y, e.midZ);
+    addLine(state.lineRender, 1.0, lc, p0, p1, undefined);
+    addLine(state.lineRender, 1.0, lc, p0, new Vec3(e.minX, e.minY, e.midZ), undefined);
+    addLine(state.lineRender, 1.0, lc, p1, new Vec3(e.maxX, e.minY, e.midZ), undefined);
 }
 
 interface ILabelOpts {

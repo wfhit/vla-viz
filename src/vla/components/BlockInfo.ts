@@ -8,7 +8,18 @@ import { drawRoundedRect } from "./DataFlow";
 
 export function drawBlockInfo(state: IProgramState) {
 
+    // same-name tags: one per screen, on the block nearest the camera's focus point
+    let c = state.camera.center;
+    let focus = new Vec3(c.x, -c.z, -c.y);
+    let best = new Map<string, { d: number, blk: typeof state.layout.cubes[0] }>();
     for (let blk of state.layout.cubes) {
+        if (blk.opacity === 0 || !blk.name || blk.noTag) continue;
+        let d = new Vec3(blk.x + blk.dx / 2, blk.y + blk.dy / 2, blk.z + blk.dz / 2).sub(focus).len();
+        let cur = best.get(blk.name);
+        if (!cur || d < cur.d) best.set(blk.name, { d, blk });
+    }
+
+    for (let { blk } of best.values()) {
 
         let blkTopMid = new Vec3(blk.x + blk.dx / 2, blk.y, blk.z + blk.dz / 2);
 

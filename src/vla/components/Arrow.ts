@@ -124,101 +124,107 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
 
     drawEulerStrip();
 
-    let lnUnit = (ln: IVlaModelLayout['ln_f'], tail: IBlkDef) => U(ln.lnAgg1, ln.lnAgg2, ln.lnResid, tail);
-    let prev = U(layout.residual0, layout.expertIn);
-    for (let i = 0; i < layout.blocks.length; i++) {
-        let block = layout.blocks[i];
-        let e = block.expert;
-        let ln1U = lnUnit(block.ln1, e.ln1);
-        if (i > 0 && Math.abs(layout.blocks[i - 1].attnResidual.x - block.attnResidual.x) > 1) {
+    type ILn = IVlaModelLayout['ln_f'];
+    type ITrunkLayer = IVlaModelLayout['blocks'][number];
+    type IExpertLayer = IVlaModelLayout['expertLayers'][number];
+    let lnUnit = (ln: ILn) => U(ln.lnAgg1, ln.lnAgg2, ln.lnResid);
+
+    // RMSNorm / AdaRMSNorm group: the stream enters on top; w (and γβ(t)) feed the output
+    function drawLn(prev: IBlkDef, ln: ILn) {
+        drawArrowBetween(prev, BlockPos.Bot, lnUnit(ln), BlockPos.Top);
+        drawVertArrow(ln.lnAgg2, ln.lnResid, 2);
+        drawHorizArrow(ln.lnSigma, ln.lnResid);
+        if (ln.ada) drawArrowBetween(ln.ada, BlockPos.Left, ln.lnResid, BlockPos.Right, 2);
+    }
+
+    // one transformer layer — trunk or expert, the same drawing; the expert's score row is
+    // [prefix keys | suffix keys] (its prefix K/V come from the trunk: see ActionViz drawJointLinks)
+    function drawLayer(L: ITrunkLayer | IExpertLayer, prev: IBlkDef, prevL: ITrunkLayer | IExpertLayer | null, name: string, i: number) {
+        let ln1U = lnUnit(L.ln1);
+        if (prevL && Math.abs(prevL.attnResidual.x - L.attnResidual.x) > 1) {
             // column wrap: the stream continues at the top of the next column — no arrow
             // runs back up across the scene; both ends are labelled instead
             dry = false;
             rec(prev, ln1U);
-            drawWrapLabel(prev, `continues: layer ${i} (next column) ->`, 1);
-            let r = U(block.attnResidual, e.res1);
-            let entry = { ...r, y: ln1U.y - 4 * layout.margin, dy: 0 };
+            drawWrapLabel(prev, `continues: ${name} ${i} (next column) ->`, 1);
+            let entry = { ...L.attnResidual, y: ln1U.y - 4 * layout.margin, dy: 0 };
             members.set(entry, []);
-            drawWrapLabel(entry, `<- from layer ${i - 1}`, -1);
+            drawWrapLabel(entry, `<- from ${name} ${i - 1}`, -1);
             prev = entry;
         }
-        dry = !!isVisible && !isVisible([...block.cubes, ...e.cubes]);
+        dry = !!isVisible && !isVisible(L.cubes);
 
-        // the concatenated [prefix | suffix] stream enters the layer: ⊕ unit → norm unit
-        drawArrowBetween(prev, BlockPos.Bot, ln1U, BlockPos.Top);
-        drawVertArrow(block.ln1.lnAgg2, block.ln1.lnResid, 2);
-        drawHorizArrow(block.ln1.lnSigma, block.ln1.lnResid);
-        drawArrowBetween(e.ada, BlockPos.Left, e.ln1, BlockPos.Right, 2);
-        let lnR = U(block.ln1.lnResid, e.ln1);
+        drawLn(prev, L.ln1);
+        let lnR = L.ln1.lnResid;
 
         // K/V are shared by the query heads of a kv group: one arrow per group
-        for (let g = 0; g < block.kvGroups.length; g++) {
-            let grp = block.kvGroups[g];
-            drawArrowBetween(lnR, BlockPos.Left, U(grp.kBlock, e.kv[g].k), BlockPos.Right);
-            drawArrowBetween(lnR, BlockPos.Left, U(grp.vBlock, e.kv[g].v), BlockPos.Right);
+        for (let grp of L.kvGroups) {
+            drawArrowBetween(lnR, BlockPos.Left, grp.kBlock, BlockPos.Right);
+            drawArrowBetween(lnR, BlockPos.Left, grp.vBlock, BlockPos.Right);
             drawHorizArrow(grp.kWeightBlock, grp.kBlock);
             drawHorizArrow(grp.vWeightBlock, grp.vBlock);
         }
 
-        let oU = U(block.attnOut, e.o);
-        for (let h = 0; h < block.heads.length; h++) {
-            let head = block.heads[h], eh = e.heads[h], g = head.kvGroup;
-            let qU = U(head.qBlock, eh.q), kU = U(head.kBlock, e.kv[g].k), vU = U(head.vBlock, e.kv[g].v);
-            let attU = U(head.attnMtx, eh.scP, eh.scS), smU = U(head.attnMtxSm, eh.pP, eh.pS);
-            let voU = U(head.vOutBlock, eh.vo);
-            drawArrowBetween(lnR, BlockPos.Left, qU, BlockPos.Right);
-            // q_norm/k_norm γ act AFTER the projection (they have no arrow into W)
+        let oB = L.attnOut;
+        for (let head of L.heads) {
+            let hp = (head as any).attnMtxP as IBlkDef | undefined;
+            let hsp = (head as any).attnMtxSmP as IBlkDef | undefined;
+            let attU = hp ? U(hp, head.attnMtx) : head.attnMtx;
+            let smU = hsp ? U(hsp, head.attnMtxSm) : head.attnMtxSm;
+            drawArrowBetween(lnR, BlockPos.Left, head.qBlock, BlockPos.Right);
+            // biases / q_norm·k_norm γ act after the projection (no arrow into W)
             drawHorizArrow(head.qWeightBlock, head.qBlock);
 
-            drawArrowBotToSide(qU, attU, 0);
-            drawArrowBotToSide(kU, attU, 0);
-            drawArrowBotToSide(vU, voU, 0);
+            drawArrowBotToSide(head.qBlock, attU, 0);
+            drawArrowBotToSide(head.kBlock, head.attnMtx, 0);
+            drawArrowBotToSide(head.vBlock, head.vOutBlock, 0);
 
             drawArrowBetween(attU, BlockPos.Left, head.attnMtxAgg2, BlockPos.Right);
             drawArrowBetween(head.attnMtxAgg1, BlockPos.Left, smU, BlockPos.Right);
-            drawArrowBetween(smU, BlockPos.Bot, voU, BlockPos.Left);
+            drawArrowBetween(smU, BlockPos.Bot, head.vOutBlock, BlockPos.Left);
 
-            drawArrowBetween(voU, BlockPos.Bot, oU, BlockPos.Top);
+            drawArrowBetween(head.vOutBlock, BlockPos.Bot, oB, BlockPos.Top);
         }
 
-        let r1U = U(block.attnResidual, e.res1);
-        drawHorizArrow(oU, r1U);
-        drawHorizArrow(block.projWeight, block.attnOut);
+        let r1 = L.attnResidual;
+        drawHorizArrow(oB, r1);
+        drawHorizArrow(L.projWeight, L.attnOut);
         // ⊕ = o_proj out + the layer input: the skip is a label, not a line past the sublayers
-        drawSkip(prev, r1U, '+ skip: layer input');
+        drawSkip(prev, r1, '+ skip: layer input');
 
-        let ln2U = lnUnit(block.ln2, e.ln2);
-        drawArrowBetween(r1U, BlockPos.Bot, ln2U, BlockPos.Top);
-        drawVertArrow(block.ln2.lnAgg2, block.ln2.lnResid, 2);
-        drawHorizArrow(block.ln2.lnSigma, block.ln2.lnResid);
-        drawArrowBetween(e.ada2, BlockPos.Left, e.ln2, BlockPos.Right, 2);
-        let ln2R = U(block.ln2.lnResid, e.ln2);
+        drawLn(r1, L.ln2);
+        let ln2R = L.ln2.lnResid;
 
-        let gU = U(block.mlpFc, e.gate), upU = U(block.mlpUp, e.up), actU = U(block.mlpAct, e.act);
-        let mU = U(block.mlpResult, e.mlp), r2U = U(block.mlpResidual, e.out);
-        drawArrowBetween(ln2R, BlockPos.Bot, gU, BlockPos.Right);
-        drawArrowOverTo(ln2R, upU);
+        drawArrowBetween(ln2R, BlockPos.Bot, L.mlpFc, BlockPos.Right);
+        drawArrowOverTo(ln2R, L.mlpUp);
 
         // SwiGLU: gate & up branches meet in silu(gate)·up
-        drawVertArrow(block.mlpFcWeight, block.mlpFc, 12);
-        drawVertArrow(block.mlpUpWeight, block.mlpUp, 12);
-        drawVertArrow(gU, actU, 12);
-        drawArrowBetween(upU, BlockPos.Bot, actU, BlockPos.Left);
-        drawHorizArrow(block.mlpProjWeight, block.mlpResult);
-        drawHorizArrow(mU, r2U);
-        drawArrowBetween(actU, BlockPos.Right, mU, BlockPos.Top);
-        drawSkip(r1U, r2U, '+ skip: attn residual');
+        drawVertArrow(L.mlpFcWeight, L.mlpFc, 12);
+        drawVertArrow(L.mlpUpWeight, L.mlpUp, 12);
+        drawVertArrow(L.mlpFc, L.mlpAct, 12);
+        drawArrowBetween(L.mlpUp, BlockPos.Bot, L.mlpAct, BlockPos.Left);
+        drawHorizArrow(L.mlpProjWeight, L.mlpResult);
+        drawHorizArrow(L.mlpResult, L.mlpResidual);
+        drawArrowBetween(L.mlpAct, BlockPos.Right, L.mlpResult, BlockPos.Top);
+        drawSkip(r1, L.mlpResidual, '+ skip: attn residual');
+        return L.mlpResidual;
+    }
 
-        prev = r2U;
+    let prev: IBlkDef = layout.residual0;
+    for (let i = 0; i < layout.blocks.length; i++) {
+        prev = drawLayer(layout.blocks[i], prev, i > 0 ? layout.blocks[i - 1] : null, 'layer', i);
     }
     dry = false;
+    drawLn(prev, layout.ln_f);
+
+    let eprev: IBlkDef = layout.expertIn;
+    for (let i = 0; i < layout.expertLayers.length; i++) {
+        eprev = drawLayer(layout.expertLayers[i], eprev, i > 0 ? layout.expertLayers[i - 1] : null, 'DiT layer', i);
+    }
+    dry = false;
+    drawLn(eprev, layout.expertNorm);
 
     drawTimeBus();
-
-    let lnfU = lnUnit(layout.ln_f, layout.expertOut);
-    drawArrowBetween(prev, BlockPos.Bot, lnfU, BlockPos.Top);
-    drawVertArrow(layout.ln_f.lnAgg2, layout.ln_f.lnResid, 2);
-    drawHorizArrow(layout.ln_f.lnSigma, layout.ln_f.lnResid);
 
     // h* (the boundary column of ln_f) → knack head (below) and done head (left)
     drawStraightDown(layout.ln_f.lnResid, layout.hStar, 2, layout.hStar.x + layout.hStar.dx / 2);
@@ -244,7 +250,7 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
     // te(t) → every DiT layer's γβ slots: one bus per column, just right of the γβ slots
     function drawTimeBus() {
         let te = layout.fm.timeEmb;
-        let els = layout.blocks.map(b => b.expert);
+        let els = layout.expertLayers;
         let cols: (typeof els)[] = [];
         for (let e of els) {
             let last = cols[cols.length - 1];
@@ -257,7 +263,7 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
             let col = cols[c];
             let ends = col.flatMap(e => [e.ada, e.ada2]).filter(b => b.opacity > 0 && te.opacity > 0);
             if (ends.length === 0) continue;
-            let res = layout.blocks[col[0].layer].attnResidual;
+            let res = col[0].attnResidual;
             let busX = (ends[0].x + ends[0].dx + res.x) / 2;
             let z = ends[0].z + ends[0].dz / 2;
             let op = Math.min(te.opacity, Math.max(...ends.map(b => b.opacity)));

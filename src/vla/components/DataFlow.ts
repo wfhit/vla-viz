@@ -64,6 +64,9 @@ export function drawDataFlow(state: IProgramState, blk: IBlkDef, destIdx: Vec3, 
     } else if (blk.deps.special === BlKDepSpecial.LayerNorm) {
         bb = drawLayerNorm(dataFlowArgs);
 
+    } else if (blk.deps.special === BlKDepSpecial.AdaLayerNorm) {
+        bb = drawAdaLayerNorm(dataFlowArgs);
+
     } else if (blk.deps.special === BlKDepSpecial.LayerNormMu) {
         bb = drawLayerNormMuAgg(dataFlowArgs);
 
@@ -428,6 +431,36 @@ function drawLayerNorm(args: IDataFlowArgs) {
             },
             { text: '  ‧ ' },
             { text: 'γ', color: weightSrcColor },
+        ],
+    });
+
+    return drawMaths(args, center, blk);
+}
+
+// the expert's AdaRMSNorm: the plain RMSNorm, then modulated by the timestep: (1 + γ(t)) · n + β(t)
+function drawAdaLayerNorm(args: IDataFlowArgs) {
+    let { center, mtx } = args;
+    let fontOpts: IFontOpts = { color: opColor, mtx, size: 16 };
+
+    let blk = mkTextBlock({
+        opts: fontOpts,
+        subs: [
+            { text: '(1 + ' },
+            { text: 'γ(t)', color: weightSrcColor },
+            { text: ') ‧ ' },
+            {
+                type: TextBlockType.Line,
+                rectOpts: { color: Colors.Aggregates.mul(0.8), mtx, thick: 1.0, dash: 6 },
+                subs: [
+                    { cellX: 1, cellY: 1, color: workingSrcColor },
+                    { text: ' ‧ rsqrt(mean(', color: workingSrcColor },
+                    { cellX: 1, cellY: 3, color: workingSrcColor },
+                    { text: '²) + ε) ‧ ', color: workingSrcColor },
+                    { text: 'w', color: weightSrcColor },
+                ],
+            },
+            { text: ' + ' },
+            { text: 'β(t)', color: weightSrcColor },
         ],
     });
 

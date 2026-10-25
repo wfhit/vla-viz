@@ -1,16 +1,20 @@
 import { Phase } from "./Walkthrough";
-import { commentary, frameCubes, frameTo, initialFrame, IWalkthroughArgs } from "./WalkthroughTools";
+import { commentary, frameCubes, setFocus, frameTo, initialFrame, IWalkthroughArgs } from "./WalkthroughTools";
 import { clamp } from "@/src/utils/data";
+import { lerp, lerpSmoothstep } from "@/src/utils/math";
 import { IBlkDef, IVlaModelLayout } from "../VlaModelLayout";
 import { describeActionRow, fmtSigned, normalizeAction, unnormalizeAction } from "../actionDims";
 import { layerMass } from "../components/ActionViz";
 import { IProgramState } from "../Program";
 import { applyFlowPass, applyFmStep, nFlowStages } from "./FlowPass";
+import { processUpTo, startProcessBefore } from "./Walkthrough00_Intro";
 
-// The DiT action-expert chapter group D0 … D7 (docs/design/dit-section-design.md §2, §3, §5).
-// Every tensor in the scene is a real k005b capture; the K-step decode (D6) runs on the
-// step_130000 weights, which were trained at t = 1 only — the scene and the text mark it as a
-// pre-stamp preview until the action_decode-stamped checkpoint is exported.
+// The DiT action-expert chapter group D0 … D7. The expert tower is drawn in the same visual
+// language as the trunk chapters (03 RMSNorm … 08 stack): each expert layer is a full layer view
+// (AdaRMSNorm → Q/K/V → joint attention → o_proj → ⊕ → AdaRMSNorm → SwiGLU → ⊕), 28 of them
+// stacked. The time bus and the Euler strip are annotations on top of that language.
+// Every tensor is a real k005b capture; the K-step decode (D7) runs on the step_130000 weights,
+// trained at t = 1 only, so it is marked as a pre-stamp preview.
 
 type IFrameBox = { x: number, y: number, z: number, dx: number, dy: number, dz: number };
 
@@ -28,24 +32,32 @@ function dimExcept(L: IVlaModelLayout, keep: IBlkDef[], level: number) {
     }
 }
 
-// the joint block of layer pair i: the trunk lane's chain and the DiT lane beside it
-function pairPath(L: IVlaModelLayout, i: number, withTrunk = true) {
-    let b = L.blocks[i], e = L.expertLayers[i];
-    let h = b.heads.length - 1;
-    let dit = [e.ln1, e.ada, e.o, e.res1, e.ln2, e.mlp, e.out, e.heads[h].scS, e.heads[h].vo];
-    if (!withTrunk) return [...dit, b.attnResidual, b.mlpResidual];
-    return [...b.ln1.cubes, b.heads[h].attnMtx, b.attnOut, b.attnResidual, ...b.ln2.cubes,
-        b.mlpFc, b.mlpAct, b.mlpResult, b.mlpResidual, ...dit];
+// expert blocks from `blk` on (cube order = compute order) have not been computed yet
+function blankFrom(L: IVlaModelLayout, blk: IBlkDef) {
+    let dit = new Set(L.ditCubes);
+    let i0 = L.cubes.indexOf(blk);
+    for (let i = i0; i < L.cubes.length; i++) {
+        let c = L.cubes[i];
+        if (c.t !== 'w' && dit.has(c) && c.access) c.access.disable = true;
+    }
 }
 
-// the camera rides along a pass: frames layer pair `pos` (continuous between two layers)
-function followPair(state: IProgramState, L: IVlaModelLayout, pos: number, angleX: number, angleY: number, fill: number, withTrunk = true) {
-    let nL = L.blocks.length;
+// expert layer i's sublayer chain (the head fan extends in z and is left out, as in chapter 08)
+function eMain(L: IVlaModelLayout, i: number) {
+    let e = L.expertLayers[i], h = e.heads[0];
+    return [...e.ln1.cubes, h.qBlock, h.attnMtxP, h.attnMtx, h.attnMtxSm, e.attnOut, e.attnResidual, ...e.ln2.cubes,
+        e.mlpFc, e.mlpUp, e.mlpAct, e.mlpResult, e.mlpResidual];
+}
+
+// the camera rides along a pass: frames expert layer `pos` (continuous between two layers)
+function followLayer(state: IProgramState, L: IVlaModelLayout, pos: number, angleX: number, angleY: number, fill: number) {
+    let nL = L.expertLayers.length;
     let i0 = clamp(Math.floor(pos), 0, nL - 1), i1 = Math.min(nL - 1, i0 + 1);
     let u = clamp(pos - i0, 0, 1);
     u = u * u * (3 - 2 * u);
-    let a = frameCubes(pairPath(L, i0, withTrunk), angleX, angleY, { fill });
-    let b = frameCubes(pairPath(L, i1, withTrunk), angleX, angleY, { fill });
+    let a = frameCubes(eMain(L, i0), angleX, angleY, { fill });
+    let b = frameCubes(eMain(L, i1), angleX, angleY, { fill });
+    setFocus(state, eMain(L, u < 0.5 ? i0 : i1));
     state.camera.center = a.center.lerp(b.center, u);
     state.camera.angle = a.angle.lerp(b.angle, u);
     state.walkthrough.markDirty();
@@ -72,7 +84,7 @@ function mse(a: Float32Array | undefined, b: Float32Array | undefined) {
 }
 
 export function walkthrough11_FlowMatching(args: IWalkthroughArgs) {
-    let { walkthrough: wt, state, layout: L, tools: { afterTime, breakAfter, c_blockRef } } = args;
+    let { walkthrough: wt, state, layout: L, tools: { afterTime, breakAfter, c_blockRef, cleanup } } = args;
     let cfg = L.shape.full;
     let m = state.vlaModel;
     let viz = state.display.actionViz!;
@@ -93,246 +105,89 @@ export function walkthrough11_FlowMatching(args: IWalkthroughArgs) {
     let fBox = fieldBox(L);
     let kvOf = (i: number) => L.blocks[i].kvGroups.flatMap(g => [g.kBlock, g.vBlock]);
     let e0 = el[0], b0 = L.blocks[0];
-    let hF = b0.heads.length - 1;
-    // the field is hidden unless a phase asks for it
+    let eh = e0.heads[0];
+    let S = L.strip;
+    let dit = L.ditCubes;
+    // the field is hidden unless a phase asks for it; the Euler strip belongs to D7 only
     viz.field = 0;
+    if (wt.phase !== Phase.D7_Euler) for (let b of S) b.opacity = 0;
+
+    // real values: suffix token 1 (the first action token), window channel c
+    let el0 = m?.expertLayers[0];
+    let ada0 = m?.fm.ada[0].localBuffer;
+    let wc = ada0 ? ada0.length / 4 : 64;
+    let at = (t: { localBuffer: Float32Array } | undefined, r: number, c: number) => t?.localBuffer[r * wc + c];
+    let st = (i: number) => {
+        let s = m?.fm.ada[i].meta.stats;
+        return s ? `[${fmtSigned(s.min, 2)}, ${fmtSigned(s.max, 2)}]` : '…';
+    };
+    let xin = m?.expertIn.localBuffer[wc], o10 = at(el0?.oOut, 1, 0), r10 = at(el0?.attnResid, 1, 0);
+    let mlp10 = at(el0?.mlpOut, 1, 0), out10 = at(el0?.mlpResid, 1, 0);
+    let preStamp = `（数据说明：本组激活来自 ${ckpt} 旧权重、t = 1 的一次前向；t = 1 正是它训练时见过的分布，但仍属 pre-stamp 预览，step_160000 印章检查点落盘后会换数据。）`;
+    // the trunk recedes in the one-layer chapters (it is the prefix the expert reads)
+    let dimTrunk = (keep: IBlkDef[], level: number) => dimExcept(L, [...dit, ...keep], level);
 
     switch (wt.phase) {
 
-    case Phase.D0_TwoTransformers: {
-        let lane0 = [b0.ln1.lnResid, b0.attnOut, b0.attnResidual, b0.mlpResult, b0.mlpResidual,
-            e0.ln1, e0.ada, e0.o, e0.res1, e0.ln2, e0.mlp, e0.out];
-        let top = [L.residual0, L.expertIn, ...fm.cubes, ...lane0];
-        initialFrame(state, top, 280, 8, { fill: 1.0 });
+    case Phase.D0_Towers: {
+        let pair0 = [L.residual0, L.expertIn, ...b0.ln1.cubes, b0.attnResidual, b0.mlpResidual, ...eMain(L, 0)];
+        initialFrame(state, pair0, 270, 6, { fill: 1.2 });
         commentary(wt, null, 0)`
 
 这一章组讲动作分支：DiT 动作专家与流匹配（flow matching）。
 
-k005b 里其实有两个 Transformer。主干是 Qwen3-VL（隐藏维 ${cfg?.n_embd ?? 2048}），处理图像、文本和状态 token，给出 knack / done。动作专家是一个 DiT：一个用时间 t 做条件的 Transformer（隐藏维 ${cfg?.expert_hidden ?? 768}），负责产出 ${H} × ${D} 的动作块。
+k005b 里有两个 Transformer。左边是前面几章一层层拆开过的主干 Qwen3-VL；右边是第二座塔：动作专家，一个用时间 t 做条件的 Transformer（DiT）。
 
-两者逐层配对，一共 ${nPairs} 个层对。场景里每一层就是一个“传送门”：左边是主干泳道，右边紧贴着的橙色窄条是 DiT 泳道（17 个后缀 token，图中 64 通道窗口）。两条泳道在这一层共用一次联合注意力，这就是它们的耦合。
+两座塔用同一套画法。专家塔的每一层也是：RMSNorm → Q/K/V → 注意力 → softmax·V → o_proj → ⊕ → RMSNorm → SwiGLU MLP → ⊕，只是规格更小，Norm 换成带时间条件的 AdaRMSNorm。
 `;
         breakAfter();
         let tPull = afterTime(null, 2.0);
+        let towers = [L.residual0, L.expertIn, ...L.blocks.flatMap(b => [b.ln1.lnAgg1, b.mlpResidual]),
+            ...el.flatMap(e => [e.ln1.lnAgg1, e.ada, e.mlpResidual])];
+        frameTo(state, tPull, towers, 270, 6, { fill: 1.05 });
         commentary(wt)`
 
-所以不存在“两边各一条与中间无关的流”：主干流和 DiT 流都从顶部进入第 0 层，一格一格穿过同一组 ${nPairs} 个层对。
+两座塔各 ${nPairs} 层，第 i 层与第 i 层同高并排：它们在这一层共用一次联合注意力（D3），这就是耦合。
 
-另外两样东西只属于 DiT：
-① 顶部右侧的输入簇（${c_blockRef('state75', fm.state75)}、${c_blockRef('x_t', fm.x1)}、${c_blockRef('te = sincos(t)', fm.timeEmb)}），拼成 ${c_blockRef('DiT Suffix In', L.expertIn)}；
-② 一条青色的时间总线：te 沿着它送到每一层 DiT 泳道的 γβ 窄块。这是 DiT 的“时间条件化 adaLN”。
+主干 ↔ 专家（真实配置）：
+隐藏维 ${cfg?.n_embd ?? 2048} ↔ ${cfg?.expert_hidden ?? 768}
+token：前缀 ${cfg ? cfg.L_joint - cfg.n_suffix : 1240} 个（图中 ${L.shape.T} 列窗口）↔ 后缀 ${cfg?.n_suffix ?? 17} 个
+注意力：${cfg?.n_head ?? 16} 个 Q 头 / ${cfg?.n_kv_head ?? 8} 组 KV ↔ ${cfg?.expert_heads ?? 16} 个 Q 头 / ${cfg?.expert_kv_heads ?? 2} 组 KV，head_dim 都是 ${cfg?.head_dim ?? 128}（联合注意力要求两边一致）
+MLP：${cfg?.intermediate ?? 6144} ↔ ${cfg?.expert_intermediate ?? 2752}
+Norm：RMSNorm ↔ AdaRMSNorm（γβ 随 t 变化）
 `;
-        frameTo(state, tPull, [...top, ...pairPath(L, 1, false), ...pairPath(L, 2, false), ...pairPath(L, 3, false)], 280, 8, { fill: 1.0 });
+        breakAfter();
+        let tBus = afterTime(null, 1.5);
+        let busView = [L.expertIn, ...fm.cubes, ...el.slice(0, 2).flatMap(e => [e.ada, e.ada2, e.ln1.lnResid, e.attnResidual, e.mlpResidual])];
+        frameTo(state, tBus, busView, 270, 6, { fill: 1.1 });
+        commentary(wt)`
+
+专家塔多出来的只有两样注解：
+① 顶部的输入簇（${c_blockRef('state75', fm.state75)}、${c_blockRef('x_t', fm.x1)}、${c_blockRef('te = sincos(t)', fm.timeEmb)}）拼成 ${c_blockRef('DiT Suffix In', L.expertIn)}，D1 讲；
+② 青色的时间总线：te 沿它送到每层两个 Norm 旁边的 γβ 小块（${c_blockRef('γ₁β₁', e0.ada)}、${c_blockRef('γ₂β₂', e0.ada2)}），D2 讲。
+
+D2–D5 按主干 03–07 的节奏，把专家第 0 层逐个子层展开；D6 把 ${nPairs} 层走一遍；D7 是 ${K} 步 Euler 解码。
+`;
         viz.activeLayer = 0;
         viz.links = 0.6;
-    } break;
-
-    case Phase.D1_DitBlock: {
-        // D1a–D1h (docs/design/dit-framework-design.md §1): one DiT block, part by part
-        let eh = e0.heads[hF];
-        let laneTop = [e0.ln1, e0.ada, e0.o, e0.res1, b0.ln1.lnResid, b0.attnResidual, b0.attnOut];
-        let laneBot = [e0.res1, e0.ln2, e0.ada2, e0.gate, e0.act, e0.mlp, e0.out, b0.mlpResidual];
-        let lane = [...laneTop, ...laneBot];
-        let st = (i: number) => {
-            let s = m?.fm.ada[i].meta.stats;
-            return s ? `[${fmtSigned(s.min, 2)}, ${fmtSigned(s.max, 2)}]` : '…';
-        };
-        // real values of suffix token 1 (the first action token), window channel c
-        let el0 = m?.expertLayers[0];
-        let ada0 = m?.fm.ada[0].localBuffer;
-        let wc = ada0 ? ada0.length / 4 : 64;
-        let at = (t: { localBuffer: Float32Array } | undefined, r: number, c: number) => t?.localBuffer[r * wc + c];
-        // the channel where the plain RMSNorm value is largest, so the modulation is visible
-        let cPick = 0;
-        if (ada0 && el0) {
-            let best = -1;
-            for (let c = 0; c < wc; c++) {
-                let pre = (el0.ln1.localBuffer[wc + c] - ada0[wc + c]) / (1 + ada0[c]);
-                if (Math.abs(pre) > best) { best = Math.abs(pre); cPick = c; }
-            }
-        }
-        let g1 = ada0?.[cPick], b1 = ada0?.[wc + cPick], post1 = at(el0?.ln1, 1, cPick);
-        let pre1 = g1 !== undefined && b1 !== undefined && post1 !== undefined ? (post1 - b1) / (1 + g1) : undefined;
-        let xin = m?.expertIn.localBuffer[wc], o10 = at(el0?.o, 1, 0), r10 = at(el0?.res1, 1, 0);
-        let mlp10 = at(el0?.mlp, 1, 0), out10 = at(el0?.out, 1, 0);
-        let te = m?.fm.timeEmb.localBuffer;
-        let preStamp = `（数据说明：这里的激活来自 ${ckpt} 旧权重、t = 1 的一次前向；t = 1 正是它训练时见过的分布，但仍属 pre-stamp 预览，step_160000 印章检查点落盘后会换数据。）`;
-
-        initialFrame(state, lane, 270, 4, { fill: 1.05 });
-        commentary(wt, null, 0)`
-
-D1a 全貌。动作专家就是一个 DiT：用时间 t 做条件的 Transformer。这一章把它的一个块从头到尾拆开讲。
-
-教科书 DiT 的一块是：adaLN 条件化的 Norm → 注意力 → 残差 → adaLN Norm → MLP → 残差。堆 N 块，最后接 final norm 和线性输出。
-
-场景里右侧橙色窄条就是第 0 层的 DiT 块。下面先让真实数据把这一层完整走一遍，黄色是正在计算的部件。
-${preStamp}
-`;
-        breakAfter();
-        let tA = afterTime(null, nFlowStages * 0.6);
-        breakAfter();
-
-        // B and C share the close frontal view of gamma/beta (wider frames put the layer-0 heads in front of the lane)
-        let chartBox = { x: e0.ada.x + e0.ada.dx, y: e0.ada.y - 14, z: e0.ada.z, dx: 56, dy: e0.ada.dy + 14, dz: 2 };
-        let adaView = [b0.ln1.lnResid, e0.ln1, e0.ada, chartBox];
-        let tB = afterTime(null, 1.2);
-        frameTo(state, tB, adaView, 270, 2, { fill: 1.15 });
-        commentary(wt)`
-
-D1b 时间条件。t 先变成正弦嵌入 ${c_blockRef('te = sincos(t)', fm.timeEmb)}（min_period 4e-3、max_period 4.0，代码 :378），这里 t = 1，te 前两维 = ${f3(te?.[0])}、${f3(te?.[1])}。
-
-te 沿时间总线（γβ 右侧的竖线，D0 里看过全貌）从上方送到每一层的两个 γβ 小块：${c_blockRef('γ₁β₁', e0.ada)} 和 ${c_blockRef('γ₂β₂', e0.ada2)}。
-
-教科书 DiT 的条件是 t 嵌入加上类别 c 嵌入。k005b 只有 t：任务和场景信息不走条件向量，而是由注意力去读主干（D1d / D3）。
-`;
-        breakAfter();
-
-        let tC = afterTime(null, 1.2);
-        frameTo(state, tC, adaView, 270, 2, { fill: 1.15 });
-        commentary(wt)`
-
-D1c adaLN 调制。${c_blockRef('AdaRMSNorm1', e0.ln1)} 的公式：
-out = (1 + γ(te)) · RMSNorm(x) · w + β(te)
-γ、β 由 te 经线性层得到，零初始化。
-
-右侧条形图是后缀 token 1（第一个动作 token）的 64 个通道：灰条是调制前的 RMSNorm(x)·w，橙条是调制后的真实输出。例如通道 ${cPick}：γ₁ = ${f3(g1)}，β₁ = ${f3(b1)}，调制前 ${f3(pre1)} → 调制后 ${f3(post1)}。灰条普遍很短，橙条很长：t = 1 时 γ 把多数通道放大了十倍以上，β 再整体平移。
-
-第 0 层 4 × 768 组 γβ 值域 ${st(0)}，第 ${nPairs - 1} 层 ${st(nPairs - 1)}。和教科书 adaLN-Zero 的区别：用 RMSNorm 而非 LayerNorm；每层只有 2 处 γβ，没有 α 门控，残差直接相加。
-`;
-        breakAfter();
-
-        let tD = afterTime(null, 1.2);
-        frameTo(state, tD, [eh.q, eh.scP, eh.scS, eh.pP, eh.pS, eh.vo, b0.heads[hF].attnMtx], 278, 8, { fill: 1.5 });
-        commentary(wt)`
-
-D1d 注意力。17 个后缀 token 生成 ${c_blockRef('Q', eh.q)}、K、V，接着打分（${c_blockRef('scP', eh.scP)} 对主干前缀，${c_blockRef('scS', eh.scS)} 对后缀自身），softmax 后乘 V 得到 ${c_blockRef('vo', eh.vo)}。
-
-教科书是自注意力，只看自己的 token。k005b 是联合注意力：K/V 同时包含主干前缀和后缀，这是 DiT 拿到场景与任务信息的唯一入口（D3 细讲）。
-`;
-        breakAfter();
-        let tDrun = afterTime(null, 3 * 0.9);
-        breakAfter();
-
-        let tE = afterTime(null, 1.2);
-        frameTo(state, tE, [e0.o, b0.attnResidual, e0.res1], 270, 4, { fill: 1.3 });
-        commentary(wt)`
-
-D1e 残差 1。${c_blockRef('o_proj', e0.o)} 的输出是增量，在 ⊕ 处加回主线，得到 ${c_blockRef('res1', e0.res1)}。
-
-真值核对（token 1，通道 0）：输入 ${f3(xin)} + o ${f3(o10)} = res1 ${f3(r10)}。每个块只学增量。
-`;
-        breakAfter();
-        let tErun = afterTime(null, 2 * 0.9);
-        breakAfter();
-
-        let tF = afterTime(null, 1.2);
-        frameTo(state, tF, [e0.ln2, e0.ada2, e0.gate, e0.up, e0.act, e0.mlp, e0.out], 270, 4, { fill: 1.15 });
-        commentary(wt)`
-
-D1f MLP。${c_blockRef('AdaRMSNorm2', e0.ln2)}（由 ${c_blockRef('γ₂β₂', e0.ada2)} 调制）→ ${c_blockRef('gate', e0.gate)} / ${c_blockRef('up', e0.up)} → ${c_blockRef('SiLU(gate)·up', e0.act)} → ${c_blockRef('down_proj', e0.mlp)} → ⊕ → ${c_blockRef('out', e0.out)}。
-
-教科书用 GELU 的点式 MLP；k005b 用 SwiGLU，768 → 2752 → 768，逐 token 独立。
-真值核对（token 1，通道 0）：res1 ${f3(r10)} + mlp ${f3(mlp10)} = out ${f3(out10)}。
-`;
-        breakAfter();
-        let tFrun = afterTime(null, 5 * 0.9);
-        breakAfter();
-
-        let cG = commentary(wt)`
-
-D1g 堆叠。第 0 层的 out 就是第 1 层的输入，同样的块一层层叠下去。教科书 DiT-XL 有 28 块；k005b 也是 ${nL} 层，每层与主干同名层配对。
-
-每层有自己的 γβ（同一个 te，不同的线性层），值域从第 0 层的 ${st(0)} 到第 ${nPairs - 1} 层的 ${st(nPairs - 1)}。
-`;
-        breakAfter();
-        let tG = afterTime(null, 4.0);
-        breakAfter();
-        let tGpull = afterTime(null, 1.5);
-        frameTo(state, tGpull, el.flatMap(e => [e.ln1, e.out]), 280, 10, { fill: 1.05 });
-        breakAfter();
-
-        let tH = afterTime(null, 1.5);
-        frameTo(state, tH, [el[nL - 1].out, L.expertOut, L.actionWeight, L.actionVelocity], 270, 6, { fill: 1.45 });
-        commentary(wt)`
-
-D1h 输出。${nL} 层之后：${c_blockRef('final RMSNorm', L.expertOut)}（普通 RMSNorm，final_norm_adanorm = False，不受 t 调制）→ 丢掉 state token → ${c_blockRef('action_out_proj', L.actionWeight)}（768 → 23）→ ${c_blockRef('速度场 v', L.actionVelocity)}，16 × 23，例如 v[0][14] = ${f3(vel?.[14])}。
-
-教科书 DiT 在这里是 final adaLN + Linear + unpatchify。
-
-教科书 DiT ↔ k005b 对照：
-
-① patchify → token：每个动作步一行就是一个 token，再加 1 个 state token，共 17 个（:356-386，D2）
-
-② 自注意力 → 联合注意力，K/V 含主干前缀（:86-140，D3）
-
-③ 条件 t + 类别 c → 只有 t（:378）
-
-④ LayerNorm + adaLN-Zero(γβα) → AdaRMSNorm（γβ 零初始化，无 α）
-
-⑤ GELU MLP → SwiGLU 768→2752→768
-
-⑥ N 块 → ${nL} 层，与主干配对
-
-⑦ final adaLN + Linear + unpatchify → RMSNorm → action_out_proj → 16×23（:214, :441）
-
-⑧ K 步采样 → Euler ${K} 步，x ← x − v/${K}（:526-549，D6）
-
-${preStamp}
-`;
-
-        // which sub-step is on screen (a … h)
-        let sub = tH.active ? 7 : cG.active ? 6 : tF.active ? 5 : tE.active ? 4 : tD.active ? 3 : tC.active ? 2 : tB.active ? 1 : 0;
-        let S = nFlowStages;
-        if (sub === 0) {
-            if (tA.active && tA.t < 1) applyFlowPass(L, tA.t * S, { suffixOnly: true });
-        } else if (sub === 1) {
-            applyFlowPass(L, 0, { suffixOnly: true });
+        for (let b of [...L.blocks, ...el]) b.transformerLabel.visible = 1;
+        if (tBus.active) {
             fm.timeEmb.highlight = 0.45;
-            e0.ada2.highlight = 0.45;
-            dimExcept(L, [...fm.cubes, L.expertIn, e0.ln1, e0.ln2, ...el.flatMap(e => [e.ada, e.ada2])], 1 - 0.85 * tB.t);
-        } else if (sub === 2) {
-            applyFlowPass(L, 0, { suffixOnly: true });
-            viz.normCmp = tC.t;
-            viz.normLayer = 0;
-            viz.normWhich = 1;
-            viz.normTok = 1;
-        } else if (sub === 3) {
-            applyFlowPass(L, 1 + (tDrun.active ? Math.min(2.99, tDrun.t * 3) : 0), { suffixOnly: true });
-            viz.activeLayer = 0;
-            viz.links = 0.6;
-        } else if (sub === 4) {
-            applyFlowPass(L, 4 + (tErun.active ? Math.min(1.99, tErun.t * 2) : 0), { suffixOnly: true });
-        } else if (sub === 5) {
-            applyFlowPass(L, 6 + (tFrun.active ? Math.min(4.99, tFrun.t * 5) : 0), { suffixOnly: true });
-        } else if (sub === 6) {
-            // the pass descends layers 0 → 2 with the camera, then the stack pulls back
-            if (!tGpull.active) {
-                let pos = S + tG.t * 2 * S;
-                applyFlowPass(L, Math.min(pos, 3 * S - 0.01), { suffixOnly: true });
-                followPair(state, L, Math.max(0, pos / S - 0.5), 270, 4, 1.6, false);
-            } else {
-                let li = Math.min(nL - 1, Math.floor(tGpull.t * nL));
-                for (let i = 0; i <= li; i++) {
-                    el[i].ada.highlight = Math.max(el[i].ada.highlight, i === li ? 0.45 : 0.2);
-                    el[i].ada2.highlight = Math.max(el[i].ada2.highlight, i === li ? 0.45 : 0.2);
-                }
-            }
-        } else {
-            for (let b of [L.expertOut, L.actionWeight, L.actionVelocity]) b.highlight = 0.45;
+            for (let e of el) { e.ada.highlight = 0.3; e.ada2.highlight = 0.3; }
         }
-        e0.ada.highlight = Math.max(e0.ada.highlight, sub <= 2 ? 0.45 : 0.25);
     } break;
 
-    case Phase.D2_Concat: {
-        initialFrame(state, [...fm.cubes, L.expertIn, L.residual0, L.idxObj], 272, 10, { fill: 1.0 });
+    case Phase.D1_SuffixInput: {
+        initialFrame(state, [...fm.cubes, L.expertIn], 272, 10, { fill: 1.1 });
         let s75 = m?.fm.state75.localBuffer;
         let nValid = fmc?.state_valid ?? 0;
         let te = m?.fm.timeEmb.localBuffer;
+        blankFrom(L, L.expertIn);
         commentary(wt, null, 0)`
 
-联合注意力要求两路 token 拼成一条序列：前缀（主干）${cfg ? cfg.L_joint - cfg.n_suffix : 1240} 个 token ‖ 后缀（DiT）${cfg?.n_suffix ?? 17} 个 token，总长 ${cfg?.L_joint ?? 1257}。前缀就是 ${c_blockRef('主干嵌入', L.residual0)}。后缀的 17 个 token 由三个输入拼成 ${c_blockRef('DiT Suffix In', L.expertIn)}（本样本 episode ${cfg?.sample.episode ?? '…'}，frame ${cfg?.sample.frame ?? '…'}）。
+专家塔的输入是 ${cfg?.n_suffix ?? 17} 个后缀 token，对应主干的${c_blockRef('输入嵌入', L.residual0)}（前缀 ${cfg ? cfg.L_joint - cfg.n_suffix : 1240} 个 token）。两段在联合注意力里拼成一条长 ${cfg?.L_joint ?? 1257} 的序列。后缀由三个输入拼成 ${c_blockRef('DiT Suffix In', L.expertIn)}（本样本 episode ${cfg?.sample.episode ?? '…'}，frame ${cfg?.sample.frame ?? '…'}）。
 
-token 0：${c_blockRef('state75', fm.state75)}（bounds99 归一化的本体状态，${nValid} 个非零槽位，前几个值 ${s75 ? Array.from(s75.slice(0, 4)).map(v => fmtSigned(v)).join(' / ') : '…'}）经 ${c_blockRef('state_proj', fm.stateProjW)}（75 → 768）得到 ${c_blockRef('状态 token', fm.stateEmb)}。主干那 16 个状态 token 在联合注意力里对 DiT 是屏蔽的，所以这是 DiT 看到本体状态的唯一入口。
+token 0：${c_blockRef('state75', fm.state75)}（bounds99 归一化的本体状态，${nValid} 个非零槽位，前几个值 ${s75 ? Array.from(s75.slice(0, 4)).map(v => fmtSigned(v)).join(' / ') : '…'}）经 ${c_blockRef('state_proj', fm.stateProjW)}（75 → 768）得到 ${c_blockRef('状态 token', fm.stateEmb)}。主干那 16 个状态 token 在联合注意力里对专家是屏蔽的，所以这是专家看到本体状态的唯一入口。
 `;
         breakAfter();
         let tA = afterTime(null, 2.5);
@@ -340,130 +195,367 @@ token 0：${c_blockRef('state75', fm.state75)}（bounds99 归一化的本体状�
         commentary(wt)`
 
 token 1..16：${c_blockRef('x_t', fm.x1)} 是 ${H} × ${D} 的当前动作板（t = 1 时就是纯噪声，x[0][0] = ${f3(x1?.[0])}）。每一行先经 ${c_blockRef('action_in_proj', fm.actionInW)}（23 → 768）成为 ${c_blockRef('动作嵌入', fm.actionEmb)}，再与 ${c_blockRef('te', fm.timeEmb)}（t 的正弦嵌入，te[0..3] = ${te ? Array.from(te.slice(0, 4)).map(v => fmtSigned(v)).join(' / ') : '…'}）拼成 1536 维，经 ${c_blockRef('time_mlp_in', fm.timeInW)} + SiLU 得到 ${c_blockRef('隐层', fm.timeHidden)}，再经 ${c_blockRef('time_mlp_out', fm.timeOutW)} 成为 ${c_blockRef('16 个动作 token', fm.actionTime)}，从右侧进入 DiT Suffix In。
+
+教科书 DiT 把图像切 patch 当 token；这里每个动作步一行就是一个 token。
 `;
         breakAfter();
         let tB = afterTime(null, 4.0);
-        let chainA = [fm.state75, fm.stateProjW, fm.stateEmb, L.expertIn];
-        let chainB = [fm.x1, fm.actionInW, fm.actionEmb, fm.timeEmb, fm.timeInW, fm.timeHidden, fm.timeOutW, fm.actionTime, L.expertIn];
+        breakAfter();
+        let tIn = afterTime(null, 1.0);
+        commentary(wt)`
+
+${c_blockRef('DiT Suffix In', L.expertIn)}（17 × 768，图中 64 通道窗口）就是专家塔第 0 层的输入。下一章开始，按主干 03–07 章同样的画法把这一层逐个子层展开。
+${preStamp}
+`;
+        let chainA = [fm.state75, fm.stateProjW, fm.stateEmb];
+        let chainB = [fm.x1, fm.actionInW, fm.actionEmb, fm.timeEmb, fm.timeInW, fm.timeHidden, fm.timeOutW, fm.actionTime];
         let light = (chain: IBlkDef[], t: number) => {
             let k = Math.min(chain.length - 1, Math.floor(t * chain.length));
             chain[k].highlight = 0.5;
         };
         if (tA.active && tA.t < 1) light(chainA, tA.t);
         if (tB.active && tB.t < 1) light(chainB, tB.t);
-        if (!tA.active) { L.residual0.highlight = 0.35; L.expertIn.highlight = 0.35; }
+        let info = startProcessBefore(state, L.expertIn);
+        processUpTo(state, tIn, L.expertIn, info);
+    } break;
+
+    case Phase.D2_AdaNorm: {
+        let ln = e0.ln1;
+        let ada = ln.ada!;
+        initialFrame(state, [L.expertIn, ...ln.cubes], 275, 8, { fill: 1.1 });
+        wt.dimHighlightBlocks = [L.expertIn, ...ln.cubes];
+        dimTrunk([], 0.15);
+        blankFrom(L, ln.lnAgg1);
+        e0.transformerLabel.visible = 1;
+        // the channel where the plain RMSNorm value is largest, so the modulation is visible
+        let cPick = 0;
+        if (ada0 && el0) {
+            let best = -1;
+            for (let c = 0; c < wc; c++) {
+                let pre = (el0.ln_1.output.localBuffer[wc + c] - ada0[wc + c]) / (1 + ada0[c]);
+                if (Math.abs(pre) > best) { best = Math.abs(pre); cPick = c; }
+            }
+        }
+        let g1 = ada0?.[cPick], b1 = ada0?.[wc + cPick], post1 = at(el0?.ln_1.output, 1, cPick);
+        let pre1 = g1 !== undefined && b1 !== undefined && post1 !== undefined ? (post1 - b1) / (1 + g1) : undefined;
+        let te = m?.fm.timeEmb.localBuffer;
+
+        commentary(wt, null, 0)`
+
+专家第 0 层的第一步和主干 03 章一样是归一化：对 ${c_blockRef('DiT Suffix In', L.expertIn)} 的每一列（每个 token）做 RMSNorm。区别只有一处：归一化之后，还要用随时间 t 变化的一对 γβ 再调制一次。这就是 _AdaRMSNorm_。
+${preStamp}
+`;
+        breakAfter();
+        let tCam = afterTime(null, 1.0);
+        frameTo(state, tCam, ln.cubes, 272, 6, { fill: 1.2 });
+        breakAfter();
+        commentary(wt)`
+
+先和主干完全相同：两个聚合格是真实的 ${c_blockRef('mean(x²)', ln.lnAgg1)} 与 ${c_blockRef('rsqrt(mean(x²) + ε)', ln.lnAgg2)}，对完整的 ${cfg?.expert_hidden ?? 768} 个通道计算（图中显示 64 个）。
+`;
+        breakAfter();
+        let tAgg = afterTime(null, 2.0);
+        breakAfter();
+        commentary(wt)`
+
+时间条件。t 先变成正弦嵌入 ${c_blockRef('te = sincos(t)', fm.timeEmb)}（这里 t = 1，te 前两维 = ${f3(te?.[0])}、${f3(te?.[1])}），沿青色时间总线送到每一层。在这一层，te 经线性层得到 ${c_blockRef('[γ₁ | β₁]', ada)}：两列，每个通道一对值（真值，与 k005b-fm.json 的 E0.ada 前两行一致）。
+
+教科书 DiT 的条件是 t 嵌入加类别 c 嵌入；k005b 只有 t，任务和场景信息不走条件向量，而是由注意力读主干（D3）。
+`;
+        breakAfter();
+        let tAda = afterTime(null, 1.5);
+        breakAfter();
+        commentary(wt)`
+
+然后逐列算出${c_blockRef('AdaRMSNorm 输出', ln.lnResid)}：
+out = (1 + γ(t)) · [x / sqrt(mean(x²) + ε) · ${c_blockRef('w', ln.lnSigma)}] + β(t)
+γ、β 零初始化，所以训练初期它就是普通 RMSNorm。
+
+真值核对（token 1，通道 ${cPick}）：γ₁ = ${f3(g1)}，β₁ = ${f3(b1)}，调制前 ${f3(pre1)} → 调制后 ${f3(post1)}。
+`;
+        breakAfter();
+        let tNorm = afterTime(null, 4.0);
+        breakAfter();
+        let tCmp = afterTime(null, 1.2);
+        let chartBox = { x: ada.x + ada.dx, y: ada.y - 14, z: ada.z, dx: 56, dy: ada.dy + 14, dz: 2 };
+        frameTo(state, tCmp, [ln.lnResid, ada, chartBox], 270, 2, { fill: 1.15 });
+        commentary(wt)`
+
+γβ 旁的条形图钉在通道行上：token 1 的 64 个通道，灰条是调制前的 RMSNorm(x)·w，橙条是调制后的真实输出。灰条普遍很短、橙条很长：t = 1 时 γ 把多数通道放大十倍以上，β 再整体平移。
+
+第 0 层 4 × 768 组 γβ 值域 ${st(0)}，第 ${nPairs - 1} 层 ${st(nPairs - 1)}。和教科书 adaLN-Zero 的区别：用 RMSNorm 而非 LayerNorm；每层 2 处 γβ，没有 α 门控，残差直接相加。
+`;
+        let info = startProcessBefore(state, ln.lnAgg1);
+        try {
+            processUpTo(state, tAgg, ln.lnAgg2, info);
+            processUpTo(state, tAda, ada, info);
+            processUpTo(state, tNorm, ln.lnResid, info);
+        } catch (e) { console.log(e); }
+        if (tAda.active && tAda.t < 1) fm.timeEmb.highlight = 0.45;
+        if (tCmp.active) {
+            viz.normCmp = tCmp.t;
+            viz.normLayer = 0;
+            viz.normWhich = 1;
+            viz.normTok = 1;
+        }
     } break;
 
     case Phase.D3_JointAttn: {
-        let bh = b0.heads[hF], eh = e0.heads[hF];
-        let g0 = b0.kvGroups[bh.kvGroup];
-        let quad = [bh.attnMtx, eh.scP, eh.scS, bh.attnMtxSm, eh.pP, eh.pS, bh.qBlock, eh.q, eh.vo, bh.vOutBlock, g0.kBlock];
-        initialFrame(state, quad, 278, 8, { fill: 1.5 });
+        let g0 = e0.kvGroups[0];
+        let tK = eh.trunkK!, tV = eh.trunkV!;
         let mass = (i: number) => m ? layerMass(m, i) : [0, 0, 0, 0];
         let line = (i: number) => { let q = mass(i); return `第 ${i} 层：视觉 ${pct(q[1])}，文本 ${pct(q[2])}，后缀自身 ${pct(q[3])}`; };
         let mid = Math.floor(nPairs / 2);
+        let qkv = [e0.ln1.lnResid, eh.qWeightBlock, eh.qBlock, eh.kBlock, eh.vBlock, eh.kWeightBlock, eh.vWeightBlock];
+        initialFrame(state, [e0.ln1.lnResid, ...eh.cubes], 285, 12, { fill: 1.1 });
+        dimTrunk([...kvOf(0)], 0.15);
+        blankFrom(L, g0.kBlock);
+        e0.transformerLabel.visible = 1;
+        e0.selfAttendLabel.visible = 1;
+        b0.transformerLabel.visible = 1;
         commentary(wt, null, 0)`
 
-联合注意力就是两流耦合的地方。把一个头的打分矩阵画成四个象限（行是 query，列是 key）：
+注意力和主干 04 章同构：归一化后的每一列（token）分别乘 Q、K、V 权重，得到每个 token 的 ${c_blockRef('Q', eh.qBlock)}、${c_blockRef('K', eh.kBlock)}、${c_blockRef('V', eh.vBlock)} 向量。
 
-左上 ${c_blockRef('前缀 × 前缀', bh.attnMtx)}：主干自己的注意力（窗口）。
-右上：空的。掩码规定前缀看不到后缀，场景里这一格标着 “prefix Q cannot see suffix K”。
-左下 ${c_blockRef('scP 后缀 × 前缀', eh.scP)}：DiT 的 Q 去读主干的 K。这一象限就是耦合本身。
-右下 ${c_blockRef('scS 后缀 × 后缀', eh.scS)}：DiT 的 17 个 token 彼此注意。
-
-琥珀色细线从主干 K 组指向它所服务的两个头的 scP；品红色细线从主干 V 组指向这两个头的 ${c_blockRef('softmax·V 输出', eh.vo)}：DiT 读到的内容来自主干的 V。专家只有 2 个 KV 头，复制到 8 组以对齐主干。
+专家这边是 ${cfg?.expert_heads ?? 16} 个 Q 头，只有 ${cfg?.expert_kv_heads ?? 2} 组 K/V（每 8 个 Q 头共用一组，GQA），Q/K/V 都带偏置（图中细条）。head_dim = ${cfg?.head_dim ?? 128}，与主干相同。图中只画 head 0 与 K/V 组 0：其余 15 个 head 结构相同、只是权重不同，标注 ×16，不重复铺开。
 `;
+        breakAfter();
+        let tQkv = afterTime(null, 4.0);
+        breakAfter();
+        let tWide = afterTime(null, 1.5);
+        frameTo(state, tWide, [tK, tV, eh.qBlock, eh.attnMtxP, eh.attnMtx, eh.vOutBlock], 285, 12, { fill: 1.1 });
+        commentary(wt)`
+
+接着打分：后缀每个 query 与所有 key 做点积。这里和主干的区别是“联合”：一行 key 分成两段。
+
+右段 ${c_blockRef('后缀 × 后缀', eh.attnMtx)}：17 个后缀 token 彼此注意（双向，没有因果掩码）。
+左段 ${c_blockRef('后缀 × 前缀', eh.attnMtxP)}：专家的 Q 去读主干同一层的 ${c_blockRef('K', tK)}（图中 32 列窗口）。琥珀色线就是这条耦合：专家塔从这里拿到图像和任务信息。
+
+掩码（build_fused_mask）决定后缀能看哪些前缀列：有效且不属于答案的 prompt 列，本样本 ${cfg?.suffix_visible_prefix ?? '…'} 列（${cfg?.suffix_visible_visual ?? '…'} 视觉 + ${cfg ? cfg.suffix_visible_prefix - cfg.suffix_visible_visual : '…'} 文本）；16 个状态列和答案列被屏蔽。反过来，主干的 Q 看不到后缀，所以主干不受专家影响。
+`;
+        breakAfter();
+        let tClose = afterTime(null, 1.0);
+        frameTo(state, tClose, [eh.qBlock, eh.kBlock, eh.attnMtxP, eh.attnMtx, eh.attnMtxSm, eh.attnMtxSmP], 275, 8, { fill: 1.15 });
+        let tScore = afterTime(null, 3.0);
         breakAfter();
         commentary(wt)`
 
-掩码（build_fused_mask）还决定后缀能看哪些前缀列：有效且不属于答案的 prompt 列，本样本共 ${cfg?.suffix_visible_prefix ?? '…'} 列（${cfg?.suffix_visible_visual ?? '…'} 个视觉 + ${cfg ? cfg.suffix_visible_prefix - cfg.suffix_visible_visual : '…'} 个文本）。16 个状态列和 ${cfg ? cfg.T_text - cfg.suffix_visible_prefix : '…'} 个答案列被屏蔽，质量条里画叉的两行就是它们，质量恰为 0。
+softmax 对整行 [前缀 | 后缀] 一起做：两个聚合格是整行的最大值与 exp 之和，所以 ${c_blockRef('前缀段', eh.attnMtxSmP)} 和 ${c_blockRef('后缀段', eh.attnMtxSm)} 的概率加起来才是 1。
 `;
         breakAfter();
+        let tSm = afterTime(null, 2.5);
+        breakAfter();
+        commentary(wt)`
+
+最后乘 V：${c_blockRef('V Output', eh.vOutBlock)} = 前缀段概率 · 主干 ${c_blockRef('V', tV)}（品红色线）+ 后缀段概率 · 专家自己的 V。其余 15 个 head（×16）同样各得一个 V Output。
+`;
+        breakAfter();
+        let tV1 = afterTime(null, 2.0);
+        breakAfter();
+        commentary(wt)`
+
+耦合强度逐层不同。下面沿专家塔扫过 ${nPairs} 层，质量条钉在每层 head 的打分块旁（真值）：${line(0)}；${line(mid)}；${line(nPairs - 1)}。浅层几乎只读文本，中层开始读图像，深层更多看后缀自己。
+`;
         let tSweep = afterTime(null, 9.0);
-        breakAfter();
-        commentary(wt)`
 
-逐层扫过 ${nPairs} 个层对（耦合线粗细与质量条都是真值）：${line(0)}；${line(mid)}；${line(nPairs - 1)}。浅层几乎只读文本，中层开始读图像，深层更多看后缀自己。
-`;
-        let pos = tSweep.active ? tSweep.t * (nL - 1) : 0;
-        if (tSweep.active && tSweep.t < 1) followPair(state, L, pos, 284, 10, 1.2, false);
-        let active = tSweep.t >= 1 ? nL - 1 : Math.round(pos);
-        viz.activeLayer = active;
-        viz.links = 1;
-        viz.massBars = 1;
-        viz.quadLabel = 1;
-        el[active].heads.forEach(h => { h.scP.highlight = 0.3; });
+        let info = startProcessBefore(state, g0.kBlock);
+        try {
+            processUpTo(state, tQkv, eh.qBlock, info);
+            processUpTo(state, tScore, eh.attnMtx, info);
+            processUpTo(state, tSm, eh.attnMtxSm, info);
+            processUpTo(state, tV1, eh.vOutBlock, info);
+        } catch (e) { console.log(e); }
+        if (!tWide.active) wt.dimHighlightBlocks = [...qkv];
+        viz.activeLayer = 0;
+        viz.links = tWide.active ? 1 : 0.3;
+        viz.quadLabel = tWide.active && !tSweep.active ? 1 : 0;
+        if (tSweep.active) {
+            let pos = tSweep.t * (nL - 1);
+            if (tSweep.t < 1) followLayer(state, L, pos, 285, 10, 1.3);
+            viz.activeLayer = tSweep.t >= 1 ? nL - 1 : Math.round(pos);
+            viz.massBars = 1;
+            dimTrunk(L.blocks.flatMap((_, i) => kvOf(i)), 0.15);
+        }
     } break;
 
-    case Phase.D4_Forward: {
-        initialFrame(state, [L.residual0, L.expertIn, ...pairPath(L, 0)], 280, 6, { fill: 1.6 });
+    case Phase.D4_Projection: {
+        // one representative head (x16): the others share its slot and are not drawn
+        let v0 = eh.vOutBlock;
+        let outBlocks = [v0];
+        let n = e0.heads.length;
+        initialFrame(state, [...outBlocks, e0.projWeight, e0.attnOut], 284, 6, { fill: 1.15 });
+        wt.dimHighlightBlocks = [...outBlocks, e0.projWeight, e0.attnOut];
+        dimTrunk([], 0.15);
+        blankFrom(L, e0.attnOut);
+        e0.transformerLabel.visible = 1;
+        e0.projLabel.visible = 1;
+        eh.headLabel.visible = 1;
         commentary(wt, null, 0)`
 
-现在把真实数据推过整个层堆，两条流同时走。主干流（${c_blockRef('嵌入', L.residual0)}）和 DiT 流（${c_blockRef('DiT Suffix In', L.expertIn)}）从顶部同一个入口进入第 0 层：箭头落在每个“主干 | DiT”成对块的外框上，所以每根箭头都对应两路同时计算。
-
-黄色是正在计算的子层，未到达的块留空、箭头变淡。每到联合注意力，这一层的耦合线就加亮。这次前向对应训练时的 forward（t = 1）。
+和主干 06 章一样：注意力算完后，每个 head 都有自己的${c_blockRef('输出向量', outBlocks)}（图中只画 head 0，×${n}）。把 ${n} 个首尾相接（concat）：每个后缀 token 上，${n} 个长度 ${cfg?.head_dim ?? 128} 的向量拼成一个长度 ${n} × ${cfg?.head_dim ?? 128} = ${n * (cfg?.head_dim ?? 128)} 的向量。
 `;
         breakAfter();
+        let tFade = afterTime(null, 1.0, 0.5);
+        let tStack = afterTime(null, 1.0);
+        frameTo(state, tStack, [{ ...v0, z: e0.attnOut.z }, e0.projWeight, e0.attnOut], 278, 6, { fill: 1.15 });
+        breakAfter();
+        commentary(wt)`
+
+与主干不同，这里拼出来的 ${n * (cfg?.head_dim ?? 128)} 维比专家的隐藏维 ${cfg?.expert_hidden ?? 768} 大：${c_blockRef('o_proj', e0.projWeight)} 把它投影回 ${cfg?.expert_hidden ?? 768} 维（图中是真实权重的 64 × 64 窗口），逐列做矩阵-向量乘法，得到${c_blockRef('注意力输出', e0.attnOut)}。
+`;
+        breakAfter();
+        let tProc = afterTime(null, 3.0);
+        breakAfter();
+        commentary(wt)`
+
+然后是残差：注意力输出逐元素加回这一层的输入 ${c_blockRef('DiT Suffix In', L.expertIn)}，得到 ${c_blockRef('残差流', e0.attnResidual)}。
+
+真值核对（token 1，通道 0）：输入 ${f3(xin)} + o_proj ${f3(o10)} = 残差 ${f3(r10)}。教科书 DiT（adaLN-Zero）在这里还会乘一个门控 α；k005b 没有 α，直接相加。
+`;
+        breakAfter();
+        let tZoom = afterTime(null, 1.0, 0.5);
+        cleanup(tZoom, [tFade, tStack]);
+        frameTo(state, tZoom, [e0.projWeight, e0.attnOut, e0.attnResidual, L.expertIn], 272, 6, { fill: 1.1 });
+        let tRes = afterTime(null, 3.0);
+        breakAfter();
+        commentary(wt)`
+
+注意力部分到此结束，接下来是这一层的后半部分：MLP。
+`;
+        if (tFade.active) {
+            for (let h of e0.heads) for (let b of h.ownCubes) if (b !== h.vOutBlock) b.opacity = lerpSmoothstep(1, 0.15, tFade.t);
+            for (let g of e0.kvGroups) for (let b of g.cubes) b.opacity = lerpSmoothstep(1, 0.15, tFade.t);
+        }
+        if (tStack.active) {
+            v0.z = lerp(v0.z, e0.attnOut.z, tStack.t);
+        }
+        let info = startProcessBefore(state, e0.attnOut);
+        processUpTo(state, tProc, e0.attnOut, info);
+        processUpTo(state, tRes, e0.attnResidual, info);
+    } break;
+
+    case Phase.D5_Mlp: {
+        let mlpSet = [...e0.ln2.cubes, e0.mlpFcWeight, e0.mlpUpWeight, e0.mlpFc, e0.mlpUp, e0.mlpAct, e0.mlpProjWeight, e0.mlpResult, e0.mlpResidual];
+        initialFrame(state, [e0.attnResidual, ...mlpSet], 280, 6, { fill: 1.05 });
+        wt.dimHighlightBlocks = [e0.attnResidual, ...mlpSet];
+        dimTrunk([], 0.15);
+        blankFrom(L, e0.ln2.lnAgg1);
+        e0.transformerLabel.visible = 1;
+        e0.mlpLabel.visible = 1;
+        commentary(wt, null, 0)`
+
+后半层和主干 07 章同一套结构：先归一化，再过 SwiGLU MLP，最后加回残差。
+
+第一步是第二个 ${c_blockRef('AdaRMSNorm', e0.ln2.lnResid)}：同一个 te，另一组线性层给出 ${c_blockRef('[γ₂ | β₂]', e0.ada2)}（k005b-fm.json E0.ada 的后两行）。
+`;
+        breakAfter();
+        let tLn = afterTime(null, 3.0);
+        breakAfter();
+        commentary(wt)`
+
+每一列分别乘 ${c_blockRef('gate_proj', e0.mlpFcWeight)} 和 ${c_blockRef('up_proj', e0.mlpUpWeight)}：${cfg?.expert_hidden ?? 768} → ${cfg?.expert_intermediate ?? 2752}，得到 ${c_blockRef('gate', e0.mlpFc)} 和 ${c_blockRef('up', e0.mlpUp)}（图中 64 维窗口）。
+`;
+        breakAfter();
+        let tGU = afterTime(null, 3.0);
+        breakAfter();
+        commentary(wt)`
+
+逐元素算 ${c_blockRef('SiLU(gate) · up', e0.mlpAct)}。教科书 DiT 用 GELU 的点式 MLP，k005b 与主干一样用 SwiGLU。
+`;
+        breakAfter();
+        let tAct = afterTime(null, 2.0);
+        breakAfter();
+        commentary(wt)`
+
+${c_blockRef('down_proj', e0.mlpProjWeight)} 把 ${cfg?.expert_intermediate ?? 2752} 维投影回 ${cfg?.expert_hidden ?? 768} 维，得到 ${c_blockRef('MLP 输出', e0.mlpResult)}。
+`;
+        breakAfter();
+        let tDown = afterTime(null, 2.5);
+        breakAfter();
+        commentary(wt)`
+
+再加回残差，得到 ${c_blockRef('DiT 0 Out', e0.mlpResidual)}，它就是专家第 1 层的输入。
+
+真值核对（token 1，通道 0）：残差 ${f3(r10)} + MLP ${f3(mlp10)} = 输出 ${f3(out10)}。
+`;
+        breakAfter();
+        let tRes = afterTime(null, 2.0);
+        let info = startProcessBefore(state, e0.ln2.lnAgg1);
+        try {
+            processUpTo(state, tLn, e0.ln2.lnResid, info);
+            processUpTo(state, tGU, e0.mlpUp, info);
+            processUpTo(state, tAct, e0.mlpAct, info);
+            processUpTo(state, tDown, e0.mlpResult, info);
+            processUpTo(state, tRes, e0.mlpResidual, info);
+        } catch (e) { console.log(e); }
+        if (tLn.active && tLn.t < 1) fm.timeEmb.highlight = 0.45;
+    } break;
+
+    case Phase.D6_Stack: {
+        let kv = L.blocks.flatMap((_, i) => kvOf(i));
+        initialFrame(state, [L.expertIn, ...eMain(L, 0)], 270, 3, { fill: 1.6 });
+        dimExcept(L, [...dit, ...kv], 0.2);
+        for (let e of el) e.transformerLabel.visible = 1;
+        commentary(wt, null, 0)`
+
+和主干 08 章一样，把真实数据推过整个 ${nL} 层的专家塔。每层同构，顺序相同：
+AdaRMSNorm → Q/K/V → 联合注意力 → softmax·V → o_proj → ⊕ → AdaRMSNorm → gate/up → SiLU·up → down_proj → ⊕。
+
+主干在这里只剩各层的 K/V 块：掩码让前缀看不到后缀，所以主干的 K/V 与 x_t、t 无关，部署时先跑一次 encode_prefix 把 ${nPairs} 层 K/V 缓存下来。专家每层的联合注意力读的就是同一层的缓存（琥珀/品红线）。
+`;
+        breakAfter();
+        let tEnter = afterTime(null, 1.5);
         let tL0 = afterTime(null, nFlowStages * 0.9);
         breakAfter();
         commentary(wt)`
 
-第 0 层走完。⊕ 块上的小字是残差的另一个加数（skip），它在 ⊕ 处相加，没有绕过层堆的直线。接下来穿过剩下的 ${nL - 1} 层。
+第 0 层走完。接下来一层层穿过剩下的 ${nL - 1} 层，每层有自己的 γβ（同一个 te，不同的线性层），值域从第 0 层的 ${st(0)} 到第 ${nPairs - 1} 层的 ${st(nPairs - 1)}。
 `;
         let tRest = afterTime(null, (nL - 1) * 0.7);
         breakAfter();
         let tExit = afterTime(null, 1.5);
-        frameTo(state, tExit, [L.ln_f.lnResid, L.expertOut, L.hStar, L.logits, L.doneLogits, ...actionBlocks], 282, 10, { fill: 1.1 });
+        frameTo(state, tExit, [el[nL - 1].mlpResidual, ...L.expertNorm.cubes, ...actionBlocks], 276, 8, { fill: 1.1 });
         commentary(wt)`
 
-${nL} 层穿完，两条流在这里分开出去：
-主干：${c_blockRef('ln_f', L.ln_f.lnResid)} → ${c_blockRef('h*', L.hStar)} → knack / done 两个头。
-DiT：${c_blockRef('final RMSNorm', L.expertOut)} 丢掉状态 token，16 个 token 经 ${c_blockRef('action_out_proj', L.actionWeight)}（768 → 23）得到 ${c_blockRef('速度场 v', L.actionVelocity)}，例如 v[0][14] = ${f3(vel?.[14])}。
-一步解码：${c_blockRef('动作块', L.actionChunk)} = ${c_blockRef('x1', L.actionX1)} − v，例如 x1[0][14] = ${f3(x1?.[14])}，动作 = ${f3(chunk?.[14])}。多步解码见 D6。
+${nL} 层之后：${c_blockRef('DiT final RMSNorm', L.expertOut)}（普通 RMSNorm，不受 t 调制）→ 丢掉状态 token → ${c_blockRef('action_out_proj', L.actionWeight)}（768 → 23）→ ${c_blockRef('速度场 v', L.actionVelocity)}，16 × 23，例如 v[0][14] = ${f3(vel?.[14])}。
+
+一步解码：${c_blockRef('动作块', L.actionChunk)} = ${c_blockRef('x1', L.actionX1)} − v，例如 x1[0][14] = ${f3(x1?.[14])}，动作 = ${f3(chunk?.[14])}。多步解码见 D7。
 `;
-        let pos: number;
-        if (!tL0.active) pos = -0.5;
-        else if (!tRest.active) pos = tL0.t * nFlowStages;
-        else pos = nFlowStages + tRest.t * (nL - 1) * nFlowStages;
-        if (!(tRest.active && tRest.t >= 1)) {
-            applyFlowPass(L, pos);
-            if (tL0.active) followPair(state, L, Math.max(0, pos / nFlowStages - 0.5), 280, 6, 1.6);
-            let li = clamp(Math.floor(Math.max(0, pos) / nFlowStages), 0, nL - 1);
-            viz.activeLayer = li;
-        }
-    } break;
-
-    case Phase.D5_PrefixCache: {
-        let kv = L.blocks.flatMap((_, i) => kvOf(i));
-        initialFrame(state, [...pairPath(L, 0), ...pairPath(L, 3)], 284, 10, { fill: 1.2 });
-        commentary(wt, null, 0)`
-
-在解码时，前缀只算一次。
-
-掩码规定前缀看不到后缀，所以主干每一层的 K/V 与 x_t、t 完全无关。部署代码因此先跑一次 encode_prefix：主干完整前向一次，把 ${nPairs} 层的 K/V 存成缓存。
-
-场景里主干其余的块淡出，只留下每层的 ${c_blockRef('K', b0.kvGroups[0].kBlock)} / ${c_blockRef('V', b0.kvGroups[0].vBlock)} 块：这就是缓存。之后的每一次 DiT 穿行，耦合线都从这些缓存的 K/V 读数。
-`;
-        let tCache = afterTime(null, 1.5);
-        let keep = [...L.ditCubes, ...kv];
-        let lvl = 1 - 0.8 * (tCache.active ? tCache.t : 0);
-        dimExcept(L, keep, lvl);
         breakAfter();
         commentary(wt)`
 
-导出器核对过：用 ${fmc?.n_particles ?? 8} 张不同噪声各做一次前向，${nPairs} 层前缀 K/V 的最大差异 = ${fmc ? fmc.asserts.prefix_kv_max_abs_diff_across_seeds.toFixed(1) : '…'}。所以 knack / done 在 10 次穿行中逐位不变，变的只有 DiT 一侧。
+导出器核对过前缀缓存：用 ${fmc?.n_particles ?? 8} 张不同噪声各做一次前向，${nPairs} 层前缀 K/V 的最大差异 = ${fmc ? fmc.asserts.prefix_kv_max_abs_diff_across_seeds.toFixed(1) : '…'}。所以 knack / done 在多步解码中逐位不变，变的只有专家塔。
+
+教科书 DiT ↔ k005b：
+① patchify → 每个动作步一行一个 token，加 1 个 state token，共 17 个（D1）
+② 自注意力 → 联合注意力，K/V 含主干前缀（D3）
+③ 条件 t + 类别 c → 只有 t（D2）
+④ LayerNorm + adaLN-Zero(γβα) → AdaRMSNorm（γβ 零初始化，无 α）
+⑤ GELU MLP → SwiGLU ${cfg?.expert_hidden ?? 768}→${cfg?.expert_intermediate ?? 2752}→${cfg?.expert_hidden ?? 768}
+⑥ N 块 → ${nL} 层，与主干逐层配对
+⑦ final adaLN + Linear + unpatchify → RMSNorm → action_out_proj → 16×23
+⑧ K 步采样 → Euler ${K} 步，x ← x − v/${K}（D7）
 `;
-        viz.activeLayer = 0;
-        viz.links = 0.8;
+        let pos: number;
+        if (!tEnter.active) pos = -1;
+        else if (!tL0.active) pos = -1 + tEnter.t;
+        else if (!tRest.active) pos = tL0.t * nFlowStages;
+        else pos = nFlowStages + tRest.t * (nL - 1) * nFlowStages;
+        if (!(tRest.active && tRest.t >= 1)) {
+            applyFlowPass(L, pos, { suffixOnly: true });
+            if (tEnter.active) followLayer(state, L, Math.max(0, pos / nFlowStages - 0.5), 270, 3, 1.6);
+            viz.activeLayer = clamp(Math.floor(Math.max(0, pos) / nFlowStages), 0, nL - 1);
+            viz.links = 1;
+        }
+        if (tExit.active) for (let b of [L.expertOut, L.actionWeight, L.actionVelocity]) b.highlight = 0.3;
     } break;
 
-    case Phase.D6_Decode: {
+    case Phase.D7_Euler: {
         let kv = L.blocks.flatMap((_, i) => kvOf(i));
-        let S = L.strip;
         // the strip + the DiT input chain: where every pass starts and every return lands
         let stripView = [...S.map(b => ({ x: b.x, y: b.y, z: b.z, dx: b.dx, dy: b.dy, dz: b.dz })), fm.x1];
         initialFrame(state, stripView, 272, 10, { fill: 1.2 });
-        dimExcept(L, [...L.ditCubes, ...kv], 0.2);
+        dimExcept(L, [...dit, ...kv], 0.2);
         let tgtArr = tgt;
         let stepInfo = (k: number) => {
             let st = fs?.steps[k];
@@ -473,15 +565,15 @@ DiT：${c_blockRef('final RMSNorm', L.expertOut)} 丢掉状态 token，16 个 to
         };
         commentary(wt, null, 0)`
 
-现在是部署时的 flow matching 解码（sample_action_chunk）：从噪声出发，DiT 被调用 ${K} 次，每次是一个 Euler 步。
+部署时的 flow matching 解码（sample_action_chunk）：从噪声出发，专家塔被调用 ${K} 次，每次是一个 Euler 步。每次穿行就是 D6 那一遍，画法不变；Euler 轨迹带和回程箭头只是加在上面的注解。
 
-场景上方是 Euler 轨迹带：${K + 1} 块 16 × 23 的板，${c_blockRef('x(t=1.0)', S[0])} 是纯噪声，${c_blockRef(`x(t=0)`, S[K])} 是最终动作块。每次穿行：
-① 当前板 x_t 进入 DiT 的输入链（箭头从板落到 x_t）；
+轨迹带：${K + 1} 块 16 × 23 的板，${c_blockRef('x(t=1.0)', S[0])} 是纯噪声，${c_blockRef('x(t=0)', S[K])} 是最终动作块。每次穿行：
+① 当前板 x_t 进入专家的输入链；
 ② 时间总线换成新的 t，${nPairs} 层的 γβ 全部换成这个 t 的真值；
-③ 只有 DiT 泳道从第 0 层穿到第 ${nPairs - 1} 层，联合注意力读缓存的主干 K/V；
+③ 专家塔从第 0 层穿到第 ${nPairs - 1} 层，联合注意力读缓存的主干 K/V；
 ④ 底部得到 v，黄色回程箭头把 x − v/${K} 写进下一块板。
 
-注意：这是 ${ckpt} 的旧权重，它只在 t = 1 上训练过，t < 1 是分布外，这里是 pre-stamp 预览（场景标题已标注）。step_160000 落盘后会替换成真值。
+注意：这是 ${ckpt} 的旧权重，只在 t = 1 上训练过，t < 1 是分布外，这里是 pre-stamp 预览（轨迹带标题已标注）。
 `;
         breakAfter();
         // pass k: 0..0.85 = the DiT traverse, 0.85..1 = the return v → board k+1
@@ -491,11 +583,11 @@ DiT：${c_blockRef('final RMSNorm', L.expertOut)} 丢掉状态 token，16 个 to
             if (k === 0 || k === 2) breakAfter();
             if (k === 0) commentary(wt)`
 
-第 1 次穿行（${stepInfo(0)}）。以后每次穿行用的是同一组权重，只有两样东西换了：输入板 x_t，和总线上的 t。接下来两次中速。
+第 1 次穿行（${stepInfo(0)}）。以后每次穿行用同一组权重，只换两样东西：输入板 x_t，和总线上的 t。接下来两次中速。
 `;
             if (k === 2) commentary(wt)`
 
-第 2、3 次：${stepInfo(1)}；${stepInfo(2)}。剩下 ${K - 3} 次快放，左上角的步进格每完成一次走一格。
+第 2、3 次：${stepInfo(1)}；${stepInfo(2)}。剩下 ${K - 3} 次快放，轨迹带上的步进格每完成一次走一格。
 `;
             return t;
         });
@@ -524,14 +616,15 @@ ${Array.from({ length: K }, (_, k) => stepInfo(k)).filter((_, k) => k % 3 === 0 
             viz.massStep = k;
             if (started) {
                 L.euler = { k, ret };
-                applyFlowPass(L, passPos(clamp(u / 0.85, 0, 1), nL), { suffixOnly: true });
-                let li = clamp(Math.floor(passPos(clamp(u / 0.85, 0, 1), nL) / nFlowStages), 0, nL - 1);
+                let pp = passPos(clamp(u / 0.85, 0, 1), nL);
+                applyFlowPass(L, pp, { suffixOnly: true });
+                let li = clamp(Math.floor(pp / nFlowStages), 0, nL - 1);
                 viz.activeLayer = li;
                 viz.links = 1;
-                if (k === 0 && u < 0.85) followPair(state, L, Math.max(0, li - 0.5), 280, 10, 1.4, false);
+                if (k === 0 && u < 0.85) followLayer(state, L, Math.max(0, li - 0.5), 280, 10, 1.4);
                 else if (k === 0) {
                     // glide from the last layer back out to the strip for the return arrow
-                    followPair(state, L, nL - 1, 280, 10, 1.4, false);
+                    followLayer(state, L, nL - 1, 280, 10, 1.4);
                     let w = frameCubes(stripView, 272, 10, { fill: 1.2 });
                     let s = ret * ret * (3 - 2 * ret);
                     state.camera.center = state.camera.center.lerp(w.center, s);
@@ -543,17 +636,15 @@ ${Array.from({ length: K }, (_, k) => stepInfo(k)).filter((_, k) => k % 3 === 0 
             viz.massStep = K - 1;
             S[K].highlight = 0.4;
         }
-    } break;
-
-    case Phase.D7_ActionChunk: {
         let kFin = fs?.steps[K - 1]?.tex['x_next']?.localBuffer;
-        initialFrame(state, [L.strip[K], ...actionBlocks], 284, 12, { fill: 1.1 });
-        L.strip[K].opacity = 1;
-        commentary(wt, null, 0)`
+        breakAfter();
+        let tChunk = afterTime(null, 1.2);
+        frameTo(state, tChunk, [L.strip[K], ...actionBlocks], 284, 12, { fill: 1.1 });
+        commentary(wt)`
 
 最后看动作块本身：${H} 步 × ${D} 维，所有值都在 bounds99 归一化空间。
 
-D6 的板 ${K}（${c_blockRef(`x(t=0), K=${K}`, L.strip[K])}）是 ${K} 步解码的结果，例如第 0 步左夹爪 = ${f3(kFin?.[14])}；在本检查点（${ckpt}，只训练过 t = 1）上，与它分布内一致的是一步解码 ${c_blockRef('x1 − v', L.actionChunk)}，同一分量 = ${f3(chunk?.[14])}。下面的柱场展示一步解码（这组权重的真实部署输出）；step_160000 到位后换成 ${K} 步结果。
+轨迹带上的板 ${K}（${c_blockRef(`x(t=0), K=${K}`, L.strip[K])}）是 ${K} 步解码的结果，例如第 0 步左夹爪 = ${f3(kFin?.[14])}；在本检查点（${ckpt}，只训练过 t = 1）上，与它分布内一致的是一步解码 ${c_blockRef('x1 − v', L.actionChunk)}，同一分量 = ${f3(chunk?.[14])}。下面的柱场展示一步解码（这组权重的真实部署输出）；step_160000 到位后换成 ${K} 步结果。
 `;
         breakAfter();
         let tMove = afterTime(null, 1.5);
@@ -644,6 +735,7 @@ settle 语义：一旦 done 为真，harness 播完当前块后改发“停住�
 
 换噪声时，主干完全不受影响：前缀 K/V 在 ${fmc?.n_particles ?? 8} 次前向中逐位相同（最大差异 ${fmc ? fmc.asserts.prefix_kv_max_abs_diff_across_seeds.toFixed(1) : '…'}）。变的只有后缀：第 ${Math.floor(nPairs / 2)} 层后缀落在视觉 token 上的注意力质量，随噪声在 ${spread} 之间变化。
 `;
+        if (!tMove.active) break;
         viz.field = 1;
         viz.fieldMode = 'decode';
         viz.decode = tDec.active ? tDec.t : 0;

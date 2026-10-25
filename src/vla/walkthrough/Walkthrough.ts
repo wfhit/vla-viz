@@ -1,3 +1,4 @@
+import { Vec3 } from "@/src/utils/vector";
 import { ICameraPos } from "../Camera";
 import { IBlkDef } from "../VlaModelLayout";
 import { IProgramState, vlaLayout } from "../Program";
@@ -76,6 +77,8 @@ export function initWalkthrough(page: IPageSpec) {
         running: false,
         speed: 1,
         cameraInitial: null as ICameraPos | null,
+        // the box the camera is currently framing (blocks entirely in front of it fade out)
+        focus: null as { mn: Vec3, mx: Vec3 } | null,
         times: [] as (ITimeInfo | ICommentary)[],
         phaseLength: 0,
         dimHighlightBlocks: null as IBlkDef[] | null,
@@ -109,14 +112,14 @@ export enum Phase {
     Head_Knack,
     Head_Done,
     Harness_Law,
-    D0_TwoTransformers,
-    D1_DitBlock,
-    D2_Concat,
+    D0_Towers,
+    D1_SuffixInput,
+    D2_AdaNorm,
     D3_JointAttn,
-    D4_Forward,
-    D5_PrefixCache,
-    D6_Decode,
-    D7_ActionChunk,
+    D4_Projection,
+    D5_Mlp,
+    D6_Stack,
+    D7_Euler,
 }
 
 export const vlaPhaseList: IPhaseGroup[] = [{
@@ -151,14 +154,14 @@ export const vlaPhaseList: IPhaseGroup[] = [{
     groupId: PhaseGroup.FlowMatching,
     title: 'DiT 动作专家与流匹配',
     phases: [
-        { id: Phase.D0_TwoTransformers, title: 'D0 两个 Transformer' },
-        { id: Phase.D1_DitBlock, title: 'D1 DiT 块解剖' },
-        { id: Phase.D2_Concat, title: 'D2 拼接成一条序列' },
-        { id: Phase.D3_JointAttn, title: 'D3 联合注意力 = 耦合' },
-        { id: Phase.D4_Forward, title: 'D4 一次前向穿过 28 层' },
-        { id: Phase.D5_PrefixCache, title: 'D5 前缀只算一次' },
-        { id: Phase.D6_Decode, title: 'D6 10 次 DiT 穿行' },
-        { id: Phase.D7_ActionChunk, title: 'D7 动作块' },
+        { id: Phase.D0_Towers, title: 'D0 两座塔' },
+        { id: Phase.D1_SuffixInput, title: 'D1 后缀输入嵌入' },
+        { id: Phase.D2_AdaNorm, title: 'D2 AdaRMSNorm' },
+        { id: Phase.D3_JointAttn, title: 'D3 联合注意力' },
+        { id: Phase.D4_Projection, title: 'D4 输出投影与残差' },
+        { id: Phase.D5_Mlp, title: 'D5 MLP (SwiGLU)' },
+        { id: Phase.D6_Stack, title: 'D6 28 层堆叠与输出' },
+        { id: Phase.D7_Euler, title: 'D7 10 步 Euler 与动作块' },
     ],
 }];
 
@@ -206,13 +209,14 @@ export function endWalkthroughFrame(wt: IWalkthrough) {
 
 export function runWalkthrough(state: IProgramState, view: IRenderView) {
     let wt = state.walkthrough;
+    wt.focus = null;
     stepWalkthrough(state, view);
     let layout = vlaLayout(state);
 
     let wtArgs: IWalkthroughArgs = { state, layout, tools: phaseTools(state), walkthrough: wt };
 
     let groupId = phaseToGroup(wt).groupId;
-    // the single-layer trunk chapters explain one mechanism: the DiT tails appear from D0 on
+    // the single-layer trunk chapters explain the trunk only: the expert tower appears from D0 on
     if (groupId === PhaseGroup.Detailed_Input) {
         for (let c of layout.ditCubes) c.opacity = 0;
     }

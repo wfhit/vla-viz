@@ -23,15 +23,15 @@ export function walkthrough04_SelfAttention(args: IWalkthroughArgs) {
     }
 
     let block0 = layout.blocks[0];
-    let head2 = block0.heads[2];
+    let head0 = block0.heads[0];
 
     initialFrame(state, [block0.ln1.lnResid, ...block0.heads.flatMap(h => h.cubes)], 294, 12.8, { fill: 1.0 });
-    wt.dimHighlightBlocks = [layout.residual0, block0.ln1.lnResid, ...head2.cubes];
+    wt.dimHighlightBlocks = [layout.residual0, block0.ln1.lnResid, ...head0.cubes];
 
     commentary(wt, null, 0)`
 注意力是 transformer 层的核心：输入嵌入矩阵中的各列在这里相互“交流”。在其他阶段，各列都是相互独立处理的。
 
-k005b 的注意力是 GQA：每层 16 个 query head、8 个 key/value head（每 2 个 query head 共享一组 K/V），head 维度 128。图中是 L0 的 head 2 的真实数值（显示 32 个 token × 64 维的窗口）。Q/K 在点积前还要经过 q_norm / k_norm（RMSNorm）和 RoPE 旋转。`;
+k005b 的注意力是 GQA：每层 16 个 query head、8 个 key/value head（每 2 个 query head 共享一组 K/V），head 维度 128。图中只画 L0 的 head 0（真实数值，显示 32 个 token × 64 维的窗口）：其余 15 个 head 与 7 组 K/V 结构完全相同，只是权重不同，所以不重复铺开，标注为 ×16。Q/K 在点积前还要经过 q_norm / k_norm（RMSNorm）和 RoPE 旋转。`;
     breakAfter();
     let t_moveCamera = afterTime(null, 1.0);
     let t_highlightHeads = afterTime(null, 2.0);
@@ -43,12 +43,12 @@ k005b 的注意力是 GQA：每层 16 个 query head、8 个 key/value head（�
 第一步，从${c_blockRef('归一化输入嵌入矩阵', block0.ln1.lnResid)}出发，为 ${c_dimRef('T', DimStyle.T)} 个列中的每一列生成三个向量，即 Q、K、V：
 
 ${embedInline(<ul>
-    <li>Q: <BlockText blk={head2.qBlock}>查询向量 (Query)</BlockText></li>
-    <li>K: <BlockText blk={head2.kBlock}>键向量 (Key)</BlockText></li>
-    <li>V: <BlockText blk={head2.vBlock}>值向量 (Value)</BlockText></li>
+    <li>Q: <BlockText blk={head0.qBlock}>查询向量 (Query)</BlockText></li>
+    <li>K: <BlockText blk={head0.kBlock}>键向量 (Key)</BlockText></li>
+    <li>V: <BlockText blk={head0.vBlock}>值向量 (Value)</BlockText></li>
 </ul>)}
 
-每个向量都由一次矩阵-向量乘法得到（Qwen3 的 QKV 没有偏置），每个输出单元格都是输入向量的线性组合。例如${c_blockRef('Q 向量', head2.qBlock)}，是${c_blockRef('Q 权重矩阵', head2.qWeightBlock)}的一行与${c_blockRef('输入矩阵', block0.ln1.lnResid)}的一列做点积。`;
+每个向量都由一次矩阵-向量乘法得到（Qwen3 的 QKV 没有偏置），每个输出单元格都是输入向量的线性组合。例如${c_blockRef('Q 向量', head0.qBlock)}，是${c_blockRef('Q 权重矩阵', head0.qWeightBlock)}的一行与${c_blockRef('输入矩阵', block0.ln1.lnResid)}的一列做点积。`;
     breakAfter();
 
     let t_focusQCol = afterTime(null, 1.0);
@@ -145,7 +145,7 @@ ${embedInline((() => {
     commentary(wt)`
 查找表中的 {K, V} 条目是它可见的各列，Q 是当前这一列。
 
-先计算当前列（${c_dimRef('t = 5', DimStyle.T)}）的${c_blockRef('Q 向量', head2.qBlock)}与之前各列的${c_blockRef('K 向量', head2.kBlock)}的点积，结果存入${c_blockRef('注意力矩阵', head2.attnMtx)}的对应行（${c_dimRef('t = 5', DimStyle.T)}）。`;
+先计算当前列（${c_dimRef('t = 5', DimStyle.T)}）的${c_blockRef('Q 向量', head0.qBlock)}与之前各列的${c_blockRef('K 向量', head0.kBlock)}的点积，结果存入${c_blockRef('注意力矩阵', head0.attnMtx)}的对应行（${c_dimRef('t = 5', DimStyle.T)}）。`;
     breakAfter();
 
     let t_processAttnRow = afterTime(null, 3.0);
@@ -166,7 +166,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
     breakAfter();
     commentary(wt)`
-最后生成当前列（${c_dimRef('t = 5', DimStyle.T)}）的输出向量：取${c_blockRef('归一化后的注意力矩阵', head2.attnMtxSm)}的第（${c_dimRef('t = 5', DimStyle.T)}）行，用每个权重去逐元素乘以对应列的${c_blockRef('V 向量', head2.vBlock)}。`;
+最后生成当前列（${c_dimRef('t = 5', DimStyle.T)}）的输出向量：取${c_blockRef('归一化后的注意力矩阵', head0.attnMtxSm)}的第（${c_dimRef('t = 5', DimStyle.T)}）行，用每个权重去逐元素乘以对应列的${c_blockRef('V 向量', head0.vBlock)}。`;
     breakAfter();
 
     let t_zoomVOutput = afterTime(null, 0.4, 0.5);
@@ -199,14 +199,14 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 // matrix, T x T, and due to the causal nature of the process, is a lower triangular matrix.
 
     frameTo(state, t_moveCamera, block0.heads.flatMap(h => h.cubes), 293.5, 49, { fill: 1.0 });
-    frameTo(state, t_moveCamera2, [block0.ln1.lnResid, ...head2.cubes], 286, 12.8, { fill: 1.1 });
+    frameTo(state, t_moveCamera2, [block0.ln1.lnResid, ...head0.cubes], 286, 12.8, { fill: 1.1 });
 
 
     if (t_highlightHeads.t > 0.0) {
         block0.selfAttendLabel.visible = lerp(0, 1, t_highlightHeads.t * 10);
-        let headPos = t_highlightHeads.t * nHeads;
-        let headIdx = clamp(Math.floor(headPos), 0, nHeads - 1);
-        let headFrac = headPos - headIdx;
+        // one representative head (the other 15 share its slot and are not drawn)
+        let headIdx = 0;
+        let headFrac = clamp(t_highlightHeads.t * 3, 0, 1);
 
         let labelOpacity = lerp(0.0, 1.0, headFrac / 0.3); // * lerp(1.0, 0.0, (1.0 - headFrac) / 0.3);
 
@@ -219,31 +219,31 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
     }
 
     if (t_focusHeads.t0_dissolveHeads.t > 0.0) {
-        let head = block0.heads[2];
+        let head = block0.heads[0];
         let t = t_focusHeads.t0_dissolveHeads.t;
         for (let blk of head.headLabel.cubes) {
             blk.highlight = lerp(1.0, 0.0, t * 4) * 0.4;
         }
-        head2.qBlock.access!.disable = true;
-        head2.kBlock.access!.disable = true;
-        head2.vBlock.access!.disable = true;
+        head0.qBlock.access!.disable = true;
+        head0.kBlock.access!.disable = true;
+        head0.vBlock.access!.disable = true;
     }
 
     focusSelfAttentionHead(args, t_focusHeads);
 
-    frameTo(state, t_dotCellsZoomClose, [block0.ln1.lnResid, head2.qBlock], 274.1, 8.5, { fill: 1.1 });
-    frameTo(state, t_dotCellsZoomOut, [block0.ln1.lnResid, ...head2.cubes], 286, 12.8, { fill: 1.1 });
+    frameTo(state, t_dotCellsZoomClose, [block0.ln1.lnResid, head0.qBlock], 274.1, 8.5, { fill: 1.1 });
+    frameTo(state, t_dotCellsZoomOut, [block0.ln1.lnResid, ...head0.cubes], 286, 12.8, { fill: 1.1 });
 
     let exampleIdx = 3;
     if (t_focusQCol.t > 0) {
         let otherOpacity = lerp(1.0, 0.2, t_focusQCol.t);
-        head2.qBlock.opacity = otherOpacity;
-        head2.kBlock.opacity = otherOpacity;
-        head2.vBlock.opacity = otherOpacity;
+        head0.qBlock.opacity = otherOpacity;
+        head0.kBlock.opacity = otherOpacity;
+        head0.vBlock.opacity = otherOpacity;
         block0.ln1.lnResid.opacity = otherOpacity;
 
         let splitAmt = lerp(0.0, 2.0, t_focusQCol.t);
-        let qCol = splitGrid(layout, head2.qBlock, Dim.X, exampleIdx + 0.5, splitAmt)!;
+        let qCol = splitGrid(layout, head0.qBlock, Dim.X, exampleIdx + 0.5, splitAmt)!;
         let inputCol = splitGrid(layout, block0.ln1.lnResid, Dim.X, exampleIdx + 0.5, splitAmt)!;
 
         qCol.opacity = 1.0;
@@ -255,8 +255,8 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
             let destIdx = new Vec3(exampleIdx, aIdx, 0);
             let pinIdx = new Vec3(exampleIdx, 0, 0);
 
-            drawDependences(state, head2.qBlock, destIdx);
-            drawDataFlow(state, head2.qBlock, destIdx, pinIdx);
+            drawDependences(state, head0.qBlock, destIdx);
+            drawDataFlow(state, head0.qBlock, destIdx, pinIdx);
             splitGrid(layout, qCol, Dim.Y, aIdx + 0.5, 0);
             for (let b of findSubBlocks(qCol, Dim.Y, null, aIdx)) {
                 b.access!.disable = false;
@@ -269,7 +269,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
         let biasTarget = new Vec3(addTarget.x - layout.cell * 3, addTarget.y, addTarget.z);
 
         if (t_moveDotCells.t > 0 && t_moveToDest.t === 0.0) {
-            let qWeightRow = findSubBlocks(head2.qWeightBlock, Dim.Y, A - 1, null)[0];
+            let qWeightRow = findSubBlocks(head0.qWeightBlock, Dim.Y, A - 1, null)[0];
 
             let qCells = splitGridAll(layout, qWeightRow, Dim.X);
             let inCells = splitGridAll(layout, inputCol, Dim.Y);
@@ -344,7 +344,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
             // move the bias block next to the resulting dotprod cell, draw a plus between them, and then join them together
             if (t_addBias.t >= 0.0) {
-                let qBiasCell = findSubBlocks(head2.qBiasBlock, Dim.Y, A - 1, null)[0];
+                let qBiasCell = findSubBlocks(head0.qBiasBlock, Dim.Y, A - 1, null)[0];
 
                 let qBiasInitial = getBlkDimensions(qBiasCell);
                 let qBiasPos = qBiasInitial.tl.lerp(biasTarget, inverseLerp(0, 0.4, t_addBias.t));
@@ -363,8 +363,8 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
         // move the resulting dotprod cell to the final destination
         if (t_moveToDest.t > 0) {
-            let qWeightRow = findSubBlocks(head2.qWeightBlock, Dim.Y, A - 1, null)[0];
-            let qBiasCell = findSubBlocks(head2.qBiasBlock, Dim.Y, A - 1, null)[0];
+            let qWeightRow = findSubBlocks(head0.qWeightBlock, Dim.Y, A - 1, null)[0];
+            let qBiasCell = findSubBlocks(head0.qBiasBlock, Dim.Y, A - 1, null)[0];
             qBiasCell.opacity = t_moveToDest.t;
             qWeightRow.opacity = t_moveToDest.t;
             inputCol.opacity = t_moveToDest.t;
@@ -379,40 +379,40 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
     // simple run-through and process of each of the Q, K, V blocks
     if (t_processQkv.t > 0) {
-        let processStart = startProcessBefore(state, head2.qBlock);
-        processUpTo(state, t_processQkv, head2.vBlock, processStart);
+        let processStart = startProcessBefore(state, head0.qBlock);
+        processUpTo(state, t_processQkv, head0.vBlock, processStart);
     }
 
     // highlight the example index column for the Q block, and previous columns for K and V
     let attnExampleIdx = 5;
     if (t_focusQKVCols.t > 0 && t_processRemain.t <= 0) {
         let ignoreOpacity = lerp(1.0, 0.2, t_focusQKVCols.t);
-        head2.qBlock.opacity = ignoreOpacity;
-        head2.kBlock.opacity = ignoreOpacity;
-        head2.vBlock.opacity = ignoreOpacity;
+        head0.qBlock.opacity = ignoreOpacity;
+        head0.kBlock.opacity = ignoreOpacity;
+        head0.vBlock.opacity = ignoreOpacity;
 
-        let qCol = splitGrid(layout, head2.qBlock, Dim.X, attnExampleIdx + 0.5, 0)!;
-        splitGrid(layout, head2.kBlock, Dim.X, attnExampleIdx + 0.5, 0)!;
-        splitGrid(layout, head2.vBlock, Dim.X, attnExampleIdx + 0.5, 0)!;
+        let qCol = splitGrid(layout, head0.qBlock, Dim.X, attnExampleIdx + 0.5, 0)!;
+        splitGrid(layout, head0.kBlock, Dim.X, attnExampleIdx + 0.5, 0)!;
+        splitGrid(layout, head0.vBlock, Dim.X, attnExampleIdx + 0.5, 0)!;
 
-        let kBeforeCols = findSubBlocks(head2.kBlock, Dim.X, null, attnExampleIdx);
-        let vBeforeCols = findSubBlocks(head2.vBlock, Dim.X, null, attnExampleIdx);
+        let kBeforeCols = findSubBlocks(head0.kBlock, Dim.X, null, attnExampleIdx);
+        let vBeforeCols = findSubBlocks(head0.vBlock, Dim.X, null, attnExampleIdx);
 
         for (let col of [...kBeforeCols, ...vBeforeCols, qCol]) {
             col.opacity = 1.0;
         }
 
-        head2.attnMtx.access!.disable = true;
-        head2.attnMtxSm.access!.disable = true;
-        head2.attnMtxAgg1.access!.disable = true;
-        head2.attnMtxAgg2.access!.disable = true;
+        head0.attnMtx.access!.disable = true;
+        head0.attnMtxSm.access!.disable = true;
+        head0.attnMtxAgg1.access!.disable = true;
+        head0.attnMtxAgg2.access!.disable = true;
 
-        head2.qBlock.opacity = 1.0;
-        head2.kBlock.opacity = 1.0;
-        head2.vBlock.opacity = 1.0;
+        head0.qBlock.opacity = 1.0;
+        head0.kBlock.opacity = 1.0;
+        head0.vBlock.opacity = 1.0;
     }
 
-    frameTo(state, t_focusQKVCols, [head2.qBlock, head2.kBlock, head2.vBlock, head2.attnMtx, head2.attnMtxSm], 270.1, -38.4, { fill: 1.15 });
+    frameTo(state, t_focusQKVCols, [head0.qBlock, head0.kBlock, head0.vBlock, head0.attnMtx, head0.attnMtxSm], 270.1, -38.4, { fill: 1.15 });
 
     if (t_processAttnRow.t > 0 && t_processRemain.t <= 0) {
         let aIdx = clamp(Math.floor(t_processAttnRow.t * (attnExampleIdx + 1)), 0, attnExampleIdx);
@@ -420,11 +420,11 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
         let pinIdx = new Vec3(attnExampleIdx, 0, 0);
 
         if (t_processAttnSmAggRow.t <= 0) {
-            drawDependences(state, head2.attnMtx, destIdx);
-            drawDataFlow(state, head2.attnMtx, destIdx, pinIdx);
+            drawDependences(state, head0.attnMtx, destIdx);
+            drawDataFlow(state, head0.attnMtx, destIdx, pinIdx);
         }
 
-        let attnRow = splitGrid(layout, head2.attnMtx, Dim.Y, attnExampleIdx, 0)!;
+        let attnRow = splitGrid(layout, head0.attnMtx, Dim.Y, attnExampleIdx, 0)!;
         splitGrid(layout, attnRow, Dim.X, aIdx, 0)!;
         let attnRowStart = findSubBlocks(attnRow, Dim.X, null, aIdx);
 
@@ -437,38 +437,38 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
         let agg0T = inverseLerp(0, 0.5, t_processAttnSmAggRow.t);
         let agg1T = inverseLerp(0.5, 1.0, t_processAttnSmAggRow.t);
         let hidePopup = t_processAttnSmRow.t > 0;
-        processDim(state, head2.attnMtxAgg2, Dim.Y, attnExampleIdx, agg0T, { pinIdx: new Vec3(5, 0, 0), clamp: true, hidePopup });
+        processDim(state, head0.attnMtxAgg2, Dim.Y, attnExampleIdx, agg0T, { pinIdx: new Vec3(5, 0, 0), clamp: true, hidePopup });
 
         if (agg1T > 0) {
-            processDim(state, head2.attnMtxAgg1, Dim.Y, attnExampleIdx, agg1T, { pinIdx: new Vec3(-12, 0, 0), clamp: true, hidePopup });
+            processDim(state, head0.attnMtxAgg1, Dim.Y, attnExampleIdx, agg1T, { pinIdx: new Vec3(-12, 0, 0), clamp: true, hidePopup });
         }
     }
 
     if (t_processAttnSmRow.t > 0 && t_processRemain.t <= 0) {
         let hidePopup = t_zoomVOutput.t > 0;
-        processDim(state, head2.attnMtxSm, Dim.Y, attnExampleIdx, t_processAttnSmRow.t, { pinIdx: new Vec3(5, 0, 0), clamp: true, maxIdx: attnExampleIdx + 1, hidePopup });
+        processDim(state, head0.attnMtxSm, Dim.Y, attnExampleIdx, t_processAttnSmRow.t, { pinIdx: new Vec3(5, 0, 0), clamp: true, maxIdx: attnExampleIdx + 1, hidePopup });
     }
 
     if (t_zoomVOutput.t > 0 && t_processRemain.t <= 0) {
-        head2.vOutBlock.access!.disable = true;
+        head0.vOutBlock.access!.disable = true;
     }
 
     // Do the attn_sm times V vectors to get the output vectors animation
     {
-        frameTo(state, t_zoomVOutput, [head2.vBlock, head2.attnMtxSm, head2.vOutBlock], 270.1, -7.5, { fill: 1.2 });
+        frameTo(state, t_zoomVOutput, [head0.vBlock, head0.attnMtxSm, head0.vOutBlock], 270.1, -7.5, { fill: 1.2 });
 
-        let topLeftPos = getBlkDimensions(head2.vBlock).tl.add(new Vec3(0, 4, 5));
+        let topLeftPos = getBlkDimensions(head0.vBlock).tl.add(new Vec3(0, 4, 5));
         let midLeftPos = topLeftPos.add(new Vec3(0, layout.cell * (A / 2 - 0.5)));
 
         if (t_expandVCols.t > 0 && t_placeVOutput.t <= 0) {
             let allVCols = [];
-            let vBeforeCols = findSubBlocks(head2.vBlock, Dim.X, null, attnExampleIdx);
+            let vBeforeCols = findSubBlocks(head0.vBlock, Dim.X, null, attnExampleIdx);
             for (let col of vBeforeCols) {
                 allVCols.push(...splitGridAll(layout, col, Dim.X));
             }
 
             let allAttnCells = [];
-            let attnRow = findSubBlocks(head2.attnMtxSm, Dim.Y, attnExampleIdx, attnExampleIdx)[0];
+            let attnRow = findSubBlocks(head0.attnMtxSm, Dim.Y, attnExampleIdx, attnExampleIdx)[0];
             let attnCellsBefore = findSubBlocks(attnRow, Dim.X, null, attnExampleIdx);
             for (let cell of attnCellsBefore) {
                 for (let subCell of splitGridAll(layout, cell, Dim.X)) {
@@ -477,7 +477,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
             }
 
             for (let i = 0; i < attnExampleIdx + 1; i++) {
-                let attnVal = getBlockValueAtIdx(head2.attnMtxSm, new Vec3(i, attnExampleIdx, 0)) ?? 0.2;
+                let attnVal = getBlockValueAtIdx(head0.attnMtxSm, new Vec3(i, attnExampleIdx, 0)) ?? 0.2;
 
                 let initColPos = getBlkDimensions(allVCols[i]).tl;
                 let destColPos = topLeftPos.add(new Vec3(i * layout.cell * 5, 0, 0));
@@ -518,11 +518,11 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
         if (t_placeVOutput.t > 0 && t_finalizeVOutput.t <= 0) {
             let prepareT = inverseLerp(0, 0.5, t_placeVOutput.t);
 
-            let vOutCol = splitGrid(layout, head2.vOutBlock, Dim.X, attnExampleIdx + 0.5, prepareT * 2.0)!;
+            let vOutCol = splitGrid(layout, head0.vOutBlock, Dim.X, attnExampleIdx + 0.5, prepareT * 2.0)!;
             vOutCol.access!.disable = true;
             vOutCol.opacity = lerp(1.0, 0.0, prepareT);
 
-            for (let col of findSubBlocks(head2.vBlock, Dim.X, null, attnExampleIdx)) {
+            for (let col of findSubBlocks(head0.vBlock, Dim.X, null, attnExampleIdx)) {
                 col.opacity = t_placeVOutput.t;
             }
 
@@ -538,20 +538,20 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
         if (t_finalizeVOutput.t > 0) {
             let splitAmt = lerp(1.0, 0.0, t_finalizeVOutput.t) * 2.0;
-            let vOutCol = splitGrid(layout, head2.vOutBlock, Dim.X, attnExampleIdx + 0.5, splitAmt)!;
+            let vOutCol = splitGrid(layout, head0.vOutBlock, Dim.X, attnExampleIdx + 0.5, splitAmt)!;
             vOutCol.access!.disable = false;
         }
     }
 
-    frameTo(state, t_processRemainZoom, head2.cubes, 275.6, -4.4, { fill: 1.1 });
+    frameTo(state, t_processRemainZoom, head0.cubes, 275.6, -4.4, { fill: 1.1 });
 
     if (t_processRemain.t > 0) {
-        for (let blk of [head2.attnMtx, head2.attnMtxSm, head2.attnMtxAgg1, head2.attnMtxAgg2, head2.vOutBlock]) {
+        for (let blk of [head0.attnMtx, head0.attnMtxSm, head0.attnMtxAgg1, head0.attnMtxAgg2, head0.vOutBlock]) {
             blk.access!.disable = true;
         }
 
-        let processStart = startProcessBefore(state, head2.attnMtx);
-        processUpTo(state, t_processRemain, head2.vOutBlock, processStart);
+        let processStart = startProcessBefore(state, head0.attnMtx);
+        processUpTo(state, t_processRemain, head0.vOutBlock, processStart);
     }
 
 
@@ -624,7 +624,7 @@ function focusSelfAttentionHead(args: IWalkthroughArgs, timers: ReturnType<typeo
     let { layout } = args;
     let { t0_dissolveHeads, t2_alignqkv } = timers;
 
-    let targetHeadIdx = 2;
+    let targetHeadIdx = 0;
     let targetHead = layout.blocks[0].heads[targetHeadIdx];
 
     let block = layout.blocks[0];

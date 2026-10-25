@@ -1,5 +1,5 @@
 import { Phase } from "./Walkthrough";
-import { commentary, frameCubes, IWalkthroughArgs, setInitialCamera } from "./WalkthroughTools";
+import { commentary, frameCubes, setFocus, IWalkthroughArgs, setInitialCamera } from "./WalkthroughTools";
 
 // the head-specific visuals are drawn by components/HeadsOverlay.tsx, driven by wt.time over [0, 12]
 const headsAnimLength = 12;
@@ -13,6 +13,7 @@ export function walkthrough10_Heads(args: IWalkthroughArgs) {
 
     if (wt.phase === Phase.Head_Knack || wt.phase === Phase.Head_Done || wt.phase === Phase.Harness_Law) {
         let cam = frameCubes(headBlocks, 282, 10, { fill: 1.3 });
+        setFocus(state, headBlocks);
         setInitialCamera(state, cam.center, cam.angle);
     }
 

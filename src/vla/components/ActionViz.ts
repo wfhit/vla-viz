@@ -93,15 +93,15 @@ function sceneText(state: IProgramState, text: string, x: number, y: number, z: 
 function drawQuadLabel(state: IProgramState, layout: IVlaModelLayout, viz: IActionVizState) {
     let i = viz.activeLayer;
     if (i < 0) return;
-    let block = layout.blocks[i], e = layout.expertLayers[i];
-    let h = block.heads.length - 1;
-    let a = block.heads[h].attnMtx, s = e.heads[h].scS;
-    if (a.opacity <= 0 || s.opacity <= 0) return;
-    let col = new Vec4(0.35, 0.35, 0.4, 1).mul(viz.quadLabel);
-    let x = a.x + a.dx + 2, y = a.y + 4, z = a.z + a.dz / 2;
-    sceneText(state, 'prefix Q cannot', x, y, z, 2.2, col);
-    sceneText(state, 'see suffix K', x, y + 3, z, 2.2, col);
-    sceneText(state, '(masked)', x, y + 6, z, 2.2, col);
+    // pinned above one joint score row of head 0: which keys each part of the row reads
+    let eh = layout.expertLayers[i].heads[0];
+    let p = eh.attnMtxP, s = eh.attnMtx;
+    if (p.opacity <= 0 || s.opacity <= 0) return;
+    let col = new Vec4(0.25, 0.25, 0.3, 1).mul(viz.quadLabel);
+    let z = p.z + p.dz / 2;
+    sceneText(state, 'keys: prefix (trunk K, same layer)', p.x, p.y - 5, z, 2.2, col);
+    sceneText(state, 'keys: suffix', s.x, s.y - 5, z, 2.2, col);
+    sceneText(state, 'rows: 17 suffix queries', p.x, p.y + p.dy + 2, z, 2.2, col);
 }
 
 // Beside a gamma/beta block: per channel (rows aligned with the block's channel rows), the
@@ -113,7 +113,7 @@ function drawNormCompare(state: IProgramState, layout: IVlaModelLayout, m: IVlaM
     let e = layout.expertLayers[i], el = m.expertLayers?.[i], ada = m.fm?.ada[i];
     if (!e || !el || !ada) return;
     let blk = viz.normWhich === 1 ? e.ada : e.ada2;
-    let out = (viz.normWhich === 1 ? el.ln1 : el.ln2).localBuffer;
+    let out = (viz.normWhich === 1 ? el.ln_1 : el.ln_2).output.localBuffer;
     if (blk.opacity <= 0) return;
     let wc = ada.localBuffer.length / 4; // rows: g1, b1, g2, b2
     let g0 = (viz.normWhich - 1) * 2;
@@ -210,9 +210,9 @@ function drawJointLinks(state: IProgramState, layout: IVlaModelLayout, m: IVlaMo
         let e = layout.expertLayers[i];
         let block = layout.blocks[i];
         let bright = (viz.activeLayer === i ? viz.links : 0);
-        if (flow && e.heads.some(h => flow!.active.has(h.scP) || flow!.active.has(h.vo))) bright = 1;
-        let visible = !isVisible || isVisible([...e.heads.map(h => h.scP), ...block.kvGroups.map(g => g.kBlock)]);
-        let faint = flow && e.heads.every(h => flow!.pending.has(h.scP)) ? 0.08 : 0.22;
+        if (flow && e.heads.some(h => flow!.active.has(h.attnMtxP) || flow!.active.has(h.vOutBlock))) bright = 1;
+        let visible = !isVisible || isVisible([...e.heads.map(h => h.attnMtxP), ...block.kvGroups.map(g => g.kBlock)]);
+        let faint = flow && e.heads.every(h => flow!.pending.has(h.attnMtxP)) ? 0.08 : 0.22;
         let mass = layerMass(m, i, viz.massStep);
         let thick = bright > 0 ? 0.6 + 2 * (mass[1] + mass[2]) : 0.5;
         // the coupling: the trunk's K of a kv group → the suffix-prefix score quadrant scP of
@@ -221,7 +221,7 @@ function drawJointLinks(state: IProgramState, layout: IVlaModelLayout, m: IVlaMo
         for (let h = 0; h < block.heads.length; h++) {
             let g = block.kvGroups[block.heads[h].kvGroup];
             let eh = e.heads[h];
-            for (let [src, dst, col] of [[g.kBlock, eh.scP, kColor], [g.vBlock, eh.vo, vColor]] as [IBlkDef, IBlkDef, Vec4][]) {
+            for (let [src, dst, col] of [[g.kBlock, eh.attnMtxP, kColor], [g.vBlock, eh.vOutBlock, vColor]] as [IBlkDef, IBlkDef, Vec4][]) {
                 if (src.opacity <= 0 || dst.opacity <= 0) continue;
                 recordArrowEdge(src, dst);
                 if (!visible) continue;
@@ -239,7 +239,7 @@ function drawMassBars(state: IProgramState, layout: IVlaModelLayout, m: IVlaMode
     let cfg = m.config;
     let e = layout.expertLayers[i];
     // anchor: right of the frontmost head's suffix-suffix score block
-    let attn = e.heads[e.heads.length - 1].scS;
+    let attn = e.heads[0].attnMtx;
     let mass = layerMass(m, i, viz.massStep);
     let nVis = cfg.suffix_visible_visual, nTxt = cfg.suffix_visible_prefix - cfg.suffix_visible_visual;
     let nAns = cfg.T_text - cfg.suffix_visible_prefix;

@@ -454,8 +454,13 @@ def main():
         put_agg("lnf_agg", a[0][0])
         priv["lnf_full"] = o[0]
     hooks.append(trunk.norm.register_forward_hook(lnf_hook))
-    hooks.append(expert.norm.register_forward_hook(
-        lambda m, a, o: priv.__setitem__("expert_out", o[0])))
+    def enorm_hook(m, a, o):
+        priv["expert_out"] = o[0]
+        x = a[0][0] if a[0].dim() == 3 else a[0]
+        ms = x.float().pow(2).mean(-1)
+        put("expert_out_agg", torch.stack([ms, torch.rsqrt(ms + ecfg.rms_norm_eps)], dim=-1), ms, [0, 0],
+            "expert final RMSNorm agg over the full C: mean(x²) | rsqrt(mean(x²)+eps)")
+    hooks.append(expert.norm.register_forward_hook(enorm_hook))
 
     # the action expert's own stream: suffix in, and each run layer's suffix output
     def expert_in_pre(mod, a, kw):
@@ -475,11 +480,17 @@ def main():
     def expert_hooks(i, layer):
         ectx = {}
 
+        def eagg(name, x):  # [n_suf, C] → [n_suf, 2]: mean(x²) over the FULL 768 | rsqrt(mean+eps)
+            ms = x.float().pow(2).mean(-1)
+            put(name, torch.stack([ms, torch.rsqrt(ms + ecfg.rms_norm_eps)], dim=-1), ms, [0, 0],
+                "AdaRMSNorm agg over the full C: mean(x²) | rsqrt(mean(x²)+eps); stats over mean(x²)")
+
         def pre(mod, a, kw):
             x = a[0]
             x = x[0] if x.dim() == 3 else x
             if kw.get("compute_qkv"):
                 ectx["x_in"] = x
+                eagg(f"E{i}.ln1_agg", x)
         hooks.append(layer.register_forward_pre_hook(pre, with_kwargs=True))
         def ln1_hook(m, a, o):
             e2d(f"E{i}.ln1", o, f"expert layer {i} input AdaRMSNorm(te) out")
@@ -489,6 +500,7 @@ def main():
             out = e2d(f"E{i}.o", o, f"expert layer {i} o_proj out (suffix rows of the joint attention)")
             res = out + ectx["x_in"]
             e2d(f"E{i}.res1", res, f"expert layer {i} attention residual (x_in + o_proj)")
+            eagg(f"E{i}.ln2_agg", res)
             ectx["res1"] = res
         hooks.append(layer.self_attn.o_proj.register_forward_hook(o_hook))
         def ln2_hook(m, a, o):
@@ -560,15 +572,19 @@ def main():
         # expert's 17 tokens are extra columns/rows of the SAME q, k, v, scores, probs, out
         ns = L - T
         put(f"E{i}.q", q[0, T:, :, :WD].permute(1, 0, 2), q[0].permute(1, 0, 2), [0, T, 0],
-            f"layer pair {i}: expert Q of the suffix tokens (AdaRMSNorm → q_proj → q_norm → RoPE) [head, token, dim]")
+            f"layer pair {i}: expert Q of the suffix tokens (AdaRMSNorm → q_proj (+bias) → RoPE; the expert has no q_norm) [head, token, dim]")
         put(f"E{i}.k", k[0, T:, :, :WD].permute(1, 0, 2), k[0].permute(1, 0, 2), [0, T, 0],
-            f"layer pair {i}: expert K of the suffix tokens (2 kv heads tiled to {k.shape[2]}) [kv_head, token, dim]")
+            f"layer pair {i}: expert K of the suffix tokens (k_proj (+bias) → RoPE; 2 kv heads tiled to {k.shape[2]}) [kv_head, token, dim]")
         put(f"E{i}.v", v[0, T:, :, :WD].permute(1, 0, 2), v[0].permute(1, 0, 2), [0, T, 0],
             f"layer pair {i}: expert V of the suffix tokens (tiled) [kv_head, token, dim]")
         put(f"E{i}.scp", sq[:, :, tw], sq, [0, T, t0w],
             f"layer pair {i}: suffix queries · prefix-window keys / √{HD} (masked=-inf) [head, suffix q, key]")
         put(f"E{i}.scs", sq[:, :, T:], sq, [0, T, T],
             f"layer pair {i}: suffix queries · suffix keys / √{HD} [head, suffix q, suffix key]")
+        smx = sq.max(-1).values
+        sinv = 1.0 / torch.exp(sq - smx[..., None]).sum(-1)
+        put(f"E{i}.attn_agg", torch.stack([smx, sinv], dim=-1), smx, [0, T, 0],
+            f"layer pair {i}: suffix softmax agg over the FULL key row ({L} keys): max | 1/Σexp(s−max)")
         put(f"E{i}.pp", ps[:, :, tw], ps, [0, T, t0w],
             f"layer pair {i}: suffix attention probs on the prefix-window keys (rows normalised over all {L} keys)")
         put(f"E{i}.ps", ps[:, :, T:], ps, [0, T, T],
@@ -666,6 +682,23 @@ def main():
             wput(f"L{i}.gate_w", m.gate_proj.weight[:WF, :WC], m.gate_proj.weight, [0, 0], "gate_proj [FF, C]")
             wput(f"L{i}.up_w", m.up_proj.weight[:WF, :WC], m.up_proj.weight, [0, 0], "up_proj [FF, C]")
             wput(f"L{i}.down_w", m.down_proj.weight[:WC, :WF], m.down_proj.weight, [0, 0], "down_proj [C, FF]")
+        EH, EKV, EHD, EC = ecfg.num_attention_heads, ecfg.num_key_value_heads, ecfg.head_dim, ecfg.hidden_size
+        for i in range(NL):
+            layer = expert.layers[i]
+            a = layer.self_attn
+            for nm, ln in (("ln1", layer.input_layernorm), ("ln2", layer.post_attention_layernorm)):
+                wput(f"E{i}.{nm}_w", ln.weight, ln.weight, [0], f"expert AdaRMSNorm weight w ({nm})")
+            for nm, lin, nh in (("q", a.q_proj, EH), ("k", a.k_proj, EKV), ("v", a.v_proj, EKV)):
+                w_ = lin.weight.view(nh, EHD, EC)
+                b_ = lin.bias.view(nh, EHD)
+                wput(f"E{i}.{nm}_w", w_[:, :WD, :WC], w_, [0, 0, 0], f"expert {nm}_proj [head, head_dim, C]")
+                wput(f"E{i}.{nm}_b", b_[:, :WD], b_, [0, 0], f"expert {nm}_proj bias [head, head_dim]")
+            wput(f"E{i}.o_w", a.o_proj.weight[:WC, :WC], a.o_proj.weight, [0, 0], "expert o_proj [C, H·head_dim]")
+            m = layer.mlp
+            wput(f"E{i}.gate_w", m.gate_proj.weight[:WF, :WC], m.gate_proj.weight, [0, 0], "expert gate_proj [FF, C]")
+            wput(f"E{i}.up_w", m.up_proj.weight[:WF, :WC], m.up_proj.weight, [0, 0], "expert up_proj [FF, C]")
+            wput(f"E{i}.down_w", m.down_proj.weight[:WC, :WF], m.down_proj.weight, [0, 0], "expert down_proj [C, FF]")
+        wput("expert_norm_w", expert.norm.weight, expert.norm.weight, [0], "expert final RMSNorm weight")
         wput("lnf_w", trunk.norm.weight, trunk.norm.weight, [0], "final RMSNorm γ (ln_f)")
         wput("knack_w", bf.knack_head.weight, bf.knack_head.weight, [0, 0], "knack_head [17, C]")
         wput("knack_b", bf.knack_head.bias, bf.knack_head.bias, [0], "knack_head bias")

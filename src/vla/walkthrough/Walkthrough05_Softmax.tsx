@@ -8,9 +8,9 @@ export function walkthrough05_Softmax(args: IWalkthroughArgs) {
         return;
     }
 
-    // heads are stacked in z: frame the front-most one so no other head plate occludes it
-    let h = [...args.layout.blocks[0].heads].sort((a, b) => b.attnMtx.z - a.attnMtx.z)[0];
-    initialFrame(state, [h.qBlock, h.kBlock, h.attnMtx, h.attnMtxAgg1, h.attnMtxAgg2, h.attnMtxSm, h.vOutBlock], 290, 8, { fill: 0.85 });
+    // one representative head (x16; the others share its slot and are not drawn)
+    let h = args.layout.blocks[0].heads[0];
+    initialFrame(state, [h.qBlock, h.kBlock, h.attnMtx, h.attnMtxAgg1, h.attnMtxAgg2, h.attnMtxSm, h.vOutBlock], 290, 8, { fill: 1.1 });
 
     commentary(wt, null, 0)`
 

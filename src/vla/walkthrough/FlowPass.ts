@@ -19,19 +19,23 @@ function layerStages(L: IVlaModelLayout, i: number): IFlowStage[] {
     let b = L.blocks[i];
     let e = L.expertLayers[i];
     let st = (k: number, trunk: IBlkDef[], expert: IBlkDef[]) => ({ name: flowStageNames[k], trunk, expert });
+    let eh = e ? e.heads : [];
     return [
-        st(0, b.ln1.cubes, e ? [e.ada, e.ln1] : []),
+        st(0, b.ln1.cubes, e ? e.ln1.cubes : []),
         st(1, [...b.kvGroups.flatMap(g => [g.kWeightBlock, g.vWeightBlock, g.kBlock, g.vBlock]),
-            ...b.heads.flatMap(h => [h.qWeightBlock, h.qBlock])], e ? [...e.kv.flatMap(k => [k.k, k.v]), ...e.heads.map(h => h.q)] : []),
-        st(2, b.heads.flatMap(h => [h.attnMtx, h.attnMtxAgg1, h.attnMtxAgg2]), e ? e.heads.flatMap(h => [h.scP, h.scS]) : []),
-        st(3, b.heads.flatMap(h => [h.attnMtxSm, h.vOutBlock]), e ? e.heads.flatMap(h => [h.pP, h.pS, h.vo]) : []),
-        st(4, [b.projWeight, b.attnOut], e ? [e.o] : []),
-        st(5, [b.attnResidual], e ? [e.res1] : []),
-        st(6, b.ln2.cubes, e ? [e.ada2, e.ln2] : []),
-        st(7, [b.mlpFcWeight, b.mlpUpWeight, b.mlpFc, b.mlpUp], e ? [e.gate, e.up] : []),
-        st(8, [b.mlpAct], e ? [e.act] : []),
-        st(9, [b.mlpProjWeight, b.mlpResult], e ? [e.mlp] : []),
-        st(10, [b.mlpResidual], e ? [e.out] : []),
+            ...b.heads.flatMap(h => [h.qWeightBlock, h.qBlock])],
+            e ? [...e.kvGroups.flatMap(g => [g.kWeightBlock, g.vWeightBlock, g.kBlock, g.vBlock]),
+                ...eh.flatMap(h => [h.qWeightBlock, h.qBlock])] : []),
+        st(2, b.heads.flatMap(h => [h.attnMtx, h.attnMtxAgg1, h.attnMtxAgg2]),
+            eh.flatMap(h => [h.attnMtxP, h.attnMtx, h.attnMtxAgg1, h.attnMtxAgg2])),
+        st(3, b.heads.flatMap(h => [h.attnMtxSm, h.vOutBlock]), eh.flatMap(h => [h.attnMtxSmP, h.attnMtxSm, h.vOutBlock])),
+        st(4, [b.projWeight, b.attnOut], e ? [e.projWeight, e.attnOut] : []),
+        st(5, [b.attnResidual], e ? [e.attnResidual] : []),
+        st(6, b.ln2.cubes, e ? e.ln2.cubes : []),
+        st(7, [b.mlpFcWeight, b.mlpUpWeight, b.mlpFc, b.mlpUp], e ? [e.mlpFcWeight, e.mlpUpWeight, e.mlpFc, e.mlpUp] : []),
+        st(8, [b.mlpAct], e ? [e.mlpAct] : []),
+        st(9, [b.mlpProjWeight, b.mlpResult], e ? [e.mlpProjWeight, e.mlpResult] : []),
+        st(10, [b.mlpResidual], e ? [e.mlpResidual] : []),
     ];
 }
 
@@ -39,7 +43,7 @@ function layerStages(L: IVlaModelLayout, i: number): IFlowStage[] {
 function downstream(L: IVlaModelLayout): IBlkDef[] {
     return [...L.ln_f.cubes, L.hStar, L.logits, L.logitsAgg1, L.logitsAgg2, L.logitsSoftmax,
         L.doneLogits, L.doneAgg1, L.doneAgg2, L.doneProbs,
-        L.expertOut, L.actionVelocity, L.actionChunk];
+        ...L.expertNorm.cubes, L.actionVelocity, L.actionChunk];
 }
 
 function disable(b: IBlkDef) {
@@ -72,7 +76,7 @@ export function applyFlowPass(L: IVlaModelLayout, pos: number, opts: { expert?: 
         if (!opts.suffixOnly) active.add(L.residual0);
         if (withExpert) active.add(L.expertIn);
     }
-    if (g < total) (opts.suffixOnly ? [L.expertOut, L.actionVelocity] : downstream(L)).forEach(b => pending.add(b));
+    if (g < total) (opts.suffixOnly ? [...L.expertNorm.cubes, L.actionVelocity] : downstream(L)).forEach(b => pending.add(b));
     for (let b of pending) disable(b);
     for (let b of active) if (b.t === 'i') b.highlight = Math.max(b.highlight, 0.45);
     L.flow = g >= total ? null : { active, pending };
@@ -82,8 +86,8 @@ export function applyFlowPass(L: IVlaModelLayout, pos: number, opts: { expert?: 
 }
 
 // Decode pass k (0-based) of the K-step Euler loop: every DiT block that has a per-step capture
-// shows step k's real tensor; the per-head / MLP-lane tails were only exported for pass 0, so
-// on later passes they are greyed out instead of showing pass-0 values.
+// shows step k's real tensor; the per-head blocks, norm aggregates and MLP lanes were only
+// exported for pass 0, so on later passes they are greyed out instead of showing pass-0 values.
 export function applyFmStep(L: IVlaModelLayout, m: IVlaModelLink | null, k: number) {
     let fs = m?.fmSteps;
     if (!fs) return false;
@@ -94,17 +98,21 @@ export function applyFmStep(L: IVlaModelLayout, m: IVlaModelLink | null, k: numb
     };
     for (let i = 0; i < L.expertLayers.length; i++) {
         let e = L.expertLayers[i];
-        for (let n of ['ln1', 'o', 'res1', 'ln2', 'mlp', 'out'] as const) set(e[n], `E${i}.${n}`);
+        let per: [IBlkDef, string][] = [[e.ln1.lnResid, 'ln1'], [e.attnOut, 'o'], [e.attnResidual, 'res1'],
+            [e.ln2.lnResid, 'ln2'], [e.mlpResult, 'mlp'], [e.mlpResidual, 'out']];
+        for (let [b, n] of per) set(b, `E${i}.${n}`);
         set(e.ada, `E${i}.ada`);
         set(e.ada2, `E${i}.ada`);
         if (k > 0) {
-            e.heads.forEach(h => [h.q, h.scP, h.scS, h.pP, h.pS, h.vo].forEach(disable));
-            e.kv.forEach(g => { disable(g.k); disable(g.v); });
-            [e.gate, e.up, e.act].forEach(disable);
+            e.heads.forEach(h => [h.qBlock, h.attnMtxP, h.attnMtx, h.attnMtxAgg1, h.attnMtxAgg2,
+                h.attnMtxSmP, h.attnMtxSm, h.vOutBlock].forEach(disable));
+            e.kvGroups.forEach(g => { disable(g.kBlock); disable(g.vBlock); });
+            [e.ln1.lnAgg1, e.ln1.lnAgg2, e.ln2.lnAgg1, e.ln2.lnAgg2, e.mlpFc, e.mlpUp, e.mlpAct].forEach(disable);
         }
     }
     set(L.expertIn, 'expert_in');
     set(L.expertOut, 'expert_out');
+    if (k > 0) [L.expertNorm.lnAgg1, L.expertNorm.lnAgg2].forEach(disable);
     set(L.fm.x1, 'x');
     set(L.fm.actionEmb, 'fm_action_emb');
     set(L.fm.timeHidden, 'fm_time_mlp_hidden');

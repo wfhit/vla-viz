@@ -165,29 +165,50 @@ export interface IBlockLayerLink {
     mlpResid: IRealTex;
 }
 
-// One layer-pair of the action expert: its suffix output and the suffix queries'
-// share of the SAME joint attention the trunk layer runs.
+// One expert (DiT) query head: q_proj (+bias, no q_norm) and its row of the joint attention,
+// split at the prefix | suffix key boundary (prefix keys = the trunk's cached K/V of the same layer)
+export interface IExpertHeadLink {
+    qWeight: IRealTex;  // [Wd, Wc]
+    qBias: IRealTex;    // [Wd]
+    q: IRealTex;        // [n_suf, Wd]
+    scoresP: IRealTex;  // [n_suf, Wt] scores vs the prefix-window keys
+    scoresS: IRealTex;  // [n_suf, n_suf] scores vs the suffix keys
+    attnAgg: IRealTex;  // [n_suf, 2] softmax agg over the FULL key row: max | 1/Σexp
+    probsP: IRealTex;   // [n_suf, Wt]
+    probsS: IRealTex;   // [n_suf, n_suf]
+    attnOut: IRealTex;  // [n_suf, Wd]
+}
+
+// one of the expert's 2 kv heads (k/v come from the shared attention, which tiles them to the
+// trunk's 8 groups; the tile copy 4g is exactly expert kv head g)
+export interface IExpertKvLink {
+    kWeight: IRealTex;
+    kBias: IRealTex;
+    vWeight: IRealTex;
+    vBias: IRealTex;
+    k: IRealTex;        // [n_suf, Wd]
+    v: IRealTex;        // [n_suf, Wd]
+}
+
+// One layer of the action expert, in the same shape as a trunk layer (IBlockLayerLink).
 export interface IExpertLayerLink {
-    ln1: IRealTex;      // [n_suf, Wc] input AdaRMSNorm(te) out
-    o: IRealTex;        // [n_suf, Wc] o_proj out (suffix rows of the joint attention)
-    res1: IRealTex;     // [n_suf, Wc] x_in + o_proj
-    ln2: IRealTex;      // [n_suf, Wc] post-attn AdaRMSNorm(te) out
-    mlp: IRealTex;      // [n_suf, Wc] SwiGLU MLP out
-    out: IRealTex;      // [n_suf, Wc] expert residual stream after layer i (res1 + mlp)
-    attn: IRealTex;     // [n_suf, Wt + n_suf] head-mean probs: prefix window keys | suffix keys
-    mass: Float32Array; // [n_suf, 4] attention mass on [state tokens | visual | text | suffix]
-    // the suffix "tails" of the trunk's per-head blocks (same joint attention, expert weights)
-    q: IRealTex[];      // per head [n_suf, Wd]
-    k: IRealTex[];      // per kv group [n_suf, Wd] (expert kv heads tiled to the trunk's groups)
-    v: IRealTex[];      // per kv group [n_suf, Wd]
-    scp: IRealTex[];    // per head [n_suf, Wt] scores vs the prefix-window keys
-    scs: IRealTex[];    // per head [n_suf, n_suf] scores vs the suffix keys
-    pp: IRealTex[];     // per head [n_suf, Wt] softmax probs on the prefix-window keys
-    ps: IRealTex[];     // per head [n_suf, n_suf] softmax probs on the suffix keys
-    vo: IRealTex[];     // per head [n_suf, Wd] attention output
-    gate: IRealTex;     // [n_suf, Wf]
-    up: IRealTex;       // [n_suf, Wf]
-    act: IRealTex;      // [n_suf, Wf]
+    ln_1: IRmsNormLink;  // AdaRMSNorm: agg, base weight w, output (after the γβ(t) modulation)
+    heads: IExpertHeadLink[];
+    kv: IExpertKvLink[];
+    oWeight: IRealTex;
+    oOut: IRealTex;
+    attnResid: IRealTex;
+    ln_2: IRmsNormLink;
+    gateWeight: IRealTex;
+    upWeight: IRealTex;
+    downWeight: IRealTex;
+    gate: IRealTex;
+    up: IRealTex;
+    act: IRealTex;
+    mlpOut: IRealTex;
+    mlpResid: IRealTex;
+    attn: IRealTex;      // [n_suf, Wt + n_suf] head-mean probs: prefix window keys | suffix keys
+    mass: Float32Array;  // [n_suf, 4] attention mass on [state tokens | visual | text | suffix]
 }
 
 // One Euler step of the K-step decode (k005b-fm.json): x_t, v, x_next and every layer's
@@ -226,6 +247,7 @@ export interface IVlaModelLink {
     doneProbs: IRealTex;
     expertIn: IRealTex;
     expertLayers: IExpertLayerLink[];
+    expertNorm: IRmsNormLink;
     expertOut: IRealTex;
     actionWeight: IRealTex;
     actionBias: IRealTex;
@@ -517,26 +539,42 @@ export function createK005bGpuModel(gl: WebGL2RenderingContext, data: IK005bData
         doneProbs: a('done_probs'),
         expertIn: a('expert_in'),
         expertLayers: Array.from({ length: config.n_layer_pairs }, (_, i) => ({
-            ln1: a(`E${i}.ln1`),
-            o: a(`E${i}.o`),
-            res1: a(`E${i}.res1`),
-            ln2: a(`E${i}.ln2`),
-            mlp: a(`E${i}.mlp`),
-            out: a(`E${i}.out`),
-            attn: a(`E${i}.attn`),
-            mass: get(A, `E${i}.attn_mass`).data,
-            q: Array.from({ length: H }, (_, h) => a(`E${i}.q`, h)),
-            k: Array.from({ length: KV }, (_, g) => a(`E${i}.k`, g)),
-            v: Array.from({ length: KV }, (_, g) => a(`E${i}.v`, g)),
-            scp: Array.from({ length: H }, (_, h) => a(`E${i}.scp`, h)),
-            scs: Array.from({ length: H }, (_, h) => a(`E${i}.scs`, h)),
-            pp: Array.from({ length: H }, (_, h) => a(`E${i}.pp`, h)),
-            ps: Array.from({ length: H }, (_, h) => a(`E${i}.ps`, h)),
-            vo: Array.from({ length: H }, (_, h) => a(`E${i}.vo`, h)),
+            ln_1: { agg: a(`E${i}.ln1_agg`), weight: w(`E${i}.ln1_w`), output: a(`E${i}.ln1`) },
+            heads: Array.from({ length: config.expert_heads }, (_, h) => ({
+                qWeight: w(`E${i}.q_w`, h),
+                qBias: w(`E${i}.q_b`, h),
+                q: a(`E${i}.q`, h),
+                scoresP: a(`E${i}.scp`, h),
+                scoresS: a(`E${i}.scs`, h),
+                attnAgg: a(`E${i}.attn_agg`, h),
+                probsP: a(`E${i}.pp`, h),
+                probsS: a(`E${i}.ps`, h),
+                attnOut: a(`E${i}.vo`, h),
+            })),
+            kv: Array.from({ length: config.expert_kv_heads }, (_, g) => ({
+                kWeight: w(`E${i}.k_w`, g),
+                kBias: w(`E${i}.k_b`, g),
+                vWeight: w(`E${i}.v_w`, g),
+                vBias: w(`E${i}.v_b`, g),
+                k: a(`E${i}.k`, g * (KV / config.expert_kv_heads)),
+                v: a(`E${i}.v`, g * (KV / config.expert_kv_heads)),
+            })),
+            oWeight: w(`E${i}.o_w`),
+            oOut: a(`E${i}.o`),
+            attnResid: a(`E${i}.res1`),
+            ln_2: { agg: a(`E${i}.ln2_agg`), weight: w(`E${i}.ln2_w`), output: a(`E${i}.ln2`) },
+            gateWeight: w(`E${i}.gate_w`),
+            upWeight: w(`E${i}.up_w`),
+            downWeight: w(`E${i}.down_w`),
             gate: a(`E${i}.gate`),
             up: a(`E${i}.up`),
             act: a(`E${i}.act`),
+            mlpOut: a(`E${i}.mlp`),
+            mlpResid: a(`E${i}.out`),
+            attn: a(`E${i}.attn`),
+            mass: get(A, `E${i}.attn_mass`).data,
         })),
+        expertNorm: { agg: a('expert_out_agg'), weight: w('expert_norm_w'), output: a('expert_out') },
         expertOut: a('expert_out'),
         actionWeight: w('action_w'),
         actionBias: w('action_b'),

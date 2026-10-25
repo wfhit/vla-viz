@@ -86,6 +86,7 @@ export enum BlKDepSpecial {
     SoftmaxAggMax,
     SoftmaxAggExp,
     Attention,
+    AdaLayerNorm,
 }
 
 let depIdxVars = '0xybi';
@@ -319,11 +320,17 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
     y += C * cell + margin;
 
     function createLn(x: number, src: IBlkDef, target?: IRmsNormLink) {
-        let lnLeftX = leftX + x;
-        let resLeftX = lnLeftX - T * cell - margin;
+        return createLnAt(leftX + x, T, src, target);
+    }
+
+    // RMSNorm group whose blocks end at x = lnLeftX (the residual stream sits right of it).
+    // With `ada` it is the expert's AdaRMSNorm: γβ(t) (the timestep modulation) sits left of w.
+    function createLnAt(lnLeftX: number, Tt: number, src: IBlkDef, target?: IRmsNormLink,
+            ada?: { tex: IRealTex | undefined, row0: number, name: string }) {
+        let resLeftX = lnLeftX - Tt * cell - margin;
 
         let lnAgg1 = mk({
-            t: 'a', cx: T, cz: B, cy: 1, y: y,
+            t: 'a', cx: Tt, cz: B, cy: 1, y: y,
             xR: lnLeftX, zM: 0,
             access: acc(target?.agg, [0, 0, 0, 0], [1, 0, 0]),
             deps: { add: [[src, 'xi']], special: BlKDepSpecial.LayerNormMu },
@@ -331,7 +338,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             name: 'RMS Agg',
         });
         let lnAgg2 = mk({
-            t: 'a', cx: T, cz: B, cy: 1, y: y + cell,
+            t: 'a', cx: Tt, cz: B, cy: 1, y: y + cell,
             xR: lnLeftX, zM: 0,
             access: acc(target?.agg, [0, 0, 0, 1], [1, 0, 0]),
             deps: { add: [[src, 'xi']], special: BlKDepSpecial.LayerNormSigma },
@@ -346,7 +353,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             xR: resLeftX, zM: 0,
             access: acc(target?.weight, [0, 0, 0], [0, 1, 0]),
             dimX: DimStyle.None, dimY: DimStyle.C,
-            name: 'γ', small: true,
+            name: ada ? 'w' : 'γ', small: true,
         });
         // RMSNorm has no β: placeholder only (never rendered)
         let lnMu = mk({
@@ -355,51 +362,39 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             dimX: DimStyle.None, dimY: DimStyle.C,
             name: '', small: true, hidden: true,
         });
+        // AdaRMSNorm: [γ(t) | β(t)] for this sublayer (columns = γ, β; rows = channels), right of
+        // the norm output, where the te(t) bus reaches it (the caller leaves the room)
+        let adaBlk = ada ? mk({
+            t: 'i', cx: 2, cz: B, cy: C, y: y,
+            xL: lnLeftX + margin, zM: 0,
+            access: acc(ada.tex, [0, 1, 0], [1, 0, 0, ada.row0]),
+            dimX: DimStyle.None, dimY: DimStyle.C,
+            name: ada.name,
+        }) : null;
+        let adds: [IBlkDef, string][] = [[src, 'xy'], [lnAgg1, 'xi'], [lnAgg2, 'xi'], [lnSigma, '0y']];
+        if (adaBlk) adds.push([adaBlk, '0y']);
         let lnResid = mk({
-            t: 'i', cx: T, cz: B, cy: C, y: y,
+            t: 'i', cx: Tt, cz: B, cy: C, y: y,
             xR: lnLeftX, zM: 0,
             access: acc(target?.output, [0, 1, 0], [1, 0, 0]),
-            deps: { add: [[src, 'xy'], [lnAgg1, 'xi'], [lnAgg2, 'xi'], [lnSigma, '0y']], special: BlKDepSpecial.LayerNorm },
+            deps: { add: adds, special: ada ? BlKDepSpecial.AdaLayerNorm : BlKDepSpecial.LayerNorm },
             dimX: DimStyle.T, dimY: DimStyle.C,
-            name: 'RMSNorm',
+            name: ada ? 'AdaRMSNorm' : 'RMSNorm',
         });
-        let lnCubes = [lnAgg1, lnAgg2, lnSigma, lnResid];
-        return { lnAgg1, lnAgg2, lnResid, lnSigma, lnMu, cubes: lnCubes };
+        let lnCubes = adaBlk ? [lnAgg1, lnAgg2, lnSigma, adaBlk, lnResid] : [lnAgg1, lnAgg2, lnSigma, lnResid];
+        return { lnAgg1, lnAgg2, lnResid, lnSigma, lnMu, ada: adaBlk, cubes: lnCubes };
     }
 
-    // ---- joint-block geometry: every trunk token-axis block carries the DiT's 17-token suffix
-    // "tail" flush on its right (same sublayer, same row, same depth). The pair is ONE portal:
-    // the concatenated [prefix ‖ suffix] sequence runs through it; the tail is computed by the
-    // expert's weights. γβ(t) slots sit right of the norm tails, fed by the time bus.
     let seam = cell;
-    let sufW = seam + nSuffix * cell;
-    let adaW = 2 * cell;
-    let lnShift = sufW + seam + adaW;
-    let lnLeftX = leftX - lnShift - (T + 2) * cell - 2 * margin - sufW;
+    let lnLeftX = leftX - (T + 2) * cell - 2 * margin;
     let resMidX = 0;
     // pre-offset coordinates of a block (mk() adds `offset` again)
     let bx = (b: IBlkDef) => b.x - offset.x;
     let by = (b: IBlkDef) => b.y - offset.y;
     let bxR = (b: IBlkDef) => b.x - offset.x + b.dx;
 
-    let expertCubesAll: IBlkDef[] = [];
-
-    function createLayer(src: IBlkDef, target: IBlockLayerLink | undefined, el: IExpertLayerLink | undefined, adaTex: IRealTex | undefined, li: number) {
-        let ln1 = createLn(-lnShift, src, target?.ln_1);
-
-        // suffix tail: 17 token columns × a channel / head-dim window
-        let tok = (name: string, yy: number, xL: number, tex: IRealTex | undefined, zM: number = 0, cy: number = C) => mk({
-            t: 'i', cx: nSuffix, cy, cz: B, y: yy, xL, zM,
-            access: acc(tex, [0, 1, 0], [1, 0, 0]),
-            dimX: DimStyle.T, dimY: cy === C ? DimStyle.C : DimStyle.A, name,
-        });
-        let adaBlk = (name: string, yy: number, xL: number, row0: number) => mk({
-            t: 'i', cx: 2, cy: C, cz: B, y: yy, xL, zM: 0,
-            access: acc(adaTex, [0, 1, 0], [1, 0, 0, row0]),
-            dimX: DimStyle.None, dimY: DimStyle.C, name,
-        });
-        let eLn1 = tok(`AdaRMSNorm1 (DiT ${li})`, by(ln1.lnResid), bxR(ln1.lnResid) + seam, el?.ln1);
-        let eAda = adaBlk(`gamma1/beta1 (t) ${li}`, by(eLn1), bxR(eLn1) + seam, 0);
+    function createLayer(src: IBlkDef, target: IBlockLayerLink | undefined) {
+        let ln1 = createLn(0, src, target?.ln_1);
 
         let interGroupMargin = 3 * margin + (C * cell) / 16;
         let qkvMargin = 1 * margin + (C * cell) / 16;
@@ -408,22 +403,20 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         let groupSlots = groupSize + 2;
 
         let attn1Y = y + A * cell + margin;
-        let sufRowsY = attn1Y + T * cell + seam;
-        let vOutY = sufRowsY + nSuffix * cell + margin;
+        let vOutY = attn1Y + T * cell + margin;
 
         let attnLeftX = lnLeftX;
-        let tailX = attnLeftX + seam;
         let qkvValLeftX = attnLeftX - T * cell - margin;
         let qkvBiasLeftX = qkvValLeftX - C * cell - margin;
-        let attn2LeftX = attnLeftX - (T + 2) * cell - 2 * margin - sufW;
+        let attn2LeftX = attnLeftX - (T + 2) * cell - 2 * margin;
 
         // z order inside group g: q(2g) | K_g | V_g | q(2g+1)
-        let groupZ0 = (g: number) => groupWidth * g - (nKvHeads - 1) * groupWidth / 2;
-        let slotZ = (g: number, s: number) => groupZ0(g) + (s - (groupSlots - 1) / 2) * slot;
-        let qSlot = (j: number) => j === 0 ? 0 : j + 2; // q | K | V | q … (slots 0, 3, 4, …)
+        // one representative head per view (bbycroft style, "x16 heads"): every head / kv group
+        // shares head 0's slots (q | K | V around z = 0); only head 0 / kv 0 are drawn
+        let slotZ = (_g: number, s: number) => (s - 1) * slot;
+        let qSlot = (_j: number) => 0;
 
         let groups = [];
-        let eKv: { k: IBlkDef, v: IBlkDef }[] = [];
         for (let g = 0; g < nKvHeads; g++) {
             let kv = target?.kv[g];
             let kMid = slotZ(g, 1);
@@ -472,16 +465,11 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
                 dimX: DimStyle.T, dimY: DimStyle.A,
                 name: `V vectors (kv ${g})`,
             });
-            eKv.push({
-                k: tok(`DiT K (kv ${g}) ${li}`, y, tailX, el?.k[g], kMid, A),
-                v: tok(`DiT V (kv ${g}) ${li}`, y, tailX, el?.v[g], vMid, A),
-            });
             groups.push({ kWeightBlock, vWeightBlock, kBiasBlock, vBiasBlock, kBlock, vBlock,
                 cubes: [kWeightBlock, vWeightBlock, kBiasBlock, kBlock, vBlock] });
         }
 
         let heads = [];
-        let eHeads: { q: IBlkDef, scP: IBlkDef, scS: IBlkDef, pP: IBlkDef, pS: IBlkDef, vo: IBlkDef }[] = [];
         for (let i = 0; i < nHeads; i++) {
             let g = Math.floor(i / groupSize);
             let grp = groups[g];
@@ -511,9 +499,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
                 name: `Q vectors (head ${i})`,
             });
 
-            // the joint score matrix, keys along x, queries along y:
-            //   [ prefix q · prefix k (causal) |  (empty: prefix cannot see suffix) ]
-            //   [ suffix q · prefix k  = scP   |  suffix q · suffix k = scS          ]
+            // prefix q · prefix k (causal): the prefix never sees the suffix
             let attnMtx = mk({
                 t: 'i', cx: T, cz: B, cy: T, y: attn1Y,
                 xR: attnLeftX, zM: headZMid,
@@ -561,20 +547,6 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
                 deps: { dot: [[grp.vBlock, 'iy'], [attnMtxSm, 'ix']], dotLen: A },
                 dimX: DimStyle.T, dimY: DimStyle.A,
                 name: 'V Output',
-            });
-
-            let sq = (name: string, yy: number, xx: { xL?: number, xR?: number }, cx: number, tex: IRealTex | undefined) => mk({
-                t: 'i', cx, cy: nSuffix, cz: B, y: yy, ...xx, zM: headZMid,
-                access: acc(tex, [1, 0, 0], [0, 1, 0]),
-                dimX: DimStyle.T, dimY: DimStyle.None, name,
-            });
-            eHeads.push({
-                q: tok(`DiT Q (head ${i}) ${li}`, y, tailX, el?.q[i], headZMid, A),
-                scP: sq(`suffix Q . prefix K (head ${i})`, sufRowsY, { xR: attnLeftX }, T, el?.scp[i]),
-                scS: sq(`suffix Q . suffix K (head ${i})`, sufRowsY, { xL: tailX }, nSuffix, el?.scs[i]),
-                pP: sq(`suffix softmax: prefix (head ${i})`, sufRowsY, { xR: attn2LeftX }, T, el?.pp[i]),
-                pS: sq(`suffix softmax: suffix (head ${i})`, sufRowsY, { xL: attn2LeftX + seam }, nSuffix, el?.ps[i]),
-                vo: tok(`DiT V Output (head ${i}) ${li}`, vOutY, tailX, el?.vo[i], headZMid, A),
             });
 
             let ownCubes = [qWeightBlock, qBiasBlock, qBlock, attnMtx, attnMtxAgg1, attnMtxAgg2, attnMtxSm, vOutBlock];
@@ -653,16 +625,11 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             dimX: DimStyle.T, dimY: DimStyle.C,
             name: 'Attention Residual',
         });
-        let resTailX = resMidX + T * cell / 2 + seam;
-        let eO = tok(`DiT o_proj ${li}`, vFinalZ, tailX, el?.o);
-        let eRes1 = tok(`DiT Attn Residual ${li}`, vFinalZ, resTailX, el?.res1);
 
         // room for the S-shaped entry arrow ⊕ → next norm
         y = vFinalZ + C * cell + 3 * margin;
 
-        let ln2 = createLn(-lnShift, attnResidual, target?.ln_2);
-        let eLn2 = tok(`AdaRMSNorm2 (DiT ${li})`, by(ln2.lnResid), bxR(ln2.lnResid) + seam, el?.ln2);
-        let eAda2 = adaBlk(`gamma2/beta2 (t) ${li}`, by(eLn2), bxR(eLn2) + seam, 2);
+        let ln2 = createLn(0, attnResidual, target?.ln_2);
 
         // SwiGLU: gate & up weights [F, C], drawn side by side
         let mlpFcWeight = mk({
@@ -689,12 +656,6 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
 
         y += C * cell + margin;
 
-        // transposed MLP blocks: channels along x, tokens along y; the 17 suffix rows sit below
-        let fTail = (name: string, yy: number, xR: number, tex: IRealTex | undefined) => mk({
-            t: 'i', cx: F, cy: nSuffix, cz: B, y: yy, xR, zM: 0,
-            access: acc(tex, [1, 0, 0], [0, 1, 0]),
-            dimX: DimStyle.C4, dimY: DimStyle.T, name,
-        });
         let mlpFc = mk({
             t: 'i', cx: F, cz: B, cy: T, y: y,
             xR: attnLeftX, zM: 0,
@@ -713,10 +674,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             name: 'up',
             transpose: true,
         });
-        let eGate = fTail(`DiT gate ${li}`, y + T * cell + seam, attnLeftX, el?.gate);
-        let eUp = fTail(`DiT up ${li}`, y + T * cell + seam, attnLeftX - F * cell - margin, el?.up);
-
-        y += (T + nSuffix + 1) * cell + margin;
+        y += T * cell + margin;
 
         let mlpAct = mk({
             t: 'i', cx: F, cz: B, cy: T, y: y,
@@ -727,9 +685,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             name: 'SiLU(gate)·up',
             transpose: true,
         });
-        let eAct = fTail(`DiT SiLU(gate)*up ${li}`, y + T * cell + seam, attnLeftX, el?.act);
-
-        y += (T + nSuffix + 1) * cell + margin;
+        y += T * cell + margin;
 
         let mlpProjWeight = mk({
             t: 'w', cx: F, cz: 1, cy: C, y: y,
@@ -763,8 +719,6 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             dimX: DimStyle.T, dimY: DimStyle.C,
             name: 'MLP Residual',
         });
-        let eMlp = tok(`DiT MLP ${li}`, y, bxR(mlpResult) + seam, el?.mlp);
-        let eOut = tok(`DiT ${li} Out`, y, resTailX, el?.out);
 
         y += C * cell - margin;
 
@@ -780,24 +734,12 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
 
         cubes.push(...blockCubes);
 
-        let expert = {
-            ln1: eLn1, ada: eAda, o: eO, res1: eRes1, ln2: eLn2, ada2: eAda2,
-            gate: eGate, up: eUp, act: eAct, mlp: eMlp, out: eOut,
-            heads: eHeads, kv: eKv, layer: li,
-            cubes: [eLn1, eAda, ...eKv.flatMap(k => [k.k, k.v]),
-                ...eHeads.flatMap(h => [h.q, h.scP, h.scS, h.pP, h.pS, h.vo]),
-                eO, eRes1, eLn2, eAda2, eGate, eUp, eAct, eMlp, eOut],
-        };
-        expertCubesAll.push(...expert.cubes);
-        cubes.push(...expert.cubes);
-
         return {
             ln1,
             heads,
             kvGroups: groups,
             labels: [transformerLabel, projLabel, selfAttendLabel, mlpLabel, ...heads.flatMap(h => h.labels)],
             cubes: blockCubes,
-            expert,
             transformerLabel,
             projLabel,
             selfAttendLabel,
@@ -820,6 +762,296 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         };
     }
 
+    // ---- one layer of the action expert (DiT), drawn in exactly the trunk layer's visual language:
+    // same y anchors (spacing by the trunk's T), same block roles and field names. Differences are
+    // the real ones: 17 suffix tokens, AdaRMSNorm (γβ(t) beside w), q/k/v biases (no q/k norm),
+    // 16 query heads sharing 2 kv heads (8 per group), and a joint score row
+    // [prefix keys (the trunk's cached K of the same layer) | suffix keys].
+    let nHeadsE = m?.config.expert_heads ?? 16;
+    let nKvE = m?.config.expert_kv_heads ?? 2;
+    let groupSizeE = nHeadsE / nKvE;
+
+    function createExpertLayer(resMid: number, src: IBlkDef, el: IExpertLayerLink | undefined,
+            adaTex: IRealTex | undefined, li: number, trunk: ReturnType<typeof createLayer> | null) {
+        let Tt = nSuffix;
+        let eLeftX = resMid - Tt * cell / 2 - margin;
+        let adaRoom = 2 * cell + margin; // γβ(t) slot + the te(t) bus between norm and residual
+        let ln1 = createLnAt(eLeftX - adaRoom, Tt, src, el?.ln_1, { tex: adaTex, row0: 0, name: 'gamma1 beta1 (t)' });
+
+        let interGroupMargin = 3 * margin + (C * cell) / 16;
+        let qkvMargin = 1 * margin + (C * cell) / 16;
+        let slot = B * cell + qkvMargin;
+        let groupSlots = groupSizeE + 2;
+        let groupWidth = groupSlots * slot + interGroupMargin;
+
+        let attn1Y = y + A * cell + margin;
+        let vOutY = attn1Y + T * cell + margin;
+
+        let attnLeftX = eLeftX - (Tt + 2) * cell - 2 * margin;
+        let qkvValLeftX = attnLeftX - Tt * cell - margin;
+        let qkvBiasLeftX = qkvValLeftX - C * cell - margin;
+        // one joint score row: [prefix keys | suffix keys], a 1-cell seam between them
+        let scPR = attnLeftX - Tt * cell - seam;
+        let aggR = scPR - T * cell - margin;
+        let smR = aggR - cell - margin;
+        let smPR = smR - Tt * cell - seam;
+
+        // one representative head per view (bbycroft style, "x16 heads"): every head / kv group
+        // shares head 0's slots (q | K | V around z = 0); only head 0 / kv 0 are drawn
+        let slotZ = (_g: number, s: number) => (s - 1) * slot;
+        let qSlot = (_j: number) => 0;
+
+        let groups = [];
+        for (let g = 0; g < nKvE; g++) {
+            let kv = el?.kv[g];
+            let kMid = slotZ(g, 1);
+            let vMid = slotZ(g, 2);
+            let kWeightBlock = mk({
+                t: 'w', cx: C, cz: 1, cy: A, y: y, xR: qkvValLeftX, zM: kMid,
+                access: acc(kv?.kWeight, [1, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.C, dimY: DimStyle.A, name: `K Weights (kv ${g})`,
+            });
+            let vWeightBlock = mk({
+                t: 'w', cx: C, cz: 1, cy: A, y: y, xR: qkvValLeftX, zM: vMid,
+                access: acc(kv?.vWeight, [1, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.C, dimY: DimStyle.A, name: `V Weights (kv ${g})`,
+            });
+            let kBiasBlock = mk({
+                t: 'w', cx: 1, cz: 1, cy: A, y: y, xR: qkvBiasLeftX, zM: kMid,
+                access: acc(kv?.kBias, [0, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.None, dimY: DimStyle.A, small: true, name: 'k bias',
+            });
+            let vBiasBlock = mk({
+                t: 'w', cx: 1, cz: 1, cy: A, y: y, xR: qkvBiasLeftX, zM: vMid,
+                access: acc(kv?.vBias, [0, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.None, dimY: DimStyle.A, small: true, name: 'v bias',
+            });
+            let kBlock = mk({
+                t: 'i', cx: Tt, cz: B, cy: A, y: y, xR: attnLeftX, zM: kMid,
+                access: acc(kv?.k, [0, 1, 0], [1, 0, 0]),
+                deps: { dot: [[kWeightBlock, 'iy'], [ln1.lnResid, 'xi']], add: [[kBiasBlock, '0y']], dotLen: C },
+                dimX: DimStyle.T, dimY: DimStyle.A, name: `K vectors (kv ${g})`,
+            });
+            let vBlock = mk({
+                t: 'i', cx: Tt, cz: B, cy: A, y: y, xR: attnLeftX, zM: vMid,
+                access: acc(kv?.v, [0, 1, 0], [1, 0, 0]),
+                deps: { dot: [[vWeightBlock, 'iy'], [ln1.lnResid, 'xi']], add: [[vBiasBlock, '0y']], dotLen: C },
+                dimX: DimStyle.T, dimY: DimStyle.A, name: `V vectors (kv ${g})`,
+            });
+            groups.push({ kWeightBlock, vWeightBlock, kBiasBlock, vBiasBlock, kBlock, vBlock,
+                cubes: [kWeightBlock, vWeightBlock, kBiasBlock, vBiasBlock, kBlock, vBlock] });
+        }
+
+        let heads = [];
+        for (let i = 0; i < nHeadsE; i++) {
+            let g = Math.floor(i / groupSizeE);
+            let grp = groups[g];
+            let ht = el?.heads[i];
+            let headZMid = slotZ(g, qSlot(i % groupSizeE));
+            // the prefix keys / values this head reads: the trunk's kv group of the same layer
+            // (expert q head i ↔ trunk kv group ⌊i / 2⌋, the shared attention's GQA tiling)
+            let tg = trunk ? trunk.kvGroups[Math.floor(i / (nHeads / nKvHeads))] : null;
+
+            let qWeightBlock = mk({
+                t: 'w', cx: C, cz: 1, cy: A, y: y, xR: qkvValLeftX, zM: headZMid,
+                access: acc(ht?.qWeight, [1, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.C, dimY: DimStyle.A, name: `Q Weights (head ${i})`,
+            });
+            let qBiasBlock = mk({
+                t: 'w', cx: 1, cz: 1, cy: A, y: y, xR: qkvBiasLeftX, zM: headZMid,
+                access: acc(ht?.qBias, [0, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.None, dimY: DimStyle.A, small: true, name: 'q bias',
+            });
+            let qBlock = mk({
+                t: 'i', cx: Tt, cz: B, cy: A, y: y, xR: attnLeftX, zM: headZMid,
+                access: acc(ht?.q, [0, 1, 0], [1, 0, 0]),
+                deps: { dot: [[qWeightBlock, 'iy'], [ln1.lnResid, 'xi']], add: [[qBiasBlock, '0y']], dotLen: C },
+                dimX: DimStyle.T, dimY: DimStyle.A, name: `Q vectors (head ${i})`,
+            });
+            let attnMtxP = mk({
+                t: 'i', cx: T, cz: B, cy: Tt, y: attn1Y, xR: scPR, zM: headZMid,
+                access: acc(ht?.scoresP, [1, 0, 0], [0, 1, 0]),
+                deps: tg ? { dot: [[qBlock, 'yi'], [tg.kBlock, 'xi']], dotLen: A, special: BlKDepSpecial.Attention } : undefined,
+                dimX: DimStyle.T, dimY: DimStyle.T, special: BlkSpecial.Attention, transpose: true,
+                name: 'Joint Attention',
+            });
+            let attnMtx = mk({
+                t: 'i', cx: Tt, cz: B, cy: Tt, y: attn1Y, xR: attnLeftX, zM: headZMid,
+                access: acc(ht?.scoresS, [1, 0, 0], [0, 1, 0]),
+                deps: { dot: [[qBlock, 'yi'], [grp.kBlock, 'xi']], dotLen: A, special: BlKDepSpecial.Attention },
+                dimX: DimStyle.T, dimY: DimStyle.T, special: BlkSpecial.Attention, transpose: true,
+                name: '',
+            });
+            let attnMtxAgg1 = mk({
+                t: 'a', cx: 1, cz: B, cy: Tt, y: attn1Y, xR: aggR - cell, zM: headZMid,
+                access: acc(ht?.attnAgg, [0, 0, 0, 1], [0, 1, 0]),
+                deps: { add: [[attnMtxP, 'iy'], [attnMtx, 'iy']], special: BlKDepSpecial.SoftmaxAggExp },
+                dimX: DimStyle.None, dimY: DimStyle.T, small: true, name: '',
+            });
+            let attnMtxAgg2 = mk({
+                t: 'a', cx: 1, cz: B, cy: Tt, y: attn1Y, xR: aggR, zM: headZMid,
+                access: acc(ht?.attnAgg, [0, 0, 0, 0], [0, 1, 0]),
+                deps: { add: [[attnMtxP, 'iy'], [attnMtx, 'iy']], special: BlKDepSpecial.SoftmaxAggMax },
+                dimX: DimStyle.None, dimY: DimStyle.T, small: true, name: '',
+            });
+            let attnMtxSmP = mk({
+                t: 'i', cx: T, cz: B, cy: Tt, y: attn1Y, xR: smPR, zM: headZMid,
+                access: acc(ht?.probsP, [1, 0, 0], [0, 1, 0]),
+                deps: { add: [[attnMtxP, 'xy'], [attnMtxAgg1, 'iy'], [attnMtxAgg2, 'iy']], special: BlKDepSpecial.Softmax },
+                dimX: DimStyle.T, dimY: DimStyle.T, special: BlkSpecial.Attention, transpose: true,
+                name: 'Joint Softmax',
+            });
+            let attnMtxSm = mk({
+                t: 'i', cx: Tt, cz: B, cy: Tt, y: attn1Y, xR: smR, zM: headZMid,
+                access: acc(ht?.probsS, [1, 0, 0], [0, 1, 0]),
+                deps: { add: [[attnMtx, 'xy'], [attnMtxAgg1, 'iy'], [attnMtxAgg2, 'iy']], special: BlKDepSpecial.Softmax },
+                dimX: DimStyle.T, dimY: DimStyle.T, special: BlkSpecial.Attention, transpose: true,
+                name: '',
+            });
+            let vOutBlock = mk({
+                t: 'i', cx: Tt, cz: B, cy: A, y: vOutY, xR: attnLeftX, zM: headZMid,
+                access: acc(ht?.attnOut, [0, 1, 0], [1, 0, 0]),
+                deps: { dot: [[grp.vBlock, 'iy'], [attnMtxSm, 'ix']], dotLen: Tt },
+                dimX: DimStyle.T, dimY: DimStyle.A, name: 'V Output',
+            });
+
+            let ownCubes = [qWeightBlock, qBiasBlock, qBlock, attnMtxP, attnMtx, attnMtxAgg1, attnMtxAgg2,
+                attnMtxSmP, attnMtxSm, vOutBlock];
+            let headCubes = [...ownCubes, ...grp.cubes];
+            let headLabel = mkLabel(headCubes);
+            let qLabel = mkLabel([qWeightBlock, qBiasBlock, qBlock]);
+            let kLabel = mkLabel([grp.kWeightBlock, grp.kBiasBlock, grp.kBlock]);
+            let vLabel = mkLabel([grp.vWeightBlock, grp.vBiasBlock, grp.vBlock]);
+            let biasLabel = mkLabel([qBiasBlock, grp.kBiasBlock, grp.vBiasBlock]);
+            let mtxLabel = mkLabel([attnMtxP, attnMtx, attnMtxAgg1, attnMtxAgg2, attnMtxSmP, attnMtxSm]);
+            let vectorLabel = mkLabel([vOutBlock]);
+
+            heads.push({
+                kvGroup: g,
+                qWeightBlock, kWeightBlock: grp.kWeightBlock, vWeightBlock: grp.vWeightBlock,
+                qBiasBlock, kBiasBlock: grp.kBiasBlock, vBiasBlock: grp.vBiasBlock,
+                qBlock, kBlock: grp.kBlock, vBlock: grp.vBlock,
+                attnMtxP, attnMtx, attnMtxAgg1, attnMtxAgg2, attnMtxSmP, attnMtxSm, vOutBlock,
+                trunkK: tg?.kBlock ?? null, trunkV: tg?.vBlock ?? null,
+                qLabel, kLabel, vLabel, biasLabel, mtxLabel, vectorLabel, headLabel,
+                cubes: headCubes,
+                ownCubes,
+                labels: [qLabel, kLabel, vLabel, biasLabel, mtxLabel, vectorLabel, headLabel],
+            });
+        }
+        // the softmax'd prefix part also feeds V Output (with the trunk's cached V): visual dep only
+        let attnCubes = [...groups.flatMap(g => g.cubes), ...heads.flatMap(h => h.ownCubes)];
+
+        let vOutCombined = mk({
+            t: 'i', cx: Tt, cz: B, cy: C, y: vOutY,
+            xR: attnLeftX, zF: -groupWidth * nKvE / 2,
+            dimX: DimStyle.T, dimY: DimStyle.C, hidden: true, name: 'V Output Combined',
+        });
+        let vFinalZ = Math.max(vOutY + A * cell + 2 * margin, y + C * cell + margin);
+
+        let projWeight = mk({
+            t: 'w', cx: C, cz: 1, cy: C, y: vFinalZ, xR: qkvValLeftX, zM: 0,
+            access: acc(el?.oWeight, [1, 0, 0], [0, 1, 0]),
+            dimX: DimStyle.C, dimY: DimStyle.C, name: 'o_proj Weights',
+        });
+        let attnOut = mk({
+            t: 'i', cx: Tt, cz: B, cy: C, y: vFinalZ, xR: attnLeftX, zM: 0,
+            access: acc(el?.oOut, [0, 1, 0], [1, 0, 0]),
+            deps: {
+                dot: [[projWeight, 'iy'], [vOutCombined, 'xi']], dotLen: C,
+                add: heads.map(h => [h.vOutBlock, 'xi'] as [IBlkDef, string]),
+            },
+            dimX: DimStyle.T, dimY: DimStyle.C, name: 'Attention Output',
+        });
+        let attnResidual = mk({
+            t: 'i', cx: Tt, cz: B, cy: C, y: vFinalZ, xM: resMid, zM: 0,
+            access: acc(el?.attnResid, [0, 1, 0], [1, 0, 0]),
+            deps: { add: [[attnOut, 'xy'], [src, 'xy']] },
+            dimX: DimStyle.T, dimY: DimStyle.C, name: 'Attention Residual',
+        });
+
+        y = vFinalZ + C * cell + 3 * margin;
+
+        let ln2 = createLnAt(eLeftX - adaRoom, Tt, attnResidual, el?.ln_2, { tex: adaTex, row0: 2, name: 'gamma2 beta2 (t)' });
+
+        let mlpFcWeight = mk({
+            t: 'w', cx: F, cz: 1, cy: C, y: y, xR: attnLeftX, zM: 0,
+            access: acc(el?.gateWeight, [0, 1, 0], [1, 0, 0]),
+            dimX: DimStyle.C4, dimY: DimStyle.C, name: 'gate_proj Weights',
+        });
+        let mlpUpWeight = mk({
+            t: 'w', cx: F, cz: 1, cy: C, y: y, xR: attnLeftX - F * cell - margin, zM: 0,
+            access: acc(el?.upWeight, [0, 1, 0], [1, 0, 0]),
+            dimX: DimStyle.C4, dimY: DimStyle.C, name: 'up_proj Weights',
+        });
+
+        y += C * cell + margin;
+
+        let mlpFc = mk({
+            t: 'i', cx: F, cz: B, cy: Tt, y: y, xR: attnLeftX, zM: 0,
+            access: acc(el?.gate, [1, 0, 0], [0, 1, 0]),
+            deps: { dot: [[mlpFcWeight, 'xi'], [ln2.lnResid, 'yi']], dotLen: C },
+            dimX: DimStyle.C4, dimY: DimStyle.T, name: 'gate', transpose: true,
+        });
+        let mlpUp = mk({
+            t: 'i', cx: F, cz: B, cy: Tt, y: y, xR: attnLeftX - F * cell - margin, zM: 0,
+            access: acc(el?.up, [1, 0, 0], [0, 1, 0]),
+            deps: { dot: [[mlpUpWeight, 'xi'], [ln2.lnResid, 'yi']], dotLen: C },
+            dimX: DimStyle.C4, dimY: DimStyle.T, name: 'up', transpose: true,
+        });
+
+        y += T * cell + margin;
+
+        let mlpAct = mk({
+            t: 'i', cx: F, cz: B, cy: Tt, y: y, xR: attnLeftX, zM: 0,
+            access: acc(el?.act, [1, 0, 0], [0, 1, 0]),
+            deps: { add: [[mlpFc, 'xy'], [mlpUp, 'xy']], special: BlKDepSpecial.SwiGlu },
+            dimX: DimStyle.C4, dimY: DimStyle.T, name: 'SiLU(gate)·up', transpose: true,
+        });
+
+        y += T * cell + margin;
+
+        let mlpProjWeight = mk({
+            t: 'w', cx: F, cz: 1, cy: C, y: y, xR: attnLeftX, zM: 0,
+            access: acc(el?.downWeight, [1, 0, 0], [0, 1, 0]),
+            dimX: DimStyle.C4, dimY: DimStyle.C, name: 'down_proj Weights',
+        });
+        let mlpResult = mk({
+            t: 'i', cx: Tt, cz: B, cy: C, y: y, xL: attnLeftX + margin, zM: 0,
+            access: acc(el?.mlpOut, [0, 1, 0], [1, 0, 0]),
+            deps: { dot: [[mlpProjWeight, 'iy'], [mlpAct, 'ix']], dotLen: F },
+            dimX: DimStyle.T, dimY: DimStyle.C, name: 'MLP Result',
+        });
+        let mlpResidual = mk({
+            t: 'i', cx: Tt, cz: B, cy: C, y: y, xM: resMid, zM: 0,
+            access: acc(el?.mlpResid, [0, 1, 0], [1, 0, 0]),
+            deps: { add: [[mlpResult, 'xy'], [attnResidual, 'xy']] },
+            dimX: DimStyle.T, dimY: DimStyle.C, name: `DiT ${li} Out`,
+        });
+
+        y += C * cell - margin;
+
+        let mlpCubes = [...ln2.cubes, mlpFcWeight, mlpUpWeight, mlpFc, mlpUp, mlpAct, mlpProjWeight, mlpResult, mlpResidual];
+        let projCubes = [projWeight, attnOut, attnResidual];
+        let blockCubes = [...ln1.cubes, ...attnCubes, ...projCubes, ...mlpCubes];
+
+        let transformerLabel = mkLabel(blockCubes);
+        let selfAttendLabel = mkLabel([...ln1.cubes, ...attnCubes, ...projCubes]);
+        let projLabel = mkLabel(projCubes);
+        let mlpLabel = mkLabel(mlpCubes);
+
+        return {
+            layer: li,
+            ln1, heads, kvGroups: groups,
+            ada: ln1.ada!, ada2: ln2.ada!,
+            projWeight, attnOut, attnResidual, ln2,
+            mlpFcWeight, mlpUpWeight, mlpFc, mlpUp, mlpAct, mlpProjWeight, mlpResult, mlpResidual,
+            transformerLabel, selfAttendLabel, projLabel, mlpLabel,
+            labels: [transformerLabel, projLabel, selfAttendLabel, mlpLabel, ...heads.flatMap(h => h.labels)],
+            cubes: blockCubes,
+        };
+    }
+
     let blockHalfMargin = 2 * margin;
 
     y += blockHalfMargin;
@@ -832,10 +1064,18 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
     let blocks: ReturnType<typeof createLayer>[] = [];
     let blockSrc = residual0;
 
-    // the DiT's suffix input = the tail of the prefix input embedding: one concatenated sequence
+    // the expert tower stands right of the trunk tower, its layer i level with trunk layer i
+    // (they meet in layer i's joint attention). Its x offset: a dry-run layer measures its left extent.
+    let yProbe = y;
+    let probe = createExpertLayer(0, residual0, undefined, undefined, -1, null);
+    y = yProbe;
+    let eDX = T * cell / 2 + 4 * margin - Math.min(...probe.cubes.map(c => bx(c)));
+
+    // the DiT's suffix input (17 tokens: state token + 16 noisy action tokens), level with the
+    // prefix's input embedding, at the head of the expert's residual stream
     let expertIn = mk({
         t: 'i', cx: nSuffix, cy: C, cz: B, y: by(residual0),
-        xL: bxR(residual0) + seam, zM: 0,
+        xM: eDX, zM: 0,
         access: acc(m?.expertIn, [0, 1, 0], [1, 0, 0]),
         dimX: DimStyle.T, dimY: DimStyle.C,
         name: 'DiT Suffix In',
@@ -925,6 +1165,8 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         }));
     }
 
+    let expertLayers: ReturnType<typeof createExpertLayer>[] = [];
+    let expertSrc = expertIn;
     for (let i = 0; i < nBlocks; i++) {
         if (blockIdxInColumn >= blocksPerColumn) {
             blockIdxInColumn = 0;
@@ -936,33 +1178,38 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         }
 
         y += blockHalfMargin;
-        let block = createLayer(blockSrc, m?.blocks[i], m?.expertLayers[i], fmM?.ada[i], i);
+        let y0 = y;
+        let block = createLayer(blockSrc, m?.blocks[i]);
+        let y1 = y;
+        y = y0;
+        let ex = createExpertLayer(resMidX + eDX, expertSrc, m?.expertLayers[i], fmM?.ada[i], i, block);
+        y = Math.max(y, y1);
         if (i === 0) {
-            let all = [...block.cubes, ...block.expert.cubes];
+            let all = [...block.cubes, ...ex.cubes];
             let minX = Math.min(...all.map(c => c.x));
             let maxX = Math.max(...all.map(c => c.x + c.dx));
             columnWidth = (maxX - minX) + 8 * margin;
         }
         blocks.push(block);
+        expertLayers.push(ex);
         blockSrc = block.mlpResidual;
+        expertSrc = ex.mlpResidual;
         y += blockHalfMargin;
         blockIdxInColumn++;
     }
-    let expertLayers = blocks.map(b => b.expert);
 
     y += blockHalfMargin;
-    let ln_f = createLn(-lnShift, blockSrc, m?.ln_f);
+    let yF = y;
+    let ln_f = createLn(0, blockSrc, m?.ln_f);
+    let yF1 = y;
+    y = yF;
+    // the DiT's final RMSNorm (plain, not t-modulated), level with the trunk's ln_f
+    let expertNorm = createLnAt(resMidX + eDX - nSuffix * cell / 2 - margin, nSuffix, expertSrc, m?.expertNorm);
+    expertNorm.lnResid.name = 'DiT final RMSNorm';
+    let expertOut = expertNorm.lnResid;
+    y = Math.max(y, yF1);
 
     cubes.push(...ln_f.cubes);
-
-    // the DiT's final RMSNorm (not t-modulated) is the tail of ln_f
-    let expertOut = mk({
-        t: 'i', cx: nSuffix, cy: C, cz: B, y: by(ln_f.lnResid),
-        xL: bxR(ln_f.lnResid) + seam, zM: 0,
-        access: acc(m?.expertOut, [0, 1, 0], [1, 0, 0]),
-        dimX: DimStyle.T, dimY: DimStyle.C,
-        name: 'DiT final RMSNorm',
-    });
 
     y += C * cell + margin;
 
@@ -1123,12 +1370,14 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
     let headCubes = [hStar, lmHeadWeight, logits, logitsAgg1, logitsAgg2, logitsSoftmax,
         doneWeight, doneLogits, doneAgg1, doneAgg2, doneProbs];
     let actionCubes = [actionVelocity, actionWeight, actionChunk, actionX1];
-    let ditIoCubes = [...fmCubes, expertIn, expertOut, ...strip];
-    cubes.push(...ditIoCubes);
-    cubes.push(...headCubes, ...actionCubes);
-    // every block that belongs to the DiT (suffix tails, its inputs / outputs, the strip)
-    let ditCubes = [...ditIoCubes, ...expertCubesAll, actionVelocity, actionWeight, actionChunk, actionX1];
-    let expertCubes = [...fmCubes, expertIn, ...expertCubesAll, expertOut];
+    // cube order = compute order: the prefix (trunk + heads) is complete before the suffix
+    // starts, so the trunk chapters' sweeps never walk into the expert
+    let expertLayerCubes = expertLayers.flatMap(e => e.cubes);
+    let expertCubes = [...fmCubes, expertIn, ...expertLayerCubes, ...expertNorm.cubes];
+    cubes.push(...headCubes);
+    cubes.push(...expertCubes, ...actionCubes, ...strip);
+    // every block that belongs to the DiT (its inputs, layers, final norm, outputs, the strip)
+    let ditCubes = [...expertCubes, ...actionCubes, ...strip];
 
     for (let i = 0; i < cubes.length; i++) {
         cubes[i].idx = i;
@@ -1165,6 +1414,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         actionField,
         expertIn,
         expertLayers,
+        expertNorm,
         ditCubes,
         strip,
         // set by the decode chapter: the current Euler step k (the return arrow v_k → board k+1)
@@ -1183,7 +1433,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         // arrows into `pending` (not yet computed) blocks are faded
         flow: null as null | { active: Set<IBlkDef>, pending: Set<IBlkDef> },
         model: vlaGpuModel,
-        labels: [embedLabel, ...blocks.flatMap(b => b.labels), headsLabel, actionLabel, expertLabel],
+        labels: [embedLabel, ...blocks.flatMap(b => b.labels), ...expertLayers.flatMap(e => e.labels), headsLabel, actionLabel, expertLabel],
         weightCount,
         shape,
         extraSources: {
