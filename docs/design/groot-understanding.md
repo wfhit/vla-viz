@@ -5,7 +5,8 @@
 > **证据等级**：
 > - **[W]** 由权重头（safetensors 形状 / 逐槽统计）直接证实；
 > - **[C]** 由本地 config 文件证实（`config.json`、`experiment_cfg/*`、`processor_config.json`、`embodiment_id.json`）；
-> - **[S6]** 来自 Isaac-GR00T `n1.6-release` 源码（见 `three-viz-plan.md` §1.1）。N1.7 源码本地没有、零下载约束下不拉取，**实现导出器时必须逐条复核**。
+> - **[S7]** 由 Isaac-GR00T N1.7 源码证实（浅克隆 `/tmp/Isaac-GR00T`，main @ `944fe70`；代码不属于权重，Frank 裁决不违反零下载）。行号形如 `n1d7:405` = `gr00t/model/gr00t_n1d7/gr00t_n1d7.py:405`，`dit:` = `gr00t/model/modules/dit.py`，`emb:` = `gr00t/model/modules/embodiment_conditioned_mlp.py`，`proc:` = `gr00t/model/gr00t_n1d7/processing_gr00t_n1d7.py`，`qb:` = `gr00t/model/modules/qwen3_backbone.py`。
+> - 原先标 [S6]（N1.6 源码）的条目已全部用 N1.7 源码复核，见 §4。
 >
 > 已读 `G/EXPLAINABILITY.md`：它是 NVIDIA 模型卡式的可解释性表（用途、输入输出、风险、指标），**不含任何内部结构信息**，只确认"视觉+语言+本体感知 → 连续动作向量"这一层。结构事实全部来自下面的权重和 config。
 
@@ -49,7 +50,7 @@ x_1 = 动作块（取后 40 个动作 token 的输出）
 | state 正弦编码 | true | **false** | [C] `config.json` |
 | embodiment 槽 | 32 | 32 | [W] `[32, …]` |
 
-`config.json` 与 `experiment_cfg/final_model_config.json` 有冲突（horizon 40 vs 50，维度 132 vs 128，sincos false vs true）。**以 `config.json` 为准**，因为维度 132 与权重形状一致；horizon 40 需在导出时用 `position_embedding` 实际使用长度复核。
+`config.json` 与 `experiment_cfg/final_model_config.json` 有冲突（horizon 40 vs 50，维度 132 vs 128，sincos false vs true）。**以 `config.json` 为准**，因为维度 132 与权重形状一致；horizon 40 已由 N1.7 config 类默认值证实（§4.6）。
 
 ---
 
@@ -57,14 +58,14 @@ x_1 = 动作块（取后 40 个动作 token 的输出）
 
 ### 2.1 System 2：VLM 主干（只跑一次）
 - **视觉塔**（24 块）：`norm1 → attn(qkv 1024→3072, proj) → norm2 → MLP(1024→4096→1024)`，LayerNorm 带偏置。[W]
-- **merger**：2×2 空间合并后 LN(1024)·4 → 4096 → 2048。另有 3 个 deepstack merger，把视觉塔中间层特征加到语言模型前几层（Qwen3-VL 机制）。[W] 注入的具体层号 [S6 无，需复核 Qwen3-VL 源码]。
+- **merger**：2×2 空间合并后 LN(1024)·4 → 4096 → 2048。另有 3 个 deepstack merger，把视觉塔第 5/11/17 块特征加到语言模型第 0/1/2 层的图像 token 上（§4.4）。[W] 注入的具体层号 [S6 无，需复核 Qwen3-VL 源码]。
 - **语言模型**（16 层）：标准 Qwen3 块 `RMSNorm → GQA(q/k_norm, RoPE) → 残差 → RMSNorm → SwiGLU → 残差`。`lm_head` 权重还在文件里但前向用不到（select_layer=16 取的是第 16 层隐状态）。[W][C]
 - **vlln**：LayerNorm(2048)。[W]
 - **vl_self_attention**（4 块）：DiT 风格的 BasicTransformerBlock，但**不带时间条件**（norm1/norm3 是普通 LayerNorm），对整段 VL token 做自注意力后作为 DiT 的 K/V 源。[W]
 
 ### 2.2 本体适配（按 embodiment 分槽，32 槽）
 - `state_encoder`：132 → 1024 → 1536（两层 MLP，[32, in, out] 批量权重，按槽索引）。[W]
-- `action_encoder`：W1 132→1536；与时间 τ 的正弦编码拼接 → W2 3072→1536（swish）；W3 1536→1536。[W] 结构 [S6]
+- `action_encoder`：W1 132→1536；与时间 τ 的正弦编码拼接 → W2 3072→1536（swish）；W3 1536→1536。[W] 结构 [S7]
 - `position_embedding [1024, 1536]`：加到动作 token 上。[W]
 - `action_decoder`：1024 → 1024 → 132。[W]
 - 这就是 BEHAVIOR 官方 baseline 用来接 R1 Pro（state 61 → 隐层、action 23 → 隐层）的机制：每个本体占一个槽，不同维度在槽内各自投影。[C] 见 §3。
@@ -75,15 +76,15 @@ x_1 = 动作块（取后 40 个动作 token 的输出）
 - **交替**（权重已证实）：`attn1.to_k/to_v` 输入宽度逐块为 `2048, 1536, 2048, 1536, …` [W]
   - **偶数块**（0,2,…,30）：**交叉注意力**，Q 来自动作序列（1536），K/V 来自 VL token（2048）。
   - **奇数块**（1,3,…,31）：**自注意力**，只在 state+action 序列内部。
-  - 偶数块里再交替：`attend_text_every_n_blocks=2` → idx%4==0 只看文本 token，idx%4==2 只看图像 token。[C] `final_model_config.json` + [S6]
+  - 偶数块里再交替：`attend_text_every_n_blocks=2` → idx%4==0 只看文本 token，idx%4==2 只看图像 token。[C] `final_model_config.json` + [S7]
 - **收尾**：`proj_out_1`（SiLU(temb) → 3072 → shift/scale）→ LayerNorm → `proj_out_2`（1536→1024）→ `action_decoder[槽]`。[W]
-- 专家序列只有 state token + 动作 token，**VL token 不进序列**，只经交叉注意力读。[S6]
+- 专家序列只有 state token + 动作 token，**VL token 不进序列**，只经交叉注意力读。[S7]
 
 ### 2.4 流匹配解码
 - `num_inference_timesteps = 4`，`num_timestep_buckets = 1000`。[C]
-- 循环 k=0..3：τ=k/4，t_disc = 0, 250, 500, 750；`x ← x + ¼·v`；**t=0 是噪声，向上积分**，与 k005b/π0 方向相反。[S6]
+- 循环 k=0..3：τ=k/4，t_disc = 0, 250, 500, 750；`x ← x + ¼·v`；**t=0 是噪声，向上积分**，与 k005b/π0 方向相反。[S7]
 - 训练时间律：Beta(1.5, 1)，`noise_s = 0.999`。[C] 与 k005b v2 同律、方向相反——对照章的看点。
-- 主干对一次推理只跑一次，DiT 跑 4 次。[S6]
+- 主干对一次推理只跑一次，DiT 跑 4 次。[S7]
 
 ---
 
@@ -113,10 +114,16 @@ x_1 = 动作块（取后 40 个动作 token 的输出）
 
 ---
 
-## 4. 实现前待复核清单（N1.7 源码可用时）
-1. DiT 偶数块的文本/图像交替规则（idx%4）与 vl_self_attention 的位置（vlln 之前还是之后）。
-2. 解码方向与 t_disc 取值（N1.6：0,250,500,750，向上积分）。
-3. action_encoder 中 τ 的编码方式与 W2 拼接顺序。
-4. deepstack 注入的语言层号；视频 2 帧时间 patch 在单帧推理时的处理（run 名含 `2frame`）。
-5. 槽号用 23 还是 24（以加载代码实际读取的映射表为准；两者都未训练 BEHAVIOR，结论不变）。
-6. horizon 40 的实际取值。
+## 4. N1.7 源码复核结果（原待复核 6 条，全部关闭）
+
+1. **DiT 交替规则** ✅ `dit:AlternateVLDiT.forward`：idx 奇数 → 自注意力（`encoder_hidden_states=None`）；idx 偶数 → 交叉注意力，`idx % (2·attend_text_every_n_blocks) == 0`（即 idx%4==0）用 **非图像 token 掩码**（文本），否则（idx%4==2）用 **图像 token 掩码**。`attend_text_every_n_blocks=2` 是 N1.7 config 类默认值（`configs/model/gr00t_n1d7.py:89`）。
+   **vl_self_attention 位置** ✅ `n1d7:process_backbone_output`：`vlln` **之后**，即 主干输出 → LayerNorm → 4 块自注意力 → DiT 的 K/V 源。
+2. **解码方向** ✅ `n1d7:get_action_with_features`：`actions = randn(B, 40, 132)`；`for t in range(4): t_cont = t/4; t_disc = int(t_cont·1000)` → **0, 250, 500, 750**；`actions += (1/4)·v`；取 `pred[:, -40:]`。t=0 噪声，**向上积分**。训练 `x_t = (1−t)·noise + t·a`，目标 `a − noise`，`t = (1 − Beta(1.5,1))·0.999`。
+3. **action_encoder** ✅ `emb:MultiEmbodimentActionEncoder`：`a = W1(x)`（无激活）；τ 的正弦编码（宽 1536，`[sin, cos]` 拼接，基 10000，τ = t_disc 整数 0–750）；`cat([a, τ])` → `swish(W2)` → `W3`。之后加 `position_embedding[0:40]`。state_encoder / action_decoder 是 `Linear → ReLU → Linear`（`emb:CategorySpecificMLP`）。
+   DiT 时间路径另走 `TimestepEncoder`：`Timesteps(256, flip_sin_to_cos, shift=1)` → `Linear 256→1536 → SiLU → Linear` = temb（`dit:TimestepEncoder`）。
+   **AdaLN 细节**：块内 `scale, shift = Linear(SiLU(temb)).chunk(2)`，`x = LN(x)(1+scale)+shift`（LN 无仿射）；**收尾顺序相反**：`shift, scale = proj_out_1(SiLU(temb)).chunk(2)`，`norm_out` 为无仿射 LN（eps 1e-6）。FF 激活 `gelu-approximate`，norm3 无仿射。
+4. **deepstack** ✅ 本地 transformers 5.19 `qwen3_vl/modeling_qwen3_vl.py`：视觉塔第 **5、11、17** 块输出经 3 个 deepstack merger，加到语言模型第 **0、1、2** 层输出的图像 token 位置（`_deepstack_process`）。配置取自本地 `Qwen3-VL-2B-Instruct`（与权重形状逐项一致：24 块/1024/patch 16/temporal 2/merge 2/deepstack [5,11,17]；文本 2048/16Q/8KV/6144/vocab 151936；Cosmos-Reason2 未在本地，其 config/tokenizer 用同架构 Qwen3-VL-2B 代替——**导出时记录此替换**）。
+   **主干输出** ✅ `qb:forward`：`hidden_states[-1]`；`qb:145` 把语言层 pop 到 16 层；transformers 的 `capture_outputs(tie_last_hidden_states=True)` 把 `hidden_states[-1]` 换成 `last_hidden_state`，**即含最终 RMSNorm**（`language_model.norm.weight` 在权重里）。`image_mask = input_ids == image_token_id(151655)`。
+   **图像** ✅ `proc:_apply_vlm_processing`：每个相机视角作为一张独立 `image` 进 chat template（再接文本），Qwen3-VL 图像处理器把单帧在时间维复制成 2 帧以匹配 temporal patch 2。256² → 16×16 patch → 2×2 merge → **每视角 64 个视觉 token**，3 视角 192 个。语言先 `lower()` 并去标点（`formalize_language`）。
+5. **槽号** ✅ 运行时 `proc` 优先读 checkpoint 自带的 `embodiment_id.json`（`proc:829-850`），`sim_behavior_r1_pro → 23`。当前源码内置表（`proc:_PROJECTOR_INDEX_GROUPS`）的训练槽为 24 droid / 25 g1 / 26 R1 Pro Sharpa / 27 xdof，与 §3 的权重统计（24–27 偏离初始化）完全吻合；槽 23 未训练（`CategorySpecificLinear` 初始化即 `0.02·randn`，`emb:`，与观测 std 0.0200 一致）。
+6. **horizon** ✅ 40（config 类默认 + `config.json`）。`statistics.json` 里没有 `sim_behavior_r1_pro` 的归一化统计 → state 归一化改用 BEHAVIOR 数据集自带 `index/stats.json`（与 k005b 同源），导出 JSON 中记录；输出动作因适配槽未训练不做反归一化，按归一化空间展示。
