@@ -101,9 +101,11 @@ export function walkthrough11_FlowMatching(args: IWalkthroughArgs) {
     let nL = el.length;
     let K = fs?.K ?? 10;
     let ckpt = fs ? `step_${fs.checkpointStep}` : 'step_130000';
-    let actionBlocks = [L.expertOut, L.actionWeight, L.actionVelocity, L.actionX1, L.actionChunk];
+    let actionBlocks = [L.expertOut, L.ditOut, L.decH, L.actionWeight, L.actionVelocity, L.actionX1, L.actionChunk]
+        .filter((b): b is IBlkDef => !!b && !b.absent);
     let fBox = fieldBox(L);
-    let kvOf = (i: number) => L.blocks[i].kvGroups.flatMap(g => [g.kBlock, g.vBlock]);
+    // what the expert reads from the trunk: layer i's K/V (joint attention) or the VL tokens (GR00T)
+    let kvOf = (i: number) => L.crossDit ? (L.vlOut ? [L.vlOut] : []) : L.blocks[i].kvGroups.flatMap(g => [g.kBlock, g.vBlock]);
     let e0 = el[0], b0 = L.blocks[0];
     let eh = e0.heads[0];
     let S = L.strip;
@@ -115,13 +117,16 @@ export function walkthrough11_FlowMatching(args: IWalkthroughArgs) {
     // real values: suffix token 1 (the first action token), window channel c
     let F = state.page.facts!;
     let pi0 = F.id === 'pi0';
+    let groot = F.id === 'groot';
+    let ehd = cfg?.expert_head_dim ?? cfg?.head_dim ?? 128;
+    let ada2s = el.map(e => e.ada2).filter((b): b is IBlkDef => !!b);
     let fmVis = fm.cubes.filter(c => !c.absent);
     let el0 = m?.expertLayers[0];
     let ada0 = m?.fm.ada[0].localBuffer;
     // ada rows per norm: [γ, β] (k005b) or [scale, shift, gate] (pi0)
     let R = L.variant.ada_rows;
-    let wc = ada0 ? ada0.length / (2 * R) : 64;
-    let adaW = pi0 ? 'scale/shift/gate' : 'γβ';
+    let wc = ada0 ? ada0.length / ((e0.ada2 ? 2 : 1) * R) : 64;
+    let adaW = pi0 ? 'scale/shift/gate' : groot ? 'scale/shift' : 'γβ';
     let at = (t: { localBuffer: Float32Array } | undefined, r: number, c: number) => t?.localBuffer[r * wc + c];
     let st = (i: number) => {
         let s = m?.fm.ada[i].meta.stats;
@@ -130,7 +135,7 @@ export function walkthrough11_FlowMatching(args: IWalkthroughArgs) {
     let xin = m?.expertIn.localBuffer[wc], o10 = at(el0?.oOut, 1, 0), r10 = at(el0?.attnResid, 1, 0);
     let mlp10 = at(el0?.mlpOut, 1, 0), out10 = at(el0?.mlpResid, 1, 0);
     let gA = ada0?.[2 * wc], gF = ada0?.[5 * wc];
-    let preStamp = pi0 ? '' : `（数据说明：本组激活来自 ${ckpt} 旧权重、t = 1 的一次前向；t = 1 正是它训练时见过的分布，但仍属 pre-stamp 预览，step_160000 印章检查点落盘后会换数据。）`;
+    let preStamp = pi0 || groot ? '' : `（数据说明：本组激活来自 ${ckpt} 旧权重、t = 1 的一次前向；t = 1 正是它训练时见过的分布，但仍属 pre-stamp 预览，step_160000 印章检查点落盘后会换数据。）`;
     // the trunk recedes in the one-layer chapters (it is the prefix the expert reads)
     let dimTrunk = (keep: IBlkDef[], level: number) => dimExcept(L, [...dit, ...keep], level);
 
@@ -139,7 +144,15 @@ export function walkthrough11_FlowMatching(args: IWalkthroughArgs) {
     case Phase.D0_Towers: {
         let pair0 = [L.residual0, L.expertIn, ...b0.ln1.cubes, b0.attnResidual, b0.mlpResidual, ...eMain(L, 0)];
         initialFrame(state, pair0, 270, 6, { fill: 1.2 });
-        if (pi0) commentary(wt, null, 0)`
+        if (groot) commentary(wt, null, 0)`
+
+这一章组讲动作分支：GR00T 的 DiT 动作头与流匹配（flow matching）。
+
+GR00T N1.7 里同样有两个 Transformer。左边是前面几章拆开过的主干 ${F.trunkName}：${cfg?.vlsa ? cfg.n_layer - cfg.vlsa.n_layer : 16} 层语言模型，接 final RMSNorm 和 vlln（LayerNorm），再接 ${cfg?.vlsa?.n_layer ?? 4} 块 VL 自注意力（vl_self_attention），共 ${cfg?.n_layer ?? 20} 层；右边是第二座塔：${F.expertName}，${nL} 个 DiT 块，用时间 t 做条件。
+
+两座塔用同一套画法。DiT 每一块也是：Norm → Q/K/V → 注意力 → softmax·V → o_proj → ⊕ → Norm → MLP → ⊕。与 k005b、π0.5 的专家有三处不同：偶数块是交叉注意力（Q 来自动作序列，K/V 来自主干输出的 VL token），奇数块是自注意力；只有第一个 Norm 是带时间条件的 ${F.adaName}；MLP 是 GELU（fc1 / fc2）。
+`;
+        else if (pi0) commentary(wt, null, 0)`
 
 这一章组讲动作分支：动作专家与流匹配（flow matching）。
 
@@ -165,7 +178,18 @@ k005b 里有两个 Transformer。左边是前面几章一层层拆开过的主�
             for (let X of [...L.blocks, ...el]) X.transformerLabel.visible = tPull.t;
             L.towersLabel.visible = tPull.t;
         }
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+两座塔并排画，但不逐层配对：主干先完整跑一遍（一次推理只跑一次），它最后输出的 ${L.vlOut ? c_blockRef('VL token', L.vlOut) : 'VL token'} 沿 VL 总线送到 ${el.filter(e => e.kind !== 'self').length} 个交叉块的 K/V 入口。这与 k005b、π0.5 的“专家第 i 层读主干第 i 层”不同。
+
+主干 ↔ DiT（真实配置）：
+隐藏维 ${F.dModel} ↔ ${F.expertD}
+token：主干 ${cfg?.T_prefix ?? 216} 个（${cfg?.n_visual_tokens ?? 192} 个图像 + ${cfg ? cfg.T_prefix - cfg.n_visual_tokens : 24} 个文本，图中 ${L.shape.T} 列窗口）↔ DiT ${F.nSuffix} 个（1 个 state token + ${H} 个动作 token）
+注意力：${F.nHead} 个 Q 头 / ${F.nKv} 组 KV（GQA）↔ ${F.expertHeads} 个头 × head_dim ${ehd}（MHA，Q/K/V 带偏置）
+MLP：SwiGLU ${F.ffn} ↔ GELU ${F.expertFfn}
+Norm：RMSNorm ↔ ${F.adaName}（scale/shift 随 t 变化）+ 无参数 LayerNorm
+`;
+        else if (pi0) commentary(wt)`
 
 两座塔各 ${nPairs} 层，第 i 层与第 i 层同高并排：它们在这一层共用一次联合注意力（D3），这就是耦合。
 
@@ -189,13 +213,22 @@ Norm：RMSNorm ↔ AdaRMSNorm（γβ 随 t 变化）
 `;
         breakAfter();
         let tBus = afterTime(null, 1.5);
-        let busView = [L.expertIn, ...fmVis, ...el.slice(0, 2).flatMap(e => [e.ada, e.ada2, e.ln1.lnResid, e.attnResidual, e.mlpResidual])];
+        let busView = [L.expertIn, ...fmVis, ...el.slice(0, 2).flatMap(e => [e.ada, ...(e.ada2 ? [e.ada2] : []), e.ln1.lnResid, e.attnResidual, e.mlpResidual])];
         frameTo(state, tBus, busView, 270, 6, { fill: 1.1 });
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+DiT 塔多出来的是三样注解：
+① 顶部的输入簇：${c_blockRef('state', fm.state75)} 经 state_encoder 成为 1 个 state token；${c_blockRef('x_t', fm.x1)} 经 action_encoder（与 τ = sincos(t) 拼接）再加位置嵌入成为 ${H} 个动作 token；两者拼成 ${c_blockRef('DiT Suffix In', L.expertIn)}，D1 讲。
+② 青色的时间总线：t 经 Timesteps 和两层 MLP 得到 ${c_blockRef('temb', fm.cond)}，送到每块 ${F.adaName} 旁的 scale/shift 小块（${c_blockRef('第 0 块', e0.ada)}），D2 讲。
+③ VL 总线：主干输出接到每个交叉块的 K/V，D3 讲。
+
+D2–D5 按主干章的节奏把 DiT 第 0 块逐个子层展开；D6 走完 ${nL} 块；D7 是 ${K} 步 Euler 解码。
+`;
+        else if (pi0) commentary(wt)`
 
 专家塔多出来的只有两样注解：
 ① 顶部的输入：${c_blockRef('x_t', fm.x1)} 经 ${c_blockRef('action_in_proj', fm.actionInW)} 直接成为 ${F.nSuffix} 个动作 token，进入 ${c_blockRef('Expert Suffix In', L.expertIn)}。π0.5 没有状态 token：本体状态已离散化成整数写进 prompt 文本，由主干读（见输入嵌入章）。D1 讲。
-② 青色的时间总线：${c_blockRef('te = sincos(t)', fm.timeEmb)} 经 time MLP 得到 ${c_blockRef('cond', fm.cond)}，沿总线送到每层两个 Norm 旁边的 scale/shift/gate 小块（${c_blockRef('第一组', e0.ada)}、${c_blockRef('第二组', e0.ada2)}），D2 讲。
+② 青色的时间总线：${c_blockRef('te = sincos(t)', fm.timeEmb)} 经 time MLP 得到 ${c_blockRef('cond', fm.cond)}，沿总线送到每层两个 Norm 旁边的 scale/shift/gate 小块（${c_blockRef('第一组', e0.ada)}、${c_blockRef('第二组', e0.ada2!)}），D2 讲。
 
 D2–D5 按主干 03–07 的节奏，把专家第 0 层逐个子层展开；D6 把 ${nPairs} 层走一遍；D7 是 ${K} 步 Euler 解码。
 `;
@@ -203,7 +236,7 @@ D2–D5 按主干 03–07 的节奏，把专家第 0 层逐个子层展开；D6 
 
 专家塔多出来的只有两样注解：
 ① 顶部的输入簇（${c_blockRef('state75', fm.state75)}、${c_blockRef('x_t', fm.x1)}、${c_blockRef('te = sincos(t)', fm.timeEmb)}）拼成 ${c_blockRef('DiT Suffix In', L.expertIn)}，D1 讲；
-② 青色的时间总线：te 沿它送到每层两个 Norm 旁边的 γβ 小块（${c_blockRef('γ₁β₁', e0.ada)}、${c_blockRef('γ₂β₂', e0.ada2)}），D2 讲。
+② 青色的时间总线：te 沿它送到每层两个 Norm 旁边的 γβ 小块（${c_blockRef('γ₁β₁', e0.ada)}、${c_blockRef('γ₂β₂', e0.ada2!)}），D2 讲。
 
 D2–D5 按主干 03–07 的节奏，把专家第 0 层逐个子层展开；D6 把 ${nPairs} 层走一遍；D7 是 ${K} 步 Euler 解码。
 `;
@@ -211,8 +244,8 @@ D2–D5 按主干 03–07 的节奏，把专家第 0 层逐个子层展开；D6 
         viz.links = 0.6;
         for (let b of [...L.blocks, ...el]) b.transformerLabel.visible = 1;
         if (tBus.active) {
-            fm.timeEmb.highlight = 0.45;
-            for (let e of el) { e.ada.highlight = 0.3; e.ada2.highlight = 0.3; }
+            (groot ? fm.cond : fm.timeEmb).highlight = 0.45;
+            for (let b of [...el.map(e => e.ada), ...ada2s]) b.highlight = 0.3;
         }
     } break;
 
@@ -222,7 +255,16 @@ D2–D5 按主干 03–07 的节奏，把专家第 0 层逐个子层展开；D6 
         let nValid = fmc?.state_valid ?? 0;
         let te = m?.fm.timeEmb.localBuffer;
         blankFrom(L, L.expertIn);
-        if (pi0) commentary(wt, null, 0)`
+        let slotStd = cfg?.embodiment?.slot_std['action_encoder.W1']?.[cfg.embodiment.slot];
+        if (groot) commentary(wt, null, 0)`
+
+DiT 的输入是 ${F.nSuffix} 个 token（本样本：BEHAVIOR episode ${cfg?.sample.episode ?? '…'}，frame ${cfg?.sample.frame ?? '…'}）。主干的 ${cfg?.T_prefix ?? 216} 个 token 不进这条序列，只在交叉块里当 K/V。
+
+token 0：${c_blockRef('state', fm.state75)}（BEHAVIOR 本体状态，按数据集 stats 归一化后补零到 ${cfg?.max_state_dim ?? 132} 维）经 state_encoder 两层 MLP：${c_blockRef('L1', fm.stateProjW)}（${cfg?.max_state_dim ?? 132} → 1024）+ ReLU 得到 ${c_blockRef('隐层', fm.stateHidden)}，再经 ${c_blockRef('L2', fm.stateL2W)}（1024 → ${F.expertD}）得到 ${c_blockRef('state token', fm.stateEmb)}。
+
+如实说明：编解码层按本体分 32 个槽，这里用的是 ${cfg?.embodiment?.tag ?? 'sim_behavior_r1_pro'} 槽（slot ${cfg?.embodiment?.slot ?? 23}）。这个检查点没有在 BEHAVIOR 数据上训练过，该槽的权重仍是初始化值（action_encoder W1 的 std = ${slotStd !== undefined ? slotStd.toFixed(4) : '…'}，与初始化 0.02 一致）。所以 state_encoder / action_encoder / action_decoder 三处是未训练权重；主干和 DiT 是训练过的真权重。
+`;
+        else if (pi0) commentary(wt, null, 0)`
 
 专家塔的输入是 ${F.nSuffix} 个后缀 token，对应主干的${c_blockRef('输入嵌入', L.residual0)}（前缀 ${cfg ? cfg.L_joint - cfg.n_suffix : 885} 个 token）。两段在联合注意力里拼成一条长 ${cfg?.L_joint ?? 917} 的序列（本样本 episode ${cfg?.sample.episode ?? '…'}，frame ${cfg?.sample.frame ?? '…'}）。
 
@@ -239,7 +281,17 @@ token 0：${c_blockRef('state75', fm.state75)}（bounds99 归一化的本体状�
         breakAfter();
         let tA = afterTime(null, 2.5);
         breakAfter();
-        if (pi0) commentary(wt)`
+        let td0 = fmc?.t_disc?.[0] ?? 0;
+        if (groot) commentary(wt)`
+
+token 1..${H}：${c_blockRef('x_t', fm.x1)} 是 ${H} × ${D} 的当前动作板（GR00T 的 t 从 0 走到 1，t = 0 时是纯噪声 x0，x[0][0] = ${f3(x1?.[0])}）。action_encoder 三步：
+① ${c_blockRef('W1', fm.actionInW)}（${cfg?.max_action_dim ?? 132} → ${F.expertD}，无激活）得到 ${c_blockRef('a_emb', fm.actionEmb)}；
+② t 离散成整数 t_disc = ${td0}，做正弦编码 ${c_blockRef('τ', fm.timeEmb)}（宽 ${F.expertD}），与 a_emb 拼成 ${2 * F.expertD} 维，经 ${c_blockRef('W2', fm.timeInW)} + swish 得到 ${c_blockRef('隐层', fm.timeHidden)}；
+③ ${c_blockRef('W3', fm.timeOutW)} 得到 ${c_blockRef('W3 输出', fm.actionFeat)}，再加上可学习的 ${c_blockRef('position_embedding', fm.posEmb)}[0:${H}]，成为 ${c_blockRef(`${H} 个动作 token`, fm.actionTime)}。
+
+教科书 DiT 把图像切 patch 当 token；这里每个动作步一行就是一个 token。
+`;
+        else if (pi0) commentary(wt)`
 
 第二条路是时间：t 先变成正弦嵌入 ${c_blockRef('te = sincos(t)', fm.timeEmb)}（te[0..3] = ${te ? Array.from(te.slice(0, 4)).map(v => fmtSigned(v)).join(' / ') : '…'}），经 ${c_blockRef('time_mlp_in', fm.timeInW)} + swish 得到 ${c_blockRef('隐层', fm.timeHidden)}，再经 ${c_blockRef('time_mlp_out', fm.timeOutW)} + swish 得到 ${c_blockRef('cond', fm.cond)}（${F.expertD} 维）。
 
@@ -255,13 +307,22 @@ token 1..16：${c_blockRef('x_t', fm.x1)} 是 ${H} × ${D} 的当前动作板（
         let tB = afterTime(null, 4.0);
         breakAfter();
         let tIn = afterTime(null, 1.0);
-        commentary(wt)`
+        if (groot) commentary(wt)`
+
+state token 与 ${H} 个动作 token 拼成 ${c_blockRef('DiT Suffix In', L.expertIn)}（${F.nSuffix} × ${F.expertD}，图中 64 通道窗口），这就是 DiT 第 0 块的输入。
+
+时间还走另一条路：${c_blockRef('Timesteps(t)', fm.tProj)}（256 维正弦）→ ${c_blockRef('linear_1', fm.tembW1)} + SiLU → ${c_blockRef('linear_2', fm.tembW2)} = ${c_blockRef('temb', fm.cond)}（${F.expertD} 维）。temb 不进 token，沿青色时间总线送到每块的 ${F.adaName}（D2）。
+`;
+        else commentary(wt)`
 
 ${c_blockRef('DiT Suffix In', L.expertIn)}（${F.nSuffix} × ${F.expertD}，图中 64 通道窗口）就是专家塔第 0 层的输入。下一章开始，按主干 03–07 章同样的画法把这一层逐个子层展开。
 ${preStamp}
 `;
-        let chainA = pi0 ? [fm.x1, fm.actionInW, L.expertIn] : [fm.state75, fm.stateProjW, fm.stateEmb];
+        let chainA = pi0 ? [fm.x1, fm.actionInW, L.expertIn]
+            : groot ? [fm.state75, fm.stateProjW, fm.stateHidden, fm.stateL2W, fm.stateEmb]
+            : [fm.state75, fm.stateProjW, fm.stateEmb];
         let chainB = pi0 ? [fm.timeEmb, fm.timeInW, fm.timeHidden, fm.timeOutW, fm.cond]
+            : groot ? [fm.x1, fm.actionInW, fm.actionEmb, fm.timeEmb, fm.timeInW, fm.timeHidden, fm.timeOutW, fm.actionFeat, fm.posEmb, fm.actionTime]
             : [fm.x1, fm.actionInW, fm.actionEmb, fm.timeEmb, fm.timeInW, fm.timeHidden, fm.timeOutW, fm.actionTime];
         let light = (chain: IBlkDef[], t: number) => {
             let k = Math.min(chain.length - 1, Math.floor(t * chain.length));
@@ -269,6 +330,7 @@ ${preStamp}
         };
         if (tA.active && tA.t < 1) light(chainA, tA.t);
         if (tB.active && tB.t < 1) light(chainB, tB.t);
+        if (groot && tIn.active && tIn.t < 1) light([fm.tProj, fm.tembW1, fm.tembHidden, fm.tembW2, fm.cond], tIn.t);
         let info = startProcessBefore(state, L.expertIn);
         processUpTo(state, tIn, L.expertIn, info);
     } break;
@@ -294,7 +356,11 @@ ${preStamp}
         let pre1 = g1 !== undefined && b1 !== undefined && post1 !== undefined ? (post1 - b1) / (1 + g1) : undefined;
         let te = m?.fm.timeEmb.localBuffer;
 
-        if (pi0) commentary(wt, null, 0)`
+        if (groot) commentary(wt, null, 0)`
+
+DiT 第 0 块的第一步是 ${F.adaName}：对 ${c_blockRef('DiT Suffix In', L.expertIn)} 的每一列（每个 token）做 LayerNorm（减均值、除以标准差，没有可学习的 γβ），再用随时间 t 变化的 scale、shift 调制一次。
+`;
+        else if (pi0) commentary(wt, null, 0)`
 
 专家第 0 层的第一步和主干 03 章一样是归一化：对 ${c_blockRef('Expert Suffix In', L.expertIn)} 的每一列（每个 token）做 RMSNorm。区别：归一化之后，要用随时间 t 变化的 scale、shift 再调制一次，同时再给出一个 gate，留到残差处用。这就是_门控 adaRMSNorm_。
 `;
@@ -307,14 +373,24 @@ ${preStamp}
         let tCam = afterTime(null, 1.0);
         frameTo(state, tCam, ln.cubes, 272, 6, { fill: 1.2 });
         breakAfter();
-        commentary(wt)`
+        if (groot) commentary(wt)`
+
+先是普通 LayerNorm：两个聚合格是真实的 ${c_blockRef('mean(x)', ln.lnAgg1)} 与 ${c_blockRef('rsqrt(var(x) + ε)', ln.lnAgg2)}，对完整的 ${F.expertD} 个通道计算（图中显示 64 个）。
+`;
+        else commentary(wt)`
 
 先和主干完全相同：两个聚合格是真实的 ${c_blockRef('mean(x²)', ln.lnAgg1)} 与 ${c_blockRef('rsqrt(mean(x²) + ε)', ln.lnAgg2)}，对完整的 ${cfg?.expert_hidden ?? 768} 个通道计算（图中显示 64 个）。
 `;
         breakAfter();
         let tAgg = afterTime(null, 2.0);
         breakAfter();
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+时间条件。D1 的 ${c_blockRef('temb', fm.cond)} 沿青色时间总线送到每一块。在这一块，SiLU(temb) 经块内的线性层（${F.expertD} → 2 × ${F.expertD}）切成 ${c_blockRef('[scale | shift]', ada)}：两列，每个通道一对值（真值，与 groot-fm.json 的 E0.ada 一致）。t 是整条样本共用的，所以这两列对 ${F.nSuffix} 个 token 都一样。
+
+只有这一处 Norm 接时间：MLP 前的第二个 Norm（norm3）是无参数 LayerNorm，不受 t 调制（D5）。
+`;
+        else if (pi0) commentary(wt)`
 
 时间条件。D1 的 ${c_blockRef('cond', fm.cond)} 沿青色时间总线送到每一层。在这一层，cond 经一个线性层（${F.expertD} → 3 × ${F.expertD}）得到 ${c_blockRef('[scale₁ | shift₁ | gate₁]', ada)}：三列，每个通道一组值（真值，与 pi0-fm.json 的 E0.ada 前三行一致）。t 是整条样本共用的，所以这三列对 ${F.nSuffix} 个 token 都一样。
 
@@ -329,7 +405,15 @@ ${preStamp}
         breakAfter();
         let tAda = afterTime(null, 1.5);
         breakAfter();
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+然后逐列算出${c_blockRef(`${F.adaName} 输出`, ln.lnResid)}：
+out = LayerNorm(x) · (1 + scale(t)) + shift(t)
+没有单独的 γβ：可学的部分全在那个线性层里。
+
+真值核对（token 1，通道 ${cPick}）：scale = ${f3(g1)}，shift = ${f3(b1)}，调制前 ${f3(pre1)} → 调制后 ${f3(post1)}。
+`;
+        else if (pi0) commentary(wt)`
 
 然后逐列算出${c_blockRef('adaRMSNorm 输出', ln.lnResid)}：
 out = x / sqrt(mean(x²) + ε) · (1 + scale(t)) + shift(t)
@@ -351,7 +435,13 @@ out = (1 + γ(t)) · [x / sqrt(mean(x²) + ε) · ${c_blockRef('w', ln.lnSigma)}
         let tCmp = afterTime(null, 1.2);
         let chartBox = { x: ada.x + ada.dx, y: ada.y - 14, z: ada.z, dx: 56, dy: ada.dy + 14, dz: 2 };
         frameTo(state, tCmp, [ln.lnResid, ada, chartBox], 270, 2, { fill: 1.15 });
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+${adaW} 旁的条形图钉在通道行上：token 1 的 64 个通道，灰条是调制前的 LayerNorm(x)，橙条是调制后的真实输出。
+
+第 0 块 2 × ${F.expertD} 个 scale/shift 值域 ${st(0)}，第 ${nL - 1} 块 ${st(nL - 1)}。和教科书 adaLN-Zero 对照：同样是 LayerNorm + scale/shift，但只调制注意力前的 Norm，也没有 α 门控，残差直接相加。
+`;
+        else if (pi0) commentary(wt)`
 
 ${adaW} 旁的条形图钉在通道行上：token 1 的 64 个通道，灰条是调制前的 RMSNorm(x)，橙条是调制后的真实输出。
 
@@ -369,7 +459,7 @@ ${adaW} 旁的条形图钉在通道行上：token 1 的 64 个通道，灰条是
             processUpTo(state, tAda, ada, info);
             processUpTo(state, tNorm, ln.lnResid, info);
         } catch (e) { console.log(e); }
-        if (tAda.active && tAda.t < 1) (pi0 ? fm.cond : fm.timeEmb).highlight = 0.45;
+        if (tAda.active && tAda.t < 1) (pi0 || groot ? fm.cond : fm.timeEmb).highlight = 0.45;
         if (tCmp.active) {
             viz.normCmp = tCmp.t;
             viz.normLayer = 0;
@@ -380,10 +470,12 @@ ${adaW} 旁的条形图钉在通道行上：token 1 的 64 个通道，灰条是
 
     case Phase.D3_JointAttn: {
         let g0 = e0.kvGroups[0];
-        let tK = eh.trunkK!, tV = eh.trunkV!;
+        let tK = eh.trunkK ?? eh.kBlock, tV = eh.trunkV ?? eh.vBlock;
         let mass = (i: number) => m ? layerMass(m, i) : [0, 0, 0, 0];
         let line = (i: number) => {
             let q = mass(i);
+            if (groot) return el[i].kind === 'self' ? `第 ${i} 块（自注意力）：state token ${pct(q[0])}，动作 token ${pct(q[3])}`
+                : `第 ${i} 块（交叉，${el[i].kind === 'cross_text' ? '文本' : '图像'}）：图像 ${pct(q[1])}，文本 ${pct(q[2])}`;
             return pi0 ? `第 ${i} 层：状态文本 ${pct(q[0])}，图像 ${pct(q[1])}，其余文本 ${pct(q[2])}，后缀自身 ${pct(q[3])}`
                 : `第 ${i} 层：视觉 ${pct(q[1])}，文本 ${pct(q[2])}，后缀自身 ${pct(q[3])}`;
         };
@@ -395,7 +487,14 @@ ${adaW} 旁的条形图钉在通道行上：token 1 的 64 个通道，灰条是
         e0.transformerLabel.visible = 1;
         e0.selfAttendLabel.visible = 1;
         b0.transformerLabel.visible = 1;
-        if (pi0) commentary(wt, null, 0)`
+        let nImgWin = cfg?.window_is_image?.filter(v => v).length ?? 0;
+        if (groot) commentary(wt, null, 0)`
+
+第 0 块是交叉注意力。Q 照常来自 AdaLN 输出：每个 DiT token 乘 Q 权重得到 ${c_blockRef('Q', eh.qBlock)}。K 和 V 却不来自 DiT 自己：主干输出的 ${L.vlOut ? c_blockRef('VL token', L.vlOut) : 'VL token'}（${F.dModel} 维）沿 VL 总线进来，分别乘 to_k / to_v（${F.dModel} → ${F.expertD}）得到 ${c_blockRef('K', eh.kBlock)}、${c_blockRef('V', eh.vBlock)}。所以 K、V 的列是主干的 token（图中 ${L.shape.T} 列窗口），Q 的列是 ${F.nSuffix} 个 DiT token。
+
+${F.expertHeads} 个头，head_dim = ${ehd}，Q/K/V 都带偏置（图中细条）。图中只画 head 0：其余 ${F.expertHeads - 1} 个结构相同、只是权重不同，标注 ×${F.expertHeads}，不重复铺开。
+`;
+        else if (pi0) commentary(wt, null, 0)`
 
 注意力和主干 04 章同构：归一化后的每一列（token）分别乘 Q、K、V 权重，得到每个 token 的 ${c_blockRef('Q', eh.qBlock)}、${c_blockRef('K', eh.kBlock)}、${c_blockRef('V', eh.vBlock)} 向量。
 
@@ -412,7 +511,14 @@ ${adaW} 旁的条形图钉在通道行上：token 1 的 64 个通道，灰条是
         breakAfter();
         let tWide = afterTime(null, 1.5);
         frameTo(state, tWide, [tK, tV, eh.qBlock, eh.attnMtxP, eh.attnMtx, eh.vOutBlock], 285, 12, { fill: 1.1 });
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+接着打分：${F.nSuffix} 个 DiT query 与 VL key 做点积，得到 ${c_blockRef('打分矩阵', eh.attnMtx)}。没有因果掩码，但有按块交替的选择掩码（attend_text_every_n_blocks = 2）：
+第 0、4、8 … 块只看文本 token（非图像列）；第 2、6、10 … 块只看 ${cfg?.n_visual_tokens ?? 192} 个图像 token；奇数块是自注意力，${F.nSuffix} 个 DiT token 彼此注意，不读主干。
+
+本块是文本块：窗口里 ${nImgWin} 列是图像 token，在这里被屏蔽，softmax 后为 0。
+`;
+        else if (pi0) commentary(wt)`
 
 接着打分：后缀每个 query 与所有 key 做点积。这里和主干的区别是“联合”：一行 key 分成两段。
 
@@ -435,21 +541,33 @@ ${adaW} 旁的条形图钉在通道行上：token 1 的 64 个通道，灰条是
         frameTo(state, tClose, [eh.qBlock, eh.kBlock, eh.attnMtxP, eh.attnMtx, eh.attnMtxSm, eh.attnMtxSmP], 275, 8, { fill: 1.15 });
         let tScore = afterTime(null, 3.0);
         breakAfter();
-        commentary(wt)`
+        if (groot) commentary(wt)`
+
+softmax 只在允许的列上做：两个聚合格是每行的最大值与 exp 之和，${c_blockRef('概率', eh.attnMtxSm)} 每行加起来为 1。
+`;
+        else commentary(wt)`
 
 softmax 对整行 [前缀 | 后缀] 一起做：两个聚合格是整行的最大值与 exp 之和，所以 ${c_blockRef('前缀段', eh.attnMtxSmP)} 和 ${c_blockRef('后缀段', eh.attnMtxSm)} 的概率加起来才是 1。
 `;
         breakAfter();
         let tSm = afterTime(null, 2.5);
         breakAfter();
-        commentary(wt)`
+        if (groot) commentary(wt)`
+
+最后乘 V：${c_blockRef('V Output', eh.vOutBlock)} = 概率 · VL token 的 ${c_blockRef('V', eh.vBlock)}。其余 ${F.expertHeads - 1} 个 head（×${F.expertHeads}）同样各得一个 V Output。
+`;
+        else commentary(wt)`
 
 最后乘 V：${c_blockRef('V Output', eh.vOutBlock)} = 前缀段概率 · 主干 ${c_blockRef('V', tV)}（品红色线）+ 后缀段概率 · 专家自己的 V。其余 ${e0.heads.length - 1} 个 head（×${e0.heads.length}）同样各得一个 V Output。
 `;
         breakAfter();
         let tV1 = afterTime(null, 2.0);
         breakAfter();
-        commentary(wt)`
+        if (groot) commentary(wt)`
+
+下面沿 DiT 塔扫过 ${nL} 块，质量条钉在每块 head 的打分块旁（真值，后缀 token 的平均注意力质量）：${line(0)}；${line(1)}；${line(2)}；${line(nL - 1)}。交叉块与自注意力块交替，VL 信息每两块注入一次。
+`;
+        else commentary(wt)`
 
 耦合强度逐层不同。下面沿专家塔扫过 ${nPairs} 层，质量条钉在每层 head 的打分块旁（真值）：${line(0)}；${line(mid)}；${line(nPairs - 1)}。${pi0 ? '' : '浅层几乎只读文本，中层开始读图像，深层更多看后缀自己。'}
 `;
@@ -465,7 +583,7 @@ softmax 对整行 [前缀 | 后缀] 一起做：两个聚合格是整行的最�
         if (!tWide.active) wt.dimHighlightBlocks = [...qkv];
         viz.activeLayer = 0;
         viz.links = tWide.active ? 1 : 0.3;
-        viz.quadLabel = tWide.active && !tSweep.active ? 1 : 0;
+        viz.quadLabel = tWide.active && !tSweep.active && !groot ? 1 : 0;
         if (tSweep.active) {
             let pos = tSweep.t * (nL - 1);
             if (tSweep.t < 1) followLayer(state, L, pos, 285, 10, 1.3);
@@ -479,7 +597,7 @@ softmax 对整行 [前缀 | 后缀] 一起做：两个聚合格是整行的最�
         // one representative head (x16): the others share its slot and are not drawn
         let v0 = eh.vOutBlock;
         let outBlocks = [v0];
-        let n = e0.heads.length;
+        let n = F.expertHeads;
         initialFrame(state, [...outBlocks, e0.projWeight, e0.attnOut], 284, 6, { fill: 1.15 });
         wt.dimHighlightBlocks = [...outBlocks, e0.projWeight, e0.attnOut];
         dimTrunk([], 0.15);
@@ -489,21 +607,31 @@ softmax 对整行 [前缀 | 后缀] 一起做：两个聚合格是整行的最�
         eh.headLabel.visible = 1;
         commentary(wt, null, 0)`
 
-和主干 06 章一样：注意力算完后，每个 head 都有自己的${c_blockRef('输出向量', outBlocks)}（图中只画 head 0，×${n}）。把 ${n} 个首尾相接（concat）：每个后缀 token 上，${n} 个长度 ${cfg?.head_dim ?? 128} 的向量拼成一个长度 ${n} × ${cfg?.head_dim ?? 128} = ${n * (cfg?.head_dim ?? 128)} 的向量。
+和主干 06 章一样：注意力算完后，每个 head 都有自己的${c_blockRef('输出向量', outBlocks)}（图中只画 head 0，×${n}）。把 ${n} 个首尾相接（concat）：每个后缀 token 上，${n} 个长度 ${ehd} 的向量拼成一个长度 ${n} × ${ehd} = ${n * ehd} 的向量。
 `;
         breakAfter();
         let tFade = afterTime(null, 1.0, 0.5);
         let tStack = afterTime(null, 1.0);
         frameTo(state, tStack, [{ ...v0, z: e0.attnOut.z }, e0.projWeight, e0.attnOut], 278, 6, { fill: 1.15 });
         breakAfter();
-        commentary(wt)`
+        if (groot) commentary(wt)`
+
+拼出来的 ${n * ehd} 维正好等于 DiT 的隐藏维：${c_blockRef('o_proj', e0.projWeight)}（${F.expertD} → ${F.expertD}，带偏置；图中是真实权重的 64 × 64 窗口）逐列做矩阵-向量乘法，得到${c_blockRef('注意力输出', e0.attnOut)}。
+`;
+        else commentary(wt)`
 
 与主干不同，这里拼出来的 ${n * (cfg?.head_dim ?? 128)} 维比专家的隐藏维 ${cfg?.expert_hidden ?? 768} 大：${c_blockRef('o_proj', e0.projWeight)} 把它投影回 ${cfg?.expert_hidden ?? 768} 维（图中是真实权重的 64 × 64 窗口），逐列做矩阵-向量乘法，得到${c_blockRef('注意力输出', e0.attnOut)}。
 `;
         breakAfter();
         let tProc = afterTime(null, 3.0);
         breakAfter();
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+然后是残差：注意力输出逐元素加回这一块的输入 ${c_blockRef('DiT Suffix In', L.expertIn)}，得到 ${c_blockRef('残差流', e0.attnResidual)}。
+
+真值核对（token 1，通道 0）：输入 ${f3(xin)} + o_proj ${f3(o10)} = 残差 ${f3(r10)}。没有 adaLN-Zero 的门控 α，直接相加。
+`;
+        else if (pi0) commentary(wt)`
 
 然后是门控残差：注意力输出先乘 D2 那组的第三列 gate₁，再逐元素加回这一层的输入 ${c_blockRef('Expert Suffix In', L.expertIn)}，得到 ${c_blockRef('残差流', e0.attnResidual)}：x + gate₁ · attn。
 
@@ -545,29 +673,43 @@ softmax 对整行 [前缀 | 后缀] 一起做：两个聚合格是整行的最�
         blankFrom(L, e0.ln2.lnAgg1);
         e0.transformerLabel.visible = 1;
         e0.mlpLabel.visible = 1;
-        if (pi0) commentary(wt, null, 0)`
+        if (groot) commentary(wt, null, 0)`
+
+后半块和主干 07 章同一套节奏：先归一化，再过 MLP，最后加回残差。
+
+第一步是 norm3：一个${c_blockRef('无参数 LayerNorm', e0.ln2.lnResid)}（没有 γβ，也不接时间条件）。整个 DiT 块里只有 D2 那一处 Norm 受 t 调制。
+`;
+        else if (pi0) commentary(wt, null, 0)`
 
 后半层和主干 07 章同一套结构：先归一化，再过 GeGLU MLP，最后门控加回残差。
 
-第一步是第二个 ${c_blockRef('adaRMSNorm', e0.ln2.lnResid)}：同一个 cond，另一个线性层给出 ${c_blockRef('[scale₂ | shift₂ | gate₂]', e0.ada2)}（pi0-fm.json E0.ada 的后三行）。
+第一步是第二个 ${c_blockRef('adaRMSNorm', e0.ln2.lnResid)}：同一个 cond，另一个线性层给出 ${c_blockRef('[scale₂ | shift₂ | gate₂]', e0.ada2!)}（pi0-fm.json E0.ada 的后三行）。
 `;
         else commentary(wt, null, 0)`
 
 后半层和主干 07 章同一套结构：先归一化，再过 SwiGLU MLP，最后加回残差。
 
-第一步是第二个 ${c_blockRef('AdaRMSNorm', e0.ln2.lnResid)}：同一个 te，另一组线性层给出 ${c_blockRef('[γ₂ | β₂]', e0.ada2)}（k005b-fm.json E0.ada 的后两行）。
+第一步是第二个 ${c_blockRef('AdaRMSNorm', e0.ln2.lnResid)}：同一个 te，另一组线性层给出 ${c_blockRef('[γ₂ | β₂]', e0.ada2!)}（k005b-fm.json E0.ada 的后两行）。
 `;
         breakAfter();
         let tLn = afterTime(null, 3.0);
         breakAfter();
-        commentary(wt)`
+        if (groot) commentary(wt)`
+
+每一列乘 ${c_blockRef('fc1', e0.mlpFcWeight)}：${F.expertD} → ${F.expertFfn}，得到 ${c_blockRef('fc1 输出', e0.mlpFc)}（图中 64 维窗口）。GELU MLP 只有一路投影，没有 SwiGLU 的 gate / up 两路。
+`;
+        else commentary(wt)`
 
 每一列分别乘 ${c_blockRef('gate_proj', e0.mlpFcWeight)} 和 ${c_blockRef('up_proj', e0.mlpUpWeight)}：${cfg?.expert_hidden ?? 768} → ${cfg?.expert_intermediate ?? 2752}，得到 ${c_blockRef('gate', e0.mlpFc)} 和 ${c_blockRef('up', e0.mlpUp)}（图中 64 维窗口）。
 `;
         breakAfter();
         let tGU = afterTime(null, 3.0);
         breakAfter();
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+逐元素算 ${c_blockRef('GELU(fc1)', e0.mlpAct)}（tanh 近似）。这一处和教科书 DiT 完全一致：GELU 点式 MLP，扩张 4 倍。
+`;
+        else if (pi0) commentary(wt)`
 
 逐元素算 ${c_blockRef('GELU(gate) · up', e0.mlpAct)}（tanh 近似的 GELU）。教科书 DiT 用 GELU 的点式 MLP，π0.5 与主干一样用 GeGLU。
 `;
@@ -578,14 +720,24 @@ softmax 对整行 [前缀 | 后缀] 一起做：两个聚合格是整行的最�
         breakAfter();
         let tAct = afterTime(null, 2.0);
         breakAfter();
-        commentary(wt)`
+        if (groot) commentary(wt)`
+
+${c_blockRef('fc2', e0.mlpProjWeight)} 把 ${F.expertFfn} 维投影回 ${F.expertD} 维，得到 ${c_blockRef('MLP 输出', e0.mlpResult)}。
+`;
+        else commentary(wt)`
 
 ${c_blockRef('down_proj', e0.mlpProjWeight)} 把 ${cfg?.expert_intermediate ?? 2752} 维投影回 ${cfg?.expert_hidden ?? 768} 维，得到 ${c_blockRef('MLP 输出', e0.mlpResult)}。
 `;
         breakAfter();
         let tDown = afterTime(null, 2.5);
         breakAfter();
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+再加回残差，得到 ${c_blockRef('DiT 0 Out', e0.mlpResidual)}，它就是第 1 块（自注意力块）的输入。
+
+真值核对（token 1，通道 0）：残差 ${f3(r10)} + MLP ${f3(mlp10)} = 输出 ${f3(out10)}。
+`;
+        else if (pi0) commentary(wt)`
 
 再门控加回残差：x + gate₂ · MLP，得到 ${c_blockRef('Expert 0 Out', e0.mlpResidual)}，它就是专家第 1 层的输入。
 
@@ -607,7 +759,7 @@ ${c_blockRef('down_proj', e0.mlpProjWeight)} 把 ${cfg?.expert_intermediate ?? 2
             processUpTo(state, tDown, e0.mlpResult, info);
             processUpTo(state, tRes, e0.mlpResidual, info);
         } catch (e) { console.log(e); }
-        if (tLn.active && tLn.t < 1) (pi0 ? fm.cond : fm.timeEmb).highlight = 0.45;
+        if (tLn.active && tLn.t < 1 && !groot) (pi0 ? fm.cond : fm.timeEmb).highlight = 0.45;
     } break;
 
     case Phase.D6_Stack: {
@@ -615,7 +767,15 @@ ${c_blockRef('down_proj', e0.mlpProjWeight)} 把 ${cfg?.expert_intermediate ?? 2
         initialFrame(state, [L.expertIn, ...eMain(L, 0)], 270, 3, { fill: 1.6 });
         dimExcept(L, [...dit, ...kv], 0.2);
         for (let e of el) e.transformerLabel.visible = 1;
-        if (pi0) commentary(wt, null, 0)`
+        if (groot) commentary(wt, null, 0)`
+
+和主干 08 章一样，把真实数据推过整个 ${nL} 块的 DiT 塔。每块同构，只有注意力的 K/V 来源交替：
+偶数块：${F.adaName} → Q（DiT）/ K,V（VL token）→ 交叉注意力 → softmax·V → o_proj → ⊕ → LayerNorm → fc1 → GELU → fc2 → ⊕
+奇数块：同上，但 Q/K/V 都来自 DiT 自己（自注意力）。
+
+主干在这里只剩它输出的 ${L.vlOut ? c_blockRef('VL token', L.vlOut) : 'VL token'}：主干与 x_t、t 无关，一次推理只算一次，${K} 步 Euler 共用。导出器核对过：DiT 输出与官方实现最大差 ${fmc ? fmc.asserts['dit_vs_official_maxabs(step2)']?.toExponential(1) : '…'}，VL 自注意力输出最大差 ${fmc ? fmc.asserts['vlsa_vs_official_maxabs']?.toExponential(1) : '…'}。
+`;
+        else if (pi0) commentary(wt, null, 0)`
 
 和主干 08 章一样，把真实数据推过整个 ${nL} 层的专家塔。每层同构，顺序相同：
 adaRMSNorm → Q/K/V → 联合注意力 → softmax·V → o_proj → 门控⊕ → adaRMSNorm → gate/up → GELU·up → down_proj → 门控⊕。
@@ -633,7 +793,11 @@ AdaRMSNorm → Q/K/V → 联合注意力 → softmax·V → o_proj → ⊕ → A
         let tEnter = afterTime(null, 1.5);
         let tL0 = afterTime(null, nFlowStages * 0.9);
         breakAfter();
-        commentary(wt)`
+        if (groot) commentary(wt)`
+
+第 0 块走完。接下来一块块穿过剩下的 ${nL - 1} 块，每块有自己的 ${adaW}（同一个 temb，不同的线性层），值域从第 0 块的 ${st(0)} 到第 ${nL - 1} 块的 ${st(nL - 1)}。
+`;
+        else commentary(wt)`
 
 第 0 层走完。接下来一层层穿过剩下的 ${nL - 1} 层，每层有自己的 ${adaW}（同一个${pi0 ? ' cond' : ' te'}，不同的线性层），值域从第 0 层的 ${st(0)} 到第 ${nPairs - 1} 层的 ${st(nPairs - 1)}。
 `;
@@ -641,7 +805,13 @@ AdaRMSNorm → Q/K/V → 联合注意力 → softmax·V → o_proj → ⊕ → A
         breakAfter();
         let tExit = afterTime(null, 1.5);
         frameTo(state, tExit, [el[nL - 1].mlpResidual, ...L.expertNorm.cubes, ...actionBlocks], 276, 8, { fill: 1.1 });
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+${nL} 块之后：${c_blockRef('final AdaLN', L.expertOut)}（proj_out_1 由 temb 给出 shift/scale）→ proj_out_2（${F.expertD} → ${cfg?.dit_out_dim ?? 1024}）得到 ${L.ditOut ? c_blockRef('DiT 输出', L.ditOut) : 'DiT 输出'} → action_decoder L1 + ReLU 得到 ${L.decH ? c_blockRef('隐层', L.decH) : '隐层'} → ${c_blockRef('L2', L.actionWeight)}（1024 → ${cfg?.max_action_dim ?? 132}）→ ${c_blockRef('速度场 v', L.actionVelocity)}。取后 ${H} 个 token（丢掉 state token）、前 ${D} 维：${H} × ${D}，例如 v[0][14] = ${f3(vel?.[14])}。
+
+GR00T 的方向与前两页相反：t 从 0 走到 1，x ← x + v/${K}。${c_blockRef('x0 + v', L.actionChunk)} 相当于把 ${K} 步并成一大步（x[0][14]：${f3(x1?.[14])} → ${f3(chunk?.[14])}），只示意方向；部署输出是 D7 的 ${K} 步积分。
+`;
+        else if (pi0) commentary(wt)`
 
 ${nL} 层之后：${c_blockRef('final adaRMSNorm', L.expertOut)}（同样受 t 调制，只用 scale/shift）→ ${c_blockRef('action_out_proj', L.actionWeight)}（${F.expertD} → ${D}，带偏置）→ ${c_blockRef('速度场 v', L.actionVelocity)}，${H} × ${D}，例如 v[0][14] = ${f3(vel?.[14])}。
 
@@ -654,7 +824,19 @@ ${nL} 层之后：${c_blockRef('DiT final RMSNorm', L.expertOut)}（普通 RMSNo
 一步解码：${c_blockRef('动作块', L.actionChunk)} = ${c_blockRef('x1', L.actionX1)} − v，例如 x1[0][14] = ${f3(x1?.[14])}，动作 = ${f3(chunk?.[14])}。多步解码见 D7。
 `;
         breakAfter();
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+教科书 DiT ↔ GR00T 动作头：
+① patchify → 1 个 state token + ${H} 个动作 token，共 ${F.nSuffix} 个（D1）
+② 自注意力 → 交叉 / 自注意力逐块交替，交叉块读主干输出的 VL token（D3）
+③ 条件 t + 类别 c → 只有 t：temb = MLP(Timesteps(t))；t 另经 τ 进入动作 token（D1、D2）
+④ LayerNorm + adaLN-Zero(γβα) → 只有注意力前的 Norm 是 AdaLN（scale/shift，无 α），MLP 前是无参数 LayerNorm
+⑤ GELU MLP ${F.expertD}→${F.expertFfn}→${F.expertD}（与教科书一致）
+⑥ N 块 → ${nL} 块，主干只跑一次
+⑦ final adaLN + Linear + unpatchify → final AdaLN → proj_out_2 → action_decoder → ${H}×${cfg?.max_action_dim ?? 132}（取前 ${D} 维）
+⑧ K 步采样 → Euler ${K} 步，x ← x + v/${K}，t: 0 → 1（D7）
+`;
+        else if (pi0) commentary(wt)`
 
 教科书 DiT ↔ π0.5 动作专家：
 ① patchify → 每个动作步一行一个 token，共 ${F.nSuffix} 个，没有状态 token（D1）
@@ -705,10 +887,20 @@ ${nL} 层之后：${c_blockRef('DiT final RMSNorm', L.expertOut)}（普通 RMSNo
             let st = fs?.steps[k];
             if (!st) return '…';
             let v = st.tex['v']?.localBuffer, xn = st.tex['x_next']?.localBuffer;
-            let base = `t = ${st.t.toFixed(1)}：|v| = ${rms(v).toFixed(2)}，x[0][14] ${f3(st.tex['x']?.localBuffer[14])} → ${f3(xn?.[14])}`;
-            return pi0 ? base : `${base}，MSE(x, a) = ${mse(xn, tgtArr).toFixed(3)}`;
+            let base = `t = ${st.t.toFixed(Number.isInteger(10 / K) ? 1 : 2)}：|v| = ${rms(v).toFixed(2)}，x[0][14] ${f3(st.tex['x']?.localBuffer[14])} → ${f3(xn?.[14])}`;
+            return pi0 || groot ? base : `${base}，MSE(x, a) = ${mse(xn, tgtArr).toFixed(3)}`;
         };
-        if (pi0) commentary(wt, null, 0)`
+        if (groot) commentary(wt, null, 0)`
+
+部署时的 flow matching 解码（get_action_with_features）：从噪声出发，DiT 被调用 ${K} 次，每次是一个 Euler 步。每次穿行就是 D6 那一遍，画法不变；Euler 轨迹带和回程箭头只是加在上面的注解。
+
+轨迹带：${K + 1} 块 ${H} × ${D} 的板，${c_blockRef('x(t=0)', S[0])} 是纯噪声，${c_blockRef('x(t=1)', S[K])} 是最终动作块。每次穿行：
+① 当前板 x_t 进入 action_encoder；
+② τ 与 temb 换成新的 t（t_disc = ${fmc?.t_disc?.join(' / ') ?? '…'}），${nL} 块的 scale/shift 全部换成这个 t 的真值；
+③ DiT 从第 0 块穿到第 ${nL - 1} 块，交叉块读同一份 VL token；
+④ 底部得到 v，黄色回程箭头把 x + v/${K} 写进下一块板。
+`;
+        else if (pi0) commentary(wt, null, 0)`
 
 部署时的 flow matching 解码（openpi 的 sample_actions）：从噪声出发，专家塔被调用 ${K} 次，每次是一个 Euler 步。每次穿行就是 D6 那一遍，画法不变；Euler 轨迹带和回程箭头只是加在上面的注解。
 
@@ -749,7 +941,14 @@ ${nL} 层之后：${c_blockRef('DiT final RMSNorm', L.expertOut)}（普通 RMSNo
             return t;
         });
         breakAfter();
-        if (pi0) commentary(wt)`
+        if (groot) commentary(wt)`
+
+${K} 次穿行完成，板 ${K} 就是解码出的动作块。逐步真值：
+${Array.from({ length: K }, (_, k) => stepInfo(k)).join('\n\n')}
+
+导出器核对：每一步 x_next = x + dt · v（dt = ${fmc ? fmc.dt : '…'}）的恒等误差 ${fmc ? fmc.asserts.euler_identity_maxabs?.toExponential(1) : '…'}。
+`;
+        else if (pi0) commentary(wt)`
 
 ${K} 次穿行完成，板 ${K} 就是解码出的动作块。逐步真值：
 ${Array.from({ length: K }, (_, k) => stepInfo(k)).filter((_, k) => k % 3 === 0 || k === K - 1).join('\n\n')}
@@ -803,7 +1002,16 @@ ${Array.from({ length: K }, (_, k) => stepInfo(k)).filter((_, k) => k % 3 === 0 
         let kFin = fs?.steps[K - 1]?.tex['x_next']?.localBuffer;
         breakAfter();
         let tChunk = afterTime(null, 1.2);
-        frameTo(state, tChunk, pi0 ? [S[K - 1], S[K]] : [L.strip[K], ...actionBlocks], 284, 12, { fill: 1.1 });
+        frameTo(state, tChunk, pi0 || groot ? [S[K - 1], S[K]] : [L.strip[K], ...actionBlocks], 284, 12, { fill: 1.1 });
+        if (groot) {
+            commentary(wt)`
+
+最后看动作块本身：${H} 步 × ${D} 维（${cfg?.max_action_dim ?? 132} 维输出里，R1 Pro 槽只用前 ${D} 维：底盘 3、躯干 4、左臂 7、左夹爪 1、右臂 7、右夹爪 1）。第 0 步：${kFin ? Array.from(kFin.slice(0, 6)).map(v => fmtSigned(v)).join(' / ') : '…'} …
+
+如实说明：${cfg?.embodiment?.tag ?? 'sim_behavior_r1_pro'} 槽在这个检查点里没有训练，action_decoder 是初始化权重，所以这块动作没有物理语义，不做反归一化，也不与 k005b 的动作做数值对比。它展示的是真实的数值流动：主干与 DiT 的每个激活都是这组真权重在这帧 BEHAVIOR 数据上的前向结果。
+`;
+            break;
+        }
         if (pi0) {
             let rowK = cfg && kFin ? describeActionRow(cfg, kFin, 0) : [];
             commentary(wt)`

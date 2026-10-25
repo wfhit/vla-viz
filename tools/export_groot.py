@@ -19,8 +19,14 @@ Transformer (gr00t/model/modules/dit.py, needs diffusers) on the same inputs.
 Compute: float32 from the bf16 checkpoint (deterministic; the official runtime
 uses bf16). Facts and caveats are written into config.notes.
 
-Outputs (public/): groot-weights.json, groot-acts.json, groot-fm.json (per-step,
-float16), groot-check.json (spot values from the live torch tensors).
+Outputs (public/), in the shared VLA schema of tools/export_k005b.py (the /groot page
+runs on the shared VLA engine; config.variant carries GR00T's structural differences):
+groot-weights.json, groot-acts.json (every layer; DiT at Euler step 0 = t 0),
+groot-fm.json (every Euler step, float16), groot-check.json (spot values).
+
+Trunk layers L0..L15 = the 16 kept Qwen3-VL LM layers, L16..L19 = the 4 vl_self_attention
+blocks (vlln = the LayerNorm between them). Expert layers E0..E31 = the DiT blocks; only
+head 0 of the 32 vlsa / DiT heads is exported (the page draws one head, "x32 heads").
 """
 import argparse
 import base64
@@ -42,10 +48,11 @@ EMB_TAG = "sim_behavior_r1_pro"
 CAMS = [("head", "observation.rgb.zed_link_camera_0"),
         ("left_wrist", "observation.rgb.left_realsense_link_camera_0"),
         ("right_wrist", "observation.rgb.right_realsense_link_camera_0")]
+WT = 32       # token window: the last WT backbone tokens (tail of the last image + the text)
 WC = 64       # hidden-channel window [0, WC)
-WD = 48       # one full DiT head (head_dim 48)
-WF = 64       # FF hidden window
-THUMB = 128   # RGB thumbnails shipped for the image tiles
+WD = 32       # head-dim window
+WF = 64       # MLP hidden window
+NPART = 8     # one-step particles (seeds) at t = 0
 SEED = 0
 
 # the 61-dim R1Pro proprioception (OmniGibson PROPRIOCEPTION_INDICES["R1Pro"])
@@ -160,14 +167,17 @@ class Weights:
         self.device = device
         self.cache = {}
 
-    def __call__(self, key, dtype=None):
+    def load(self, key):  # uncached
         import torch
         from safetensors import safe_open
+        fn = self.map[key]
+        if fn not in self.files:
+            self.files[fn] = safe_open(os.path.join(self.path, fn), framework="pt", device="cpu")
+        return self.files[fn].get_tensor(key).to(self.device, torch.float32)
+
+    def __call__(self, key):
         if key not in self.cache:
-            fn = self.map[key]
-            if fn not in self.files:
-                self.files[fn] = safe_open(os.path.join(self.path, fn), framework="pt", device="cpu")
-            self.cache[key] = self.files[fn].get_tensor(key).to(self.device, torch.float32)
+            self.cache[key] = self.load(key)
         return self.cache[key]
 
     def keys(self, prefix):
@@ -187,7 +197,7 @@ def main():
     import numpy as np
     import torch
     import torch.nn.functional as F
-    from PIL import Image
+    import transformers.models.qwen3_vl.modeling_qwen3_vl as mq
     from transformers import AutoConfig, Qwen3VLForConditionalGeneration, Qwen3VLProcessor
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -210,6 +220,8 @@ def main():
     SEL = cfg["select_layer"]
     NV = cfg["vl_self_attention_cfg"]["num_layers"]
     H_V, D_V = cfg["vl_self_attention_cfg"]["num_attention_heads"], cfg["vl_self_attention_cfg"]["attention_head_dim"]
+    NS = HOR + 1                                              # DiT tokens: [state | 40 actions]
+    BA = 23                                                   # BEHAVIOR R1 Pro action dims (of 132)
 
     # ---------------- input ---------------- #
     fr = load_frame(args.episode, args.frame)
@@ -222,8 +234,9 @@ def main():
     mask = ~np.isclose(q99, q01)
     sn = np.zeros_like(state61)
     sn[mask] = 2 * (state61[mask] - q01[mask]) / (q99[mask] - q01[mask]) - 1   # use_percentiles=True
-    state = torch.zeros(1, 1, cfg["max_state_dim"])
-    state[0, 0, :61] = torch.from_numpy(sn)
+    state = torch.zeros(cfg["max_state_dim"])
+    state[:61] = torch.from_numpy(sn)
+    state = state.to(dev)
 
     proc = Qwen3VLProcessor.from_pretrained(QWEN)
     proc.tokenizer.padding_side = "left"
@@ -233,10 +246,17 @@ def main():
     text = proc.apply_chat_template(conv, tokenize=False, add_generation_prompt=False)
     vl = proc(text=[text], images=frames, return_tensors="pt", padding=True)
     input_ids = vl["input_ids"][0]
-    S = input_ids.shape[0]
+    ids = input_ids.tolist()
+    S = len(ids)
     image_token_id = 151655
     image_mask = (input_ids == image_token_id)
-    print(f"[tokens] S={S} image tokens={int(image_mask.sum())} grid={vl['image_grid_thw'].tolist()}", flush=True)
+    pieces = [proc.tokenizer.decode([t]) for t in ids]
+    assert S >= WT
+    t0w = S - WT
+    tw = slice(t0w, S)
+    print(f"[tokens] S={S} image tokens={int(image_mask.sum())} window [{t0w}, {S}): "
+          f"{''.join('I' if image_mask[i] else 't' for i in range(t0w, S))}", flush=True)
+    assert image_mask[tw].any() and (~image_mask[tw]).any(), "window must straddle image and text tokens"
 
     # ---------------- weights ---------------- #
     Wt = Weights(MODEL, dev)
@@ -250,43 +270,54 @@ def main():
     qcfg.vision_config._attn_implementation = "eager"
     with torch.device(dev):
         bb = Qwen3VLForConditionalGeneration(qcfg)
-    sd = {k[len("backbone.model."):]: Wt(k) for k in Wt.keys("backbone.model.")}
+    sd = {k[len("backbone.model."):]: Wt.load(k) for k in Wt.keys("backbone.model.")}
     missing, unexpected = bb.load_state_dict(sd, strict=False)
+    del sd
     print(f"[backbone] missing={missing} unexpected={unexpected}", flush=True)
     if missing or unexpected:
         raise SystemExit("backbone weights do not match the 16-layer Qwen3-VL config")
     bb = bb.float().eval()
+    tc = qcfg.text_config
+    H, KV, HD, C = tc.num_attention_heads, tc.num_key_value_heads, tc.head_dim, tc.hidden_size
+    FF = tc.intermediate_size
+    EPS = tc.rms_norm_eps
 
     lm_layers = bb.model.language_model.layers
-    vblocks = bb.model.visual.blocks
-    cap = {"lm_in": [None] * SEL, "lm_attn": [None] * SEL, "vit": [None] * len(vblocks)}
+    cap = {"x_in": [None] * SEL, "out": [None] * SEL, "attn": [None] * SEL}
     hooks = []
     for i, L in enumerate(lm_layers):
         hooks.append(L.register_forward_pre_hook(
-            lambda m, a, kw, i=i: cap["lm_in"].__setitem__(i, (a[0] if a else kw["hidden_states"])[0].detach().clone()),
+            lambda m, a, kw, i=i: cap["x_in"].__setitem__(i, (a[0] if a else kw["hidden_states"])[0].detach().clone()),
             with_kwargs=True))
-        hooks.append(L.self_attn.register_forward_hook(
-            lambda m, a, o, i=i: cap["lm_attn"].__setitem__(i, o[1][0].detach().mean(0).clone())))
-    for i, B in enumerate(vblocks):
-        hooks.append(B.register_forward_hook(
-            lambda m, a, o, i=i: cap["vit"].__setitem__(i, (o[0] if isinstance(o, tuple) else o).detach().clone())))
-    hooks.append(bb.model.visual.patch_embed.register_forward_hook(
-        lambda m, a, o: cap.__setitem__("patch", o.detach().clone())))
-    hooks.append(bb.model.visual.merger.register_forward_hook(
-        lambda m, a, o: cap.__setitem__("merger", o.detach().clone())))
+        hooks.append(L.register_forward_hook(
+            lambda m, a, o, i=i: cap["out"].__setitem__(i, (o[0] if isinstance(o, tuple) else o)[0].detach().clone())))
     hooks.append(bb.model.language_model.embed_tokens.register_forward_hook(
         lambda m, a, o: cap.__setitem__("tok_emb", o[0].detach().clone())))
-    with torch.no_grad():
-        vin = {k: v.to(dev) for k, v in vl.items() if k in ("input_ids", "attention_mask", "pixel_values", "image_grid_thw", "mm_token_type_ids")}
-        vin["pixel_values"] = vin["pixel_values"].float()
-        out = bb(**vin, output_hidden_states=True)
-        feats = out.hidden_states[-1][0].float()             # [S, 2048], includes the final RMSNorm
+    orig_eager = mq.eager_attention_forward
+
+    def eager_capture(module, query, key, value, attention_mask, scaling, dropout=0.0, **kw):
+        out, w = orig_eager(module, query, key, value, attention_mask, scaling, dropout, **kw)
+        if isinstance(module, mq.Qwen3VLTextAttention):
+            cap["attn"][module.layer_idx] = dict(q=query[0].detach().clone(), k=key[0].detach().clone(),
+                                                 v=value[0].detach().clone(), probs=w[0].detach().clone(),
+                                                 out=out[0].detach().clone(), scaling=scaling)
+        return out, w
+
+    mq.eager_attention_forward = eager_capture
+    try:
+        with torch.no_grad():
+            vin = {k: v.to(dev) for k, v in vl.items() if k in ("input_ids", "attention_mask", "pixel_values", "image_grid_thw", "mm_token_type_ids")}
+            vin["pixel_values"] = vin["pixel_values"].float()
+            out = bb(**vin, output_hidden_states=True)
+            feats = out.hidden_states[-1][0].float()             # GR00T backbone_features
+    finally:
+        mq.eager_attention_forward = orig_eager
     for h in hooks:
         h.remove()
-    assert all(x is not None for x in cap["lm_in"]) and all(x is not None for x in cap["vit"])
-    print(f"[backbone] done S={S} feats={tuple(feats.shape)} ({time.time() - t0:.0f}s)", flush=True)
+    assert all(x is not None for x in cap["x_in"]) and all(x is not None for x in cap["attn"])
+    print(f"[backbone] done S={S} ({time.time() - t0:.0f}s)", flush=True)
 
-    # ---------------- action head (plain torch) ---------------- #
+    # ---------------- action head + trunk recompute (plain torch) ---------------- #
     P = "action_head."
 
     def lin(x, pre):
@@ -298,47 +329,80 @@ def main():
             return F.layer_norm(x, x.shape[-1:], eps=eps)
         return F.layer_norm(x, x.shape[-1:], Wt(pre + ".weight"), Wt(pre + ".bias"), eps)
 
-    def mha(xq, xkv, pre, H, D, kmask=None, keep=None):
-        q = lin(xq, pre + ".to_q").view(-1, H, D).transpose(0, 1)
-        k = lin(xkv, pre + ".to_k").view(-1, H, D).transpose(0, 1)
-        v = lin(xkv, pre + ".to_v").view(-1, H, D).transpose(0, 1)
+    def mha(xq, xkv, pre, Hh, D, kmask=None, keep=None):
+        q = lin(xq, pre + ".to_q").view(-1, Hh, D).transpose(0, 1)
+        k = lin(xkv, pre + ".to_k").view(-1, Hh, D).transpose(0, 1)
+        v = lin(xkv, pre + ".to_v").view(-1, Hh, D).transpose(0, 1)
         sc = q @ k.transpose(-1, -2) / math.sqrt(D)
         if kmask is not None:
             sc = sc.masked_fill(~kmask[None, None, :], float("-inf"))
         pr = sc.softmax(-1)
-        o = (pr @ v).transpose(0, 1).reshape(xq.shape[0], H * D)
+        o = (pr @ v).transpose(0, 1).reshape(xq.shape[0], Hh * D)
         out = lin(o, pre + ".to_out.0")
         if keep is not None:
-            keep.update(q=q, k=k, v=v, probs=pr, o=o)
+            keep.update(q=q, k=k, v=v, sc=sc, probs=pr, enc=pr @ v, ao=out)
         return out
 
     def ff(x, pre, keep=None):
-        h = F.gelu(lin(x, pre + ".net.0.proj"), approximate="tanh")
+        g = lin(x, pre + ".net.0.proj")
+        h = F.gelu(g, approximate="tanh")
         if keep is not None:
-            keep["ff_h"] = h
+            keep.update(gate=g, act=h)
         return lin(h, pre + ".net.2")
 
     def cat_lin(x, pre):  # CategorySpecificLinear at the embodiment slot
         return x @ Wt(pre + ".W")[slot] + Wt(pre + ".b")[slot]
 
+    asserts = {}
     with torch.no_grad():
+        # the 16 LM layers, recomputed from the captured x_in / q k v / softmax·V
+        trunk = []
+        for i, L in enumerate(lm_layers):
+            ca = cap["attn"][i]
+            x_in = cap["x_in"][i]
+            xn = L.input_layernorm(x_in)
+            enc = ca["out"]                                                    # [S, H, HD]
+            ao = L.self_attn.o_proj(enc.reshape(S, H * HD))
+            r1 = x_in + ao
+            xn2 = L.post_attention_layernorm(r1)
+            gate, up = L.mlp.gate_proj(xn2), L.mlp.up_proj(xn2)
+            act = F.silu(gate) * up
+            fo = L.mlp.down_proj(act)
+            o = r1 + fo
+            asserts[f"lm_recompute_maxabs"] = max(asserts.get("lm_recompute_maxabs", 0.0),
+                                                  float((o - cap["out"][i]).abs().max()))
+            kr = ca["k"].repeat_interleave(H // KV, dim=0)                     # [H, S, HD]
+            sc = (ca["q"][:, tw] @ kr.transpose(-1, -2)) * ca["scaling"]      # [H, Wt, S]
+            causal = torch.arange(S, device=dev)[None, :] > torch.arange(t0w, S, device=dev)[:, None]
+            sc = sc.masked_fill(causal[None], float("-inf"))
+            pr = sc.softmax(-1)
+            asserts["lm_probs_vs_captured_maxabs"] = max(asserts.get("lm_probs_vs_captured_maxabs", 0.0),
+                                                         float((pr - ca["probs"][:, tw]).abs().max()))
+            trunk.append(dict(kind="lm", x_in=x_in, xn=xn, q=ca["q"], k=ca["k"], v=ca["v"], sc=sc, probs=pr,
+                              enc=enc.transpose(0, 1), ao=ao, r1=r1, xn2=xn2, gate=gate, up=up, act=act, ff=fo, out=o))
+        lm_out = cap["out"][SEL - 1]
+        lnf = bb.model.language_model.norm(lm_out)
+        asserts["backbone_features_eq_final_rmsnorm_maxabs"] = float((lnf - feats).abs().max())
+
         vlln = ln(feats, 1e-5, P + "vlln")
         x = vlln
-        vlsa = []
         for j in range(NV):
             pre = P + f"vl_self_attention.transformer_blocks.{j}"
-            x = x + mha(ln(x, 1e-5, pre + ".norm1"), ln(x, 1e-5, pre + ".norm1"), pre + ".attn1", H_V, D_V)
-            x = x + ff(ln(x, 1e-5, pre + ".norm3"), pre + ".ff")
-            vlsa.append(x)
-        vl_tok = x                                            # [S, 2048] the DiT's K/V source
+            keep = {}
+            xn = ln(x, 1e-5, pre + ".norm1")
+            ao = mha(xn, xn, pre + ".attn1", H_V, D_V, None, keep)
+            r1 = x + ao
+            xn2 = ln(r1, 1e-5, pre + ".norm3")
+            fo = ff(xn2, pre + ".ff", keep)
+            o = r1 + fo
+            trunk.append(dict(kind="vlsa", pre=pre, x_in=x, xn=xn, q=keep["q"], k=keep["k"], v=keep["v"],
+                              sc=keep["sc"][:, tw], probs=keep["probs"][:, tw], enc=keep["enc"], ao=ao, r1=r1,
+                              xn2=xn2, gate=keep["gate"], act=keep["act"], ff=fo, out=o))
+            x = o
+        vl_tok = x                                            # [S, 2048] the DiT's cross-attention K/V source
 
-        st = state[0].to(dev)                                 # [1, 132]
-        st_h = F.relu(cat_lin(st, P + "state_encoder.layer1"))
-        st_feat = cat_lin(st_h, P + "state_encoder.layer2")  # [1, 1536]
-
-        g = torch.Generator().manual_seed(SEED)
-        x_t = torch.randn(1, HOR, ADIM, generator=g)[0].to(dev)
-        x0 = x_t.clone()
+        st_h = F.relu(cat_lin(state, P + "state_encoder.layer1"))
+        st_feat = cat_lin(st_h, P + "state_encoder.layer2")  # [1536] = DiT token 0
         txt_mask = (~image_mask).to(dev)
         img_mask = image_mask.to(dev)
         pos = Wt(P + "position_embedding.weight")[:HOR]
@@ -356,11 +420,10 @@ def main():
             e = torch.cat([e.sin(), e.cos()])
             return torch.cat([e[half:], e[:half]])
 
-        steps = []
-        for k in range(K):
+        def dit(x_t, k):
             t_cont = k / float(K)
             t_disc = int(t_cont * NBUCK)
-            rec = {"k": k, "t_cont": t_cont, "t_disc": t_disc, "x_t": x_t.clone()}
+            rec = {"k": k, "t": t_cont, "t_disc": t_disc, "x_t": x_t.clone()}
             tv = torch.full((HOR,), float(t_disc), device=dev)
             a_emb = cat_lin(x_t, P + "action_encoder.W1")
             tau = tsin(tv, DIT)
@@ -368,62 +431,75 @@ def main():
             h2s = h2 * torch.sigmoid(h2)
             a_feat = cat_lin(h2s, P + "action_encoder.W3")
             a_feat_pos = a_feat + pos
-            sa = torch.cat([st_feat, a_feat_pos], 0)          # [41, 1536]
-            rec.update(a_emb=a_emb, tau=tau[0], w2=h2s, a_feat=a_feat, a_feat_pos=a_feat_pos, sa_in=sa.clone())
-
+            sa = torch.cat([st_feat[None], a_feat_pos], 0)   # [41, 1536]
             tp = timesteps_proj(torch.tensor(float(t_disc), device=dev))
-            temb = lin(F.silu(lin(tp, P + "model.timestep_encoder.timestep_embedder.linear_1")),
-                       P + "model.timestep_encoder.timestep_embedder.linear_2")
-            rec.update(t_proj=tp, temb=temb)
+            th = F.silu(lin(tp, P + "model.timestep_encoder.timestep_embedder.linear_1"))
+            temb = lin(th, P + "model.timestep_encoder.timestep_embedder.linear_2")
+            rec.update(a_emb=a_emb, tau=tau[0], h2s=h2s, a_feat=a_feat, a_feat_pos=a_feat_pos, sa=sa,
+                       tp=tp, th=th, temb=temb, layers=[])
             h = sa
-            blocks = []
             for b in range(NB):
                 pre = P + f"model.transformer_blocks.{b}"
-                ss = lin(F.silu(temb), pre + ".norm1.linear")
-                scale, shift = ss.chunk(2)
+                scale, shift = lin(F.silu(temb), pre + ".norm1.linear").chunk(2)
                 n1 = F.layer_norm(h, h.shape[-1:], eps=1e-5) * (1 + scale) + shift
                 keep = {}
                 if b % 2 == 1:
                     kind, kv, km = "self", n1, None
                 else:
-                    kind = "text" if b % 4 == 0 else "image"
-                    kv, km = vl_tok, (txt_mask if kind == "text" else img_mask)
-                at = mha(n1, kv, pre + ".attn1", H_A, D_A, km, keep)
-                r1 = h + at
+                    kind = "cross_text" if b % 4 == 0 else "cross_image"
+                    kv, km = vl_tok, (txt_mask if kind == "cross_text" else img_mask)
+                ao = mha(n1, kv, pre + ".attn1", H_A, D_A, km, keep)
+                r1 = h + ao
                 n3 = F.layer_norm(r1, r1.shape[-1:], eps=1e-5)
                 fo = ff(n3, pre + ".ff", keep)
-                h_out = r1 + fo
-                blk = dict(kind=kind, scale=scale, shift=shift, out=h_out,
-                           attn_mass=keep["probs"].mean((0, 1)))  # [n_keys] mean over heads+queries
-                if b < 2 or b == NB - 1:
-                    blk.update(x_in=h, n1=n1, attn=at, r1=r1, n3=n3, ff_out=fo, **keep)
-                blocks.append(blk)
-                h = h_out
+                o = r1 + fo
+                pm = keep["probs"].mean(0)                    # [41, keys] head-mean
+                if kind == "self":
+                    mass4 = torch.stack([pm[:, 0], torch.zeros_like(pm[:, 0]), torch.zeros_like(pm[:, 0]),
+                                         pm[:, 1:].sum(-1)], -1)
+                    attn = torch.cat([torch.zeros(NS, WT, device=dev), pm], -1)
+                else:
+                    z = torch.zeros_like(pm[:, 0])
+                    mass4 = torch.stack([z, pm[:, img_mask].sum(-1), pm[:, txt_mask].sum(-1), z], -1)
+                    attn = torch.cat([pm[:, tw], torch.zeros(NS, NS, device=dev)], -1)
+                rec["layers"].append(dict(kind=kind, x_in=h, scale=scale, shift=shift, n1=n1, r1=r1, n3=n3,
+                                          ff=fo, out=o, mass4=mass4, attn=attn, **keep))
+                h = o
             shift_o, scale_o = lin(F.silu(temb), P + "model.proj_out_1").chunk(2)
             no = F.layer_norm(h, h.shape[-1:], eps=1e-6) * (1 + scale_o) + shift_o
             dit_out = lin(no, P + "model.proj_out_2")         # [41, 1024]
             dh = F.relu(cat_lin(dit_out, P + "action_decoder.layer1"))
             pred = cat_lin(dh, P + "action_decoder.layer2")  # [41, 132]
             vel = pred[-HOR:]
-            x_next = x_t + (1.0 / K) * vel
-            rec.update(blocks=blocks, final_shift=shift_o, final_scale=scale_o, final_norm=no,
-                       dit_out=dit_out, dec_h=dh, pred=pred, v=vel, x_next=x_next.clone())
+            rec.update(x_out=h, final_scale=scale_o, final_shift=shift_o, final=no, dit_out=dit_out, dec_h=dh,
+                       pred=pred, v=vel, x_next=x_t + vel / K)
+            return rec
+
+        g = torch.Generator().manual_seed(SEED)
+        noise = torch.randn(1, HOR, ADIM, generator=g)[0].to(dev)
+        x_t = noise.clone()
+        steps = []
+        for k in range(K):
+            rec = dit(x_t, k)
             steps.append(rec)
-            x_t = x_next
+            x_t = rec["x_next"]
         action = x_t
+        parts = []
+        for sd_ in range(NPART):
+            n_s = torch.randn(1, HOR, ADIM, generator=torch.Generator().manual_seed(sd_))[0].to(dev)
+            r = dit(n_s, 0)
+            parts.append(dict(x0=n_s, v=r["v"], chunk=n_s + r["v"],
+                              mass=torch.stack([L_["mass4"] for L_ in r["layers"]])))
     print(f"[action head] done |a|max={float(action.abs().max()):.3f} ({time.time() - t0:.0f}s)", flush=True)
 
     # ---------------- equivalence vs the official Isaac-GR00T modules ---------------- #
-    asserts = {}
     dit_mod = load_module("gr00t_dit", os.path.join(GR00T_SRC, "gr00t/model/modules/dit.py"))
     with torch.no_grad():
         off = dit_mod.AlternateVLDiT(**{**cfg["diffusion_model_cfg"], "output_dim": cfg["hidden_size"]},
                                      cross_attention_dim=cfg["backbone_embedding_dim"],
                                      attend_text_every_n_blocks=2).to(dev).float().eval()
-        osd = {k[len(P + "model."):]: Wt(k) for k in Wt.keys(P + "model.")}
-        mi, un = off.load_state_dict(osd, strict=True), None
-        sa0 = steps[2]["sa_in"][None]
-        ref = off(hidden_states=sa0, encoder_hidden_states=vl_tok[None],
+        off.load_state_dict({k[len(P + "model."):]: Wt(k) for k in Wt.keys(P + "model.")}, strict=True)
+        ref = off(hidden_states=steps[2]["sa"][None], encoder_hidden_states=vl_tok[None],
                   timestep=torch.tensor([steps[2]["t_disc"]], device=dev),
                   image_mask=img_mask[None], backbone_attention_mask=torch.ones_like(img_mask)[None])
         asserts["dit_vs_official_maxabs(step2)"] = float((ref[0] - steps[2]["dit_out"]).abs().max())
@@ -431,247 +507,347 @@ def main():
         vsa.load_state_dict({k[len(P + "vl_self_attention."):]: Wt(k) for k in Wt.keys(P + "vl_self_attention.")}, strict=True)
         asserts["vlsa_vs_official_maxabs"] = float((vsa(vlln[None])[0] - vl_tok).abs().max())
         del off, vsa
-    asserts["euler_identity_maxabs"] = max(
-        float((s["x_next"] - s["x_t"] - s["v"] / K).abs().max()) for s in steps)
-    asserts["dit_residual_identity_maxabs(b0,step0)"] = float(
-        (steps[0]["blocks"][0]["out"] - steps[0]["blocks"][0]["x_in"] - steps[0]["blocks"][0]["attn"]
-         - steps[0]["blocks"][0]["ff_out"]).abs().max())
+    asserts["euler_identity_maxabs"] = max(float((s["x_next"] - s["x_t"] - s["v"] / K).abs().max()) for s in steps)
+    L00 = steps[0]["layers"][0]
+    asserts["dit_residual_identity_maxabs(E0,step0)"] = float((L00["out"] - L00["x_in"] - L00["ao"] - L00["ff"]).abs().max())
     print("[assert]", asserts, flush=True)
     if max(asserts.values()) > 2e-3:
-        raise SystemExit("re-implementation disagrees with the official Isaac-GR00T modules")
+        raise SystemExit("re-implementation disagrees with transformers / the official Isaac-GR00T modules")
 
-    # ---------------- export ---------------- #
-    W, A = {}, {}
+    # ---------------- export (the shared VLA schema of public/k005b-*.json) ---------------- #
+    Wx, A = {}, {}
 
-    def wput(name, full, window, offset, desc):
-        W[name] = ent(window, full, offset, desc)
+    def put(D, name, window, full, offset, desc):
+        D[name] = ent(window, full, offset, desc)
 
-    def aput(name, full, window, offset, desc):
-        A[name] = ent(window, full, offset, desc)
+    def rms_agg(x):  # [T, C] -> [T, 2]: mean(x^2) over the FULL C | rsqrt(mean+eps)
+        ms = x.pow(2).mean(-1)
+        return torch.stack([ms, torch.rsqrt(ms + EPS)], -1), ms
 
-    def a2(name, x, desc, cw=WC):  # [T, C] -> all rows, channels [0, cw)
-        aput(name, x, x[:, :cw], [0, 0], desc)
+    def ln_agg(x, eps):  # [T, C] -> [T, 2]: mean over the FULL C | 1/sqrt(var+eps)
+        mu = x.mean(-1)
+        return torch.stack([mu, torch.rsqrt(x.var(-1, unbiased=False) + eps)], -1), mu
 
-    # backbone
-    vis = cap["merger"]                                      # [192, 2048]
-    a2("bb.tok_emb", cap["tok_emb"], "input embeddings (text rows: embed_tokens; image rows are replaced by the merger output)")
-    a2("bb.visual_tokens", vis, "vision merger output = the 64 visual tokens per view [192, 2048]")
-    patch = cap["patch"]
-    aput("vit.patch", patch, patch[:256, :WC], [0, 0], "patch_embed output, head view (256 patches of 16px, merge-window order)")
-    vit_norm = torch.stack([v.norm(dim=-1) for v in cap["vit"]])   # [24, 768]
-    aput("vit.block_norm", vit_norm, vit_norm, [0, 0], "per-patch residual norm after each of the 24 vision blocks")
-    for i in (0, len(vblocks) - 1):
-        aput(f"vit.B{i}.out", cap["vit"][i], cap["vit"][i][:256, :WC], [0, 0], f"vision block {i} output, head view")
-    for i in range(SEL):
-        a2(f"lm.L{i}.x_in", cap["lm_in"][i], f"LM layer {i} residual stream in [S, 2048]")
-    lm_norm = torch.stack([x.norm(dim=-1) for x in cap["lm_in"]] + [feats.norm(dim=-1)])  # [17, S]
-    aput("lm.token_norm", lm_norm, lm_norm, [0, 0], "per-token residual norm into each LM layer; last row = backbone output")
-    a2("lm.out", feats, "backbone output = hidden_states[-1] (after the final RMSNorm)")
-    for i in (0, SEL - 1):
-        aput(f"lm.L{i}.attn", cap["lm_attn"][i], cap["lm_attn"][i], [0, 0], f"LM layer {i} causal attention, mean over 16 heads [S, S]")
-    a2("vlln", vlln, "vlln LayerNorm(2048) of the backbone output")
-    for j in range(NV):
-        a2(f"vlsa.B{j}.out", vlsa[j], f"vl_self_attention block {j} output (block {NV - 1} = the DiT's K/V source)")
-    vl_norm = vl_tok.norm(dim=-1)
-    aput("vl.token_norm", vl_norm, vl_norm, [0], "per-token norm of the VL tokens the DiT reads")
-    # the two K/V sources of the cross blocks: the same VL tokens split by image_mask
-    vl_img, vl_txt = vl_tok[img_mask], vl_tok[txt_mask]
-    a2("vl.image", vl_img, f"VL tokens where image_mask = 1 [{vl_img.shape[0]}, 2048]: K/V of the image cross blocks (b % 4 == 2)")
-    a2("vl.text", vl_txt, f"VL tokens where image_mask = 0 [{vl_txt.shape[0]}, 2048]: K/V of the text cross blocks (b % 4 == 0)")
+    def sm_agg(sc):  # softmax agg over the full key row: max | 1/sum exp(s-max)
+        mx = sc.max(-1).values
+        return torch.stack([mx, 1.0 / torch.exp(sc - mx[..., None]).sum(-1)], -1), mx
 
-    # state + adapters
-    aput("state.raw", torch.from_numpy(state61), torch.from_numpy(state61), [0], "BEHAVIOR observation.state (61, R1Pro proprio)")
-    aput("state.norm", state[0, 0], state[0, 0], [0], "q01/q99 -> [-1,1] (BEHAVIOR index stats), zero-padded to 132")
-    aput("state.h", st_h[0], st_h[0, :WC], [0], "state_encoder layer1 + ReLU [1024] (slot 23)")
-    aput("state.feat", st_feat[0], st_feat[0, :WC], [0], "state token = state_encoder output [1536] (slot 23)")
-    pos_full = Wt(P + "position_embedding.weight")
-    wput("pos_emb", pos_full, pos_full[:HOR, :WC], [0, 0], "learned action position embedding [1024, 1536], rows 0..39 used")
+    def heads_w(w, nh, hd):  # Linear weight [nh*hd, in] -> [nh, hd, in]
+        return w.view(nh, hd, w.shape[-1])
 
-    # DiT, step 0 (anatomy) in float32
-    s0 = steps[0]
-    aput("x0", x0, x0, [0, 0], f"initial noise randn(40, 132), seed {SEED}")
-    for nm, desc in (("a_emb", "action_encoder W1(a) [40, 1536]"), ("w2", "swish(W2[a_emb | tau]) [40, 1536]"),
-                     ("a_feat", "W3(...) [40, 1536]"), ("a_feat_pos", "action tokens = W3(...) + pos [40, 1536]"),
-                     ("sa_in", "DiT input sequence = [state token | 40 action tokens] [41, 1536]")):
-        a2(f"s0.{nm}", s0[nm], desc)
-    aput("s0.tau", s0["tau"], s0["tau"][:WC], [0], "sincos(t_disc) [1536] concatenated to W1(a)")
-    aput("s0.t_proj", s0["t_proj"], s0["t_proj"], [0], "Timesteps(256) of t_disc (flip_sin_to_cos)")
-    aput("s0.temb", s0["temb"], s0["temb"][:WC], [0], "temb = TimestepEmbedding(Timesteps(t_disc)) [1536]")
-    for b in (0, 1):
-        B = s0["blocks"][b]
-        pre = f"s0.D{b}"
-        a2(pre + ".x_in", B["x_in"], f"DiT block {b} in")
-        a2(pre + ".n1", B["n1"], f"AdaLN(x) = LN(x)(1+scale)+shift")
-        aput(pre + ".scale", B["scale"], B["scale"][:WC], [0], "AdaLN scale = chunk0(Linear(SiLU(temb)))")
-        aput(pre + ".shift", B["shift"], B["shift"][:WC], [0], "AdaLN shift = chunk1(Linear(SiLU(temb)))")
-        aput(pre + ".q", B["q"], B["q"][0], [0, 0, 0], "Q head 0 [41, 48] (from the sa sequence)")
-        aput(pre + ".k", B["k"], B["k"][0], [0, 0, 0], "K head 0 (cross: from the VL tokens; self: from sa)")
-        aput(pre + ".v", B["v"], B["v"][0], [0, 0, 0], "V head 0")
-        aput(pre + ".probs", B["probs"], B["probs"][0], [0, 0, 0], "attention probs head 0 (masked keys = 0)")
-        a2(pre + ".attn", B["attn"], "to_out(attention)")
-        a2(pre + ".r1", B["r1"], "residual after attention")
-        a2(pre + ".n3", B["n3"], "LN (no affine) before FF")
-        aput(pre + ".ff_h", B["ff_h"], B["ff_h"][:, :WF], [0, 0], "GELU(tanh) hidden [41, 6144]")
-        a2(pre + ".ff_out", B["ff_out"], "FF output")
-        a2(pre + ".out", B["out"], f"DiT block {b} out")
-        wq = Wt(P + f"model.transformer_blocks.{b}.attn1.to_q.weight")
-        wk = Wt(P + f"model.transformer_blocks.{b}.attn1.to_k.weight")
-        wv = Wt(P + f"model.transformer_blocks.{b}.attn1.to_v.weight")
-        wo = Wt(P + f"model.transformer_blocks.{b}.attn1.to_out.0.weight")
-        wa = Wt(P + f"model.transformer_blocks.{b}.norm1.linear.weight")
-        w1 = Wt(P + f"model.transformer_blocks.{b}.ff.net.0.proj.weight")
-        w2 = Wt(P + f"model.transformer_blocks.{b}.ff.net.2.weight")
-        wput(f"D{b}.to_q", wq, wq[:D_A, :WC], [0, 0], "to_q [1536, 1536], head-0 rows")
-        wput(f"D{b}.to_k", wk, wk[:D_A, :WC], [0, 0], f"to_k [1536, {wk.shape[1]}], head-0 rows")
-        wput(f"D{b}.to_v", wv, wv[:D_A, :WC], [0, 0], f"to_v [1536, {wv.shape[1]}], head-0 rows")
-        wput(f"D{b}.to_out", wo, wo[:WC, :WC], [0, 0], "to_out [1536, 1536]")
-        wput(f"D{b}.ada", wa, wa[:WC, :WC], [0, 0], "norm1.linear [3072, 1536]: rows 0..1535 -> scale, 1536.. -> shift")
-        wput(f"D{b}.ff1", w1, w1[:WF, :WC], [0, 0], "ff.net.0.proj [6144, 1536]")
-        wput(f"D{b}.ff2", w2, w2[:WC, :WF], [0, 0], "ff.net.2 [1536, 6144]")
-    for nm, key in (("state_enc.L1", "state_encoder.layer1"), ("state_enc.L2", "state_encoder.layer2"),
-                    ("action_enc.W1", "action_encoder.W1"), ("action_enc.W2", "action_encoder.W2"),
-                    ("action_enc.W3", "action_encoder.W3"), ("action_dec.L1", "action_decoder.layer1"),
-                    ("action_dec.L2", "action_decoder.layer2")):
-        Wf = Wt(P + key + ".W")
-        ws = Wf[slot]
-        wput(nm, ws, ws[:WC, :WC] if ws.shape[1] >= WC else ws[:WC], [0, 0],
-             f"{key}.W[slot {slot}] {list(ws.shape)} (CategorySpecificLinear, x @ W + b)")
-    # the untrained-slot evidence: per-slot std of every adapter matrix (init = 0.02)
-    slot_std = {}
-    for key in ("state_encoder.layer1", "action_encoder.W1", "action_encoder.W2", "action_decoder.layer2"):
-        Wf = Wt(P + key + ".W")
-        slot_std[key] = [float(Wf[i].std()) for i in range(Wf.shape[0])]
-    tw1 = Wt(P + "model.timestep_encoder.timestep_embedder.linear_1.weight")
-    wput("time.lin1", tw1, tw1[:WC, :WC], [0, 0], "timestep_embedder.linear_1 [1536, 256]")
-    po2 = Wt(P + "model.proj_out_2.weight")
-    wput("proj_out_2", po2, po2[:WC, :WC], [0, 0], "proj_out_2 [1024, 1536]")
+    # embed: the WT window tokens' rows of the embed table (gathered, `row_ids`)
+    emb_table = bb.model.language_model.embed_tokens.weight
+    wids = ids[t0w:]
+    put(Wx, "embed", emb_table[torch.tensor(wids, device=dev)][:, :WC], emb_table, [0, 0],
+        "embed_tokens [vocab, 2048]: the rows of the window's tokens (gathered); image rows are <|image_pad|>")
+    Wx["embed"]["row_ids"] = wids
+    x0_ = cap["x_in"][0]
+    put(A, "embed_out", x0_[tw, :WC], x0_, [t0w, 0],
+        "LM input = text rows of embed_tokens | image rows replaced by the vision merger output [S, 2048]")
 
-    # per-step, float16 (all K steps, all blocks)
+    with torch.no_grad():
+        for l, Lr in enumerate(trunk):
+            Ln = f"L{l}"
+            lm = Lr["kind"] == "lm"
+            tag = f"LM layer {l}" if lm else f"vl_self_attention block {l - SEL}"
+            put(A, f"{Ln}.x_in", Lr["x_in"][tw, :WC], Lr["x_in"], [t0w, 0], f"{tag} residual stream in [S, 2048]")
+            if lm:
+                agg, ms = rms_agg(Lr["x_in"])
+                put(A, f"{Ln}.ln1_agg", agg[tw], ms, [t0w, 0], "RMSNorm agg over the full 2048: mean(x^2) | rsqrt(mean+1e-6)")
+                agg, ms = rms_agg(Lr["r1"])
+                put(A, f"{Ln}.ln2_agg", agg[tw], ms, [t0w, 0], "RMSNorm agg over the full 2048: mean(x^2) | rsqrt(mean+1e-6)")
+            else:
+                agg, mu = ln_agg(Lr["x_in"], 1e-5)
+                put(A, f"{Ln}.ln1_agg", agg[tw], mu, [t0w, 0], "LayerNorm agg over the full 2048: mean | 1/sqrt(var+1e-5)")
+                agg, mu = ln_agg(Lr["r1"], 1e-5)
+                put(A, f"{Ln}.ln2_agg", agg[tw], mu, [t0w, 0], "LayerNorm agg over the full 2048: mean | 1/sqrt(var+1e-5)")
+            nh = H if lm else 1
+            nkv = KV if lm else 1
+            q, k, v, enc = Lr["q"][:nh], Lr["k"][:nkv], Lr["v"][:nkv], Lr["enc"][:nh]   # [h, S, d]
+            sc, pr = Lr["sc"][:nh], Lr["probs"][:nh]                                     # [h, Wt, S]
+            qd = "Q (q_norm + RoPE)" if lm else "Q = to_q(LN(x)) + bias (no RoPE; head 0 of 32)"
+            put(A, f"{Ln}.q", q[:, tw, :WD], q, [0, t0w, 0], f"{tag} {qd} [head, token, dim]")
+            put(A, f"{Ln}.k", k[:, tw, :WD], k, [0, t0w, 0], f"{tag} K [kv_head, token, dim]")
+            put(A, f"{Ln}.v", v[:, tw, :WD], v, [0, t0w, 0], f"{tag} V [kv_head, token, dim]")
+            mdesc = "causal: masked=-inf" if lm else "bidirectional: no mask"
+            put(A, f"{Ln}.attn_scores", sc[:, :, tw], sc, [0, t0w, t0w], f"{tag} q.k/sqrt(d) ({mdesc}) rows=query cols=key")
+            agg, mx = sm_agg(sc)
+            put(A, f"{Ln}.attn_agg", agg, mx, [0, t0w, 0], f"softmax agg over all {S} keys: max | 1/sum exp(s-max)")
+            put(A, f"{Ln}.attn_probs", pr[:, :, tw], pr, [0, t0w, t0w], f"{tag} attention probs (rows over all {S} keys)")
+            put(A, f"{Ln}.attn_out", enc[:, tw, :WD], enc, [0, t0w, 0], f"{tag} per-head sum p.V")
+            od = "o_proj out" if lm else "to_out out (incl. bias)"
+            md = "down_proj(silu(gate) * up)" if lm else "fc2(gelu_tanh(fc1)) (incl. biases)"
+            for nm, tns, d in (("ln1_out", Lr["xn"], "norm1 out" if not lm else "input RMSNorm out"),
+                               ("o_out", Lr["ao"], od), ("attn_resid", Lr["r1"], "x + attn"),
+                               ("ln2_out", Lr["xn2"], "norm3 out" if not lm else "post-attn RMSNorm out"),
+                               ("mlp_out", Lr["ff"], md), ("mlp_resid", Lr["out"], "x + MLP (layer out"
+                                                         + (", before deepstack)" if lm and l < 3 else ")"))):
+                put(A, f"{Ln}.{nm}", tns[tw, :WC], tns, [t0w, 0], f"{tag} {d}")
+            put(A, f"{Ln}.mlp_gate", Lr["gate"][tw, :WF], Lr["gate"], [t0w, 0], f"{tag} " + ("gate_proj out" if lm else "fc1 out (pre-GELU)"))
+            if lm:
+                put(A, f"{Ln}.mlp_up", Lr["up"][tw, :WF], Lr["up"], [t0w, 0], f"{tag} up_proj out")
+            put(A, f"{Ln}.mlp_act", Lr["act"][tw, :WF], Lr["act"], [t0w, 0], f"{tag} " + ("silu(gate) * up" if lm else "gelu_tanh(fc1)"))
+            # weights
+            if lm:
+                La = lm_layers[l]
+                at = La.self_attn
+                qw, kw, vw = heads_w(at.q_proj.weight, H, HD), heads_w(at.k_proj.weight, KV, HD), heads_w(at.v_proj.weight, KV, HD)
+                put(Wx, f"{Ln}.ln1_w", La.input_layernorm.weight, La.input_layernorm.weight, [0], "input RMSNorm γ")
+                put(Wx, f"{Ln}.ln2_w", La.post_attention_layernorm.weight, La.post_attention_layernorm.weight, [0], "post-attn RMSNorm γ")
+                put(Wx, f"{Ln}.q_norm", at.q_norm.weight, at.q_norm.weight, [0], "q_norm γ [head_dim]")
+                put(Wx, f"{Ln}.k_norm", at.k_norm.weight, at.k_norm.weight, [0], "k_norm γ [head_dim]")
+                ow, gw, uw, dw = at.o_proj.weight, La.mlp.gate_proj.weight, La.mlp.up_proj.weight, La.mlp.down_proj.weight
+                put(Wx, f"{Ln}.up_w", uw[:WF, :WC], uw, [0, 0], "up_proj [FF, C]")
+            else:
+                pre = Lr["pre"]
+                qw = heads_w(Wt(pre + ".attn1.to_q.weight"), H_V, D_V)[:1]
+                kw = heads_w(Wt(pre + ".attn1.to_k.weight"), H_V, D_V)[:1]
+                vw = heads_w(Wt(pre + ".attn1.to_v.weight"), H_V, D_V)[:1]
+                for nm, key in (("q_b", "to_q"), ("k_b", "to_k"), ("v_b", "to_v")):
+                    bfull = Wt(pre + f".attn1.{key}.bias").view(H_V, D_V)
+                    put(Wx, f"{Ln}.{nm}", bfull[:1, :WD], bfull, [0, 0], f"{key} bias [head, head_dim]")
+                for nm, key in (("ln1", "norm1"), ("ln2", "norm3")):
+                    put(Wx, f"{Ln}.{nm}_w", Wt(pre + f".{key}.weight"), Wt(pre + f".{key}.weight"), [0], f"{key} LayerNorm γ")
+                    put(Wx, f"{Ln}.{nm}_b", Wt(pre + f".{key}.bias"), Wt(pre + f".{key}.bias"), [0], f"{key} LayerNorm β")
+                ow, gw, dw = Wt(pre + ".attn1.to_out.0.weight"), Wt(pre + ".ff.net.0.proj.weight"), Wt(pre + ".ff.net.2.weight")
+            put(Wx, f"{Ln}.q_w", qw[:, :WD, :WC], qw, [0, 0, 0], "q weight [head, head_dim, C]")
+            put(Wx, f"{Ln}.k_w", kw[:, :WD, :WC], kw, [0, 0, 0], "k weight [kv_head, head_dim, C]")
+            put(Wx, f"{Ln}.v_w", vw[:, :WD, :WC], vw, [0, 0, 0], "v weight [kv_head, head_dim, C]")
+            put(Wx, f"{Ln}.o_w", ow[:WC, :WC], ow, [0, 0], "output projection [C, H·head_dim]")
+            put(Wx, f"{Ln}.gate_w", gw[:WF, :WC], gw, [0, 0], "gate_proj [FF, C]" if lm else "ff fc1 [FF, C]")
+            put(Wx, f"{Ln}.down_w", dw[:WC, :WF], dw, [0, 0], "down_proj [C, FF]" if lm else "ff fc2 [C, FF]")
+
+        agg, ms = rms_agg(lm_out)
+        put(A, "lnf_agg", agg[tw], ms, [t0w, 0], "backbone final RMSNorm agg over the full 2048")
+        nw = bb.model.language_model.norm.weight
+        put(Wx, "lnf_w", nw, nw, [0], "backbone final RMSNorm γ")
+        put(A, "lnf_out", lnf[tw, :WC], lnf, [t0w, 0], "backbone_features = final RMSNorm(LM layer 15 out) [S, 2048]")
+        agg, mu = ln_agg(feats, 1e-5)
+        put(A, "vlln_agg", agg[tw], mu, [t0w, 0], "vlln LayerNorm agg over the full 2048: mean | 1/sqrt(var+1e-5)")
+        put(Wx, "vlln_w", Wt(P + "vlln.weight"), Wt(P + "vlln.weight"), [0], "vlln LayerNorm γ")
+        put(Wx, "vlln_b", Wt(P + "vlln.bias"), Wt(P + "vlln.bias"), [0], "vlln LayerNorm β")
+        put(A, "vlln_out", vlln[tw, :WC], vlln, [t0w, 0], "vlln(backbone_features) -> vl_self_attention")
+
+        # expert = DiT anatomy at Euler step 0 (t = 0, x_t = the noise)
+        s0 = steps[0]
+        put(A, "expert_in", s0["sa"][:, :WC], s0["sa"], [0, 0], "DiT input [41, 1536] = [state token | 40 action tokens]")
+        for b, Lr in enumerate(s0["layers"]):
+            En = f"E{b}"
+            pre = P + f"model.transformer_blocks.{b}"
+            cross = Lr["kind"] != "self"
+            tag = f"DiT block {b} ({Lr['kind']})"
+            agg, mu = ln_agg(Lr["x_in"], 1e-5)
+            put(A, f"{En}.ln1_agg", agg, mu, [0, 0], "AdaLayerNorm agg over the full 1536: mean | 1/sqrt(var+1e-5)")
+            put(A, f"{En}.ln1", Lr["n1"][:, :WC], Lr["n1"], [0, 0], f"{tag} LN(x)(1+scale)+shift")
+            ada = torch.stack([Lr["scale"], Lr["shift"]])
+            put(A, f"{En}.ada", ada[:, :WC], ada, [0, 0], f"{tag} norm1.linear(SiLU(temb)) = [scale, shift] [2, 1536]")
+            q, k, v = Lr["q"][:1], Lr["k"][:1], Lr["v"][:1]
+            put(A, f"{En}.q", q[:, :, :WD], q, [0, 0, 0], f"{tag} Q = to_q(norm1) + bias (head 0 of 32)")
+            ks = (slice(None), tw if cross else slice(None), slice(0, WD))
+            koff = [0, t0w, 0] if cross else [0, 0, 0]
+            kd = "over the VL tokens (to_k(vl_self_attention out))" if cross else "over the 41 DiT tokens"
+            put(A, f"{En}.k", k[ks], k, koff, f"{tag} K {kd}")
+            put(A, f"{En}.v", v[ks], v, koff, f"{tag} V {kd}")
+            sc, pr = Lr["sc"][:1], Lr["probs"][:1]
+            if cross:
+                md = "text-only keys (image = -inf)" if Lr["kind"] == "cross_text" else "image-only keys (text = -inf)"
+                put(A, f"{En}.scp", sc[:, :, tw], sc, [0, 0, t0w], f"{tag} q.k/sqrt(48) on the VL window keys, {md}")
+                put(A, f"{En}.pp", pr[:, :, tw], pr, [0, 0, t0w], f"{tag} probs on the VL window keys (rows over all {S})")
+            else:
+                put(A, f"{En}.scs", sc, sc, [0, 0, 0], f"{tag} q.k/sqrt(48) over the 41 DiT tokens (no mask)")
+                put(A, f"{En}.ps", pr, pr, [0, 0, 0], f"{tag} probs over the 41 DiT tokens")
+            agg, mx = sm_agg(sc)
+            put(A, f"{En}.attn_agg", agg, mx, [0, 0, 0], "softmax agg over the full key row: max | 1/sum exp(s-max)")
+            enc = Lr["enc"][:1]
+            put(A, f"{En}.vo", enc[:, :, :WD], enc, [0, 0, 0], f"{tag} per-head sum p.V")
+            put(A, f"{En}.attn", Lr["attn"], Lr["attn"], [0, 0], "head-mean attention of the 41 DiT queries: VL window | 41 DiT keys")
+            put(A, f"{En}.attn_mass", Lr["mass4"], Lr["mass4"], [0, 0], "attention mass on [state token | image | text | action tokens]")
+            agg, mu = ln_agg(Lr["r1"], 1e-5)
+            put(A, f"{En}.ln2_agg", agg, mu, [0, 0], "norm3 LayerNorm agg (no affine) over the full 1536")
+            for nm, kk, d in (("o", "ao", "to_out out (incl. bias)"), ("res1", "r1", "x + attn"),
+                              ("ln2", "n3", "norm3 = LN(x) (no affine, no time)"), ("mlp", "ff", "fc2(gelu_tanh(fc1))"),
+                              ("out", "out", "x + MLP")):
+                put(A, f"{En}.{nm}", Lr[kk][:, :WC], Lr[kk], [0, 0], f"{tag} {d}")
+            for nm, kk, d in (("gate", "gate", "ff fc1 out (pre-GELU)"), ("act", "act", "gelu_tanh(fc1)")):
+                put(A, f"{En}.{nm}", Lr[kk][:, :WF], Lr[kk], [0, 0], f"{tag} {d} [41, 6144]")
+            kin = 2048 if cross else DIT
+            for nm, key in (("q", "to_q"), ("k", "to_k"), ("v", "to_v")):
+                wf = heads_w(Wt(pre + f".attn1.{key}.weight"), H_A, D_A)[:1]
+                put(Wx, f"{En}.{nm}_w", wf[:, :WD, :WC], wf, [0, 0, 0], f"{key} [head, head_dim, {kin if nm != 'q' else DIT}]")
+                bfull = Wt(pre + f".attn1.{key}.bias").view(H_A, D_A)
+                put(Wx, f"{En}.{nm}_b", bfull[:1, :WD], bfull, [0, 0], f"{key} bias [head, head_dim]")
+            for nm, key, sl in (("o_w", "attn1.to_out.0", (slice(0, WC), slice(0, WC))),
+                                ("gate_w", "ff.net.0.proj", (slice(0, WF), slice(0, WC))),
+                                ("down_w", "ff.net.2", (slice(0, WC), slice(0, WF)))):
+                wf = Wt(pre + f".{key}.weight")
+                put(Wx, f"{En}.{nm}", wf[sl], wf, [0, 0], f"{key} {list(wf.shape)} as [out, in]")
+        agg, mu = ln_agg(s0["x_out"], 1e-6)
+        put(A, "expert_out_agg", agg, mu, [0, 0], "final LayerNorm agg over the full 1536 (eps 1e-6)")
+        put(A, "expert_out", s0["final"][:, :WC], s0["final"], [0, 0], "LN(x)(1+scale)+shift, [shift, scale] = proj_out_1(SiLU(temb))")
+        fa = torch.stack([s0["final_scale"], s0["final_shift"]])
+        put(A, "expert_final_ada", fa[:, :WC], fa, [0, 0], "proj_out_1(SiLU(temb)) chunks as [scale, shift] (source order: shift, scale)")
+        po2 = Wt(P + "model.proj_out_2.weight")
+        put(Wx, "out_proj_w", po2[:WC, :WC], po2, [0, 0], "proj_out_2 [1024, 1536] as [out, in]")
+        put(A, "dit_out", s0["dit_out"][:, :WC], s0["dit_out"], [0, 0], "proj_out_2 out [41, 1024]")
+        d1 = Wt(P + "action_decoder.layer1.W")[slot].T
+        put(Wx, "dec_l1_w", d1[:WC, :WC], d1, [0, 0], f"action_decoder.layer1.W[slot {slot}] [1024, 1024] as [out, in]")
+        put(A, "dec_h", s0["dec_h"][:, :WC], s0["dec_h"], [0, 0], "ReLU(action_decoder.layer1) [41, 1024]")
+        d2 = Wt(P + "action_decoder.layer2.W")[slot].T
+        put(Wx, "action_w", d2[:BA], d2, [0, 0], f"action_decoder.layer2.W[slot {slot}] [132, 1024] as [out, in] (rows 0..22)")
+        d2b = Wt(P + "action_decoder.layer2.b")[slot]
+        put(Wx, "action_b", d2b[:BA], d2b, [0], "action_decoder.layer2.b (rows 0..22)")
+        put(A, "action_x1", noise[:, :BA], noise, [0, 0], f"x_0 = randn(40, 132), seed {SEED} (dims 0..22 shown)")
+        put(A, "action_velocity", s0["v"][:, :BA], s0["v"], [0, 0], "v(x_0, t=0) = action_decoder(...)[-40:] [40, 132]")
+        c1 = noise + s0["v"]
+        put(A, "action_chunk", c1[:, :BA], c1, [0, 0], "one Euler step over the whole interval: x_0 + v (K = 1)")
+
+        # suffix inputs (state / action / time encoders) at step 0
+        put(A, "fm_state75", state[:61], state, [0], "BEHAVIOR 61-dim proprio, q01/q99 -> [-1,1], zero-padded to 132")
+        w1 = Wt(P + "state_encoder.layer1.W")[slot].T
+        put(A, "fm_state_proj_w", w1[:WC, :61], w1, [0, 0], f"state_encoder.layer1.W[slot {slot}] [1024, 132] as [out, in]")
+        put(A, "fm_state_hidden", st_h[:WC], st_h, [0], "ReLU(state_encoder.layer1(state)) [1024]")
+        w2 = Wt(P + "state_encoder.layer2.W")[slot].T
+        put(A, "fm_state_l2_w", w2[:WC, :WC], w2, [0, 0], f"state_encoder.layer2.W[slot {slot}] [1536, 1024] as [out, in]")
+        put(A, "fm_state_emb", st_feat[:WC], st_feat, [0], "state_encoder(state) = DiT token 0 [1536]")
+        put(A, "fm_action_emb", s0["a_emb"][:, :WC], s0["a_emb"], [0, 0], "action_encoder.W1(x_t) [40, 1536]")
+        put(A, "fm_time_emb", s0["tau"][:WC], s0["tau"], [0], f"sincos(t_disc={s0['t_disc']}, 1536) (same for all 40 rows)")
+        put(A, "fm_time_mlp_hidden", s0["h2s"][:, :WC], s0["h2s"], [0, 0], "swish(W2(cat[a_emb, tau])) [40, 1536]")
+        put(A, "fm_action_feat", s0["a_feat"][:, :WC], s0["a_feat"], [0, 0], "action_encoder.W3(.) [40, 1536]")
+        put(A, "fm_pos_emb", pos[:, :WC], pos, [0, 0], "position_embedding.weight[:40] (learned) [40, 1536]")
+        put(A, "fm_action_time", s0["a_feat_pos"][:, :WC], s0["a_feat_pos"], [0, 0], "W3(.) + pos = DiT tokens 1..40")
+        for nm, key in (("fm_action_in_w", "W1"), ("fm_time_in_w", "W2"), ("fm_time_out_w", "W3")):
+            w = Wt(P + f"action_encoder.{key}.W")[slot].T
+            put(A, nm, w[:WC, :(BA if key == "W1" else WC)], w, [0, 0], f"action_encoder.{key}.W[slot {slot}] {list(w.shape)} as [out, in]")
+        put(A, "fm_t_proj", s0["tp"][:WC], s0["tp"], [0], f"Timesteps(256)(t_disc={s0['t_disc']}) [256]")
+        tw1 = Wt(P + "model.timestep_encoder.timestep_embedder.linear_1.weight")
+        put(A, "fm_temb_w1", tw1[:WC, :WC], tw1, [0, 0], "timestep_embedder.linear_1 [1536, 256]")
+        put(A, "fm_temb_hidden", s0["th"][None, :WC], s0["th"][None], [0, 0], "SiLU(linear_1(t_proj)) [1, 1536]")
+        tw2 = Wt(P + "model.timestep_encoder.timestep_embedder.linear_2.weight")
+        put(A, "fm_temb_w2", tw2[:WC, :WC], tw2, [0, 0], "timestep_embedder.linear_2 [1536, 1536]")
+        put(A, "fm_cond", s0["temb"][None, :WC], s0["temb"][None], [0, 0], "temb = linear_2(.) [1, 1536]: the AdaLN input of every block")
+        pt = torch.stack([torch.stack([p["x0"], p["v"], p["chunk"]]) for p in parts])[..., :BA]
+        put(A, "fm_particles", pt, pt, [0, 0, 0, 0], f"{NPART} seeds at t=0: x_0 | v | x_0 + v [K, 3, 40, 23]")
+        pms = torch.stack([p["mass"] for p in parts])
+        put(A, "fm_particles_mass", pms, pms, [0, 0, 0, 0], f"{NPART} seeds: per block, per DiT query attention mass [K, 32, 41, 4]")
+        mc = pt[:, 2].mean(0)
+        put(A, "fm_mean_chunk", mc, mc, [0, 0], "mean of the particles' x_0 + v")
+
     fm_steps = []
     for s in steps:
-        T = {}
-        T["x_t"] = ent16(s["x_t"], "x_t [40, 132]")
-        T["v"] = ent16(s["v"], "velocity v = action_decoder(DiT)[-40:] [40, 132]")
-        T["x_next"] = ent16(s["x_next"], "x_t + v/4")
-        T["sa_in"] = ent16(s["sa_in"][:, :WC], "DiT input [41, 1536] window", s["sa_in"])
-        T["temb"] = ent16(s["temb"][:WC], "temb [1536] window", s["temb"])
-        T["tau"] = ent16(s["tau"][:WC], "sincos(t_disc) [1536] window", s["tau"])
-        T["final_scale"] = ent16(s["final_scale"][:WC], "final AdaLN scale", s["final_scale"])
-        T["final_shift"] = ent16(s["final_shift"][:WC], "final AdaLN shift", s["final_shift"])
-        T["final_norm"] = ent16(s["final_norm"][:, :WC], "final AdaLN output", s["final_norm"])
-        T["dit_out"] = ent16(s["dit_out"][:, :WC], "proj_out_2 output [41, 1024]", s["dit_out"])
-        T["dec_h"] = ent16(s["dec_h"][:, :WC], "action_decoder layer1 + ReLU [41, 1024] (slot 23)", s["dec_h"])
-        for b, B in enumerate(s["blocks"]):
-            T[f"D{b}.out"] = ent16(B["out"][:, :WC], f"block {b} out [41, 1536]", B["out"])
-            T[f"D{b}.scale"] = ent16(B["scale"][:WC], f"block {b} AdaLN scale", B["scale"])
-            T[f"D{b}.shift"] = ent16(B["shift"][:WC], f"block {b} AdaLN shift", B["shift"])
-            T[f"D{b}.attn_mass"] = ent16(B["attn_mass"], f"block {b} attention mass per key (mean heads, queries)")
-        bn = torch.stack([s["sa_in"].norm(dim=-1)] + [B["out"].norm(dim=-1) for B in s["blocks"]])
-        T["block_norm"] = ent16(bn, "per-token residual norm: row 0 = DiT input, row b+1 = after block b [33, 41]")
-        fm_steps.append({"k": s["k"], "t": s["t_cont"], "t_disc": s["t_disc"], "tensors": T,
-                         "v_norm": float(s["v"].norm()), "v23_norm": float(s["v"][:, :23].norm())})
-
-    # thumbnails
-    thumbs = {}
-    for v, _ in CAMS:
-        im = Image.fromarray(fr["images"][v]).resize((THUMB, THUMB), Image.BILINEAR)
-        thumbs[v] = base64.b64encode(np.asarray(im, dtype=np.uint8).tobytes()).decode("ascii")
+        Tt = {"x": ent16(s["x_t"][:, :BA], "x_t [40, 132]", s["x_t"]), "v": ent16(s["v"][:, :BA], "v [40, 132]", s["v"]),
+              "x_next": ent16(s["x_next"][:, :BA], "x_t + v/4", s["x_next"]),
+              "expert_in": ent16(s["sa"][:, :WC], "DiT input", s["sa"]),
+              "expert_out": ent16(s["final"][:, :WC], "final AdaLN out", s["final"]),
+              "fm_time_emb": ent16(s["tau"][:WC], "sincos(t_disc)", s["tau"]),
+              "fm_action_emb": ent16(s["a_emb"][:, :WC], "W1(x_t)", s["a_emb"]),
+              "fm_time_mlp_hidden": ent16(s["h2s"][:, :WC], "swish(W2(cat[a_emb, tau]))", s["h2s"]),
+              "fm_action_feat": ent16(s["a_feat"][:, :WC], "W3(.)", s["a_feat"]),
+              "fm_action_time": ent16(s["a_feat_pos"][:, :WC], "W3(.) + pos", s["a_feat_pos"]),
+              "fm_t_proj": ent16(s["tp"][:WC], "Timesteps(256)(t_disc)", s["tp"]),
+              "fm_temb_hidden": ent16(s["th"][None, :WC], "SiLU(linear_1)", s["th"][None]),
+              "fm_cond": ent16(s["temb"][None, :WC], "temb", s["temb"][None]),
+              "expert_final_ada": ent16(torch.stack([s["final_scale"], s["final_shift"]])[:, :WC], "final [scale, shift]"),
+              "dit_out": ent16(s["dit_out"][:, :WC], "proj_out_2 out", s["dit_out"]),
+              "dec_h": ent16(s["dec_h"][:, :WC], "ReLU(decoder.layer1)", s["dec_h"])}
+        for b, Lr in enumerate(s["layers"]):
+            for nm, kk in (("ln1", "n1"), ("o", "ao"), ("res1", "r1"), ("ln2", "n3"), ("mlp", "ff"), ("out", "out")):
+                Tt[f"E{b}.{nm}"] = ent16(Lr[kk][:, :WC], f"DiT block {b} {nm}", Lr[kk])
+            Tt[f"E{b}.attn"] = ent16(Lr["attn"], f"block {b} head-mean attention")
+            Tt[f"E{b}.mass"] = ent16(Lr["mass4"], f"block {b} attention mass")
+            ada = torch.stack([Lr["scale"], Lr["shift"]])
+            Tt[f"E{b}.ada"] = ent16(ada[:, :WC], f"block {b} [scale, shift]", ada)
+        fm_steps.append({"k": s["k"], "t": s["t"], "t_disc": s["t_disc"], "tensors": Tt})
 
     def nparams(prefix):
         tot = 0
+        from safetensors import safe_open
         for k in Wt.keys(prefix):
             fn = Wt.map[k]
             if fn not in Wt.files:
-                from safetensors import safe_open
                 Wt.files[fn] = safe_open(os.path.join(MODEL, fn), framework="pt", device="cpu")
             tot += math.prod(Wt.files[fn].get_slice(k).get_shape())
         return tot
 
-    ids = input_ids.tolist()
-    runs, i = [], 0
-    while i < S:
-        if ids[i] == image_token_id:
-            j = i
-            while j < S and ids[j] == image_token_id:
-                j += 1
-            runs.append([i, j])
-            i = j
-        else:
-            i += 1
+    slot_std = {}
+    for key in ("state_encoder.layer1", "action_encoder.W1", "action_encoder.W2", "action_decoder.layer2"):
+        Wf = Wt(P + key + ".W")
+        slot_std[key] = [float(Wf[i].std()) for i in range(Wf.shape[0])]
+    kinds = [L_["kind"] for L_ in s0["layers"]]
+    action_n = action.cpu().numpy()
+    pchunk = pt[:, 2]
     config = {
-        "model": "GR00T-N1.7-3B", "checkpoint": MODEL, "global_step": open(os.path.join(MODEL, "latest")).read().strip(),
-        "sample": {"episode": args.episode, "frame": args.frame, "task_index": fr["task"]["task_index"],
-                   "task": fr["task"]["task"], "language": language, "video_hw": fr["video_hw"],
-                   "image_hw": list(fr["images"]["head"].shape[:2]),
-                   "image_grid_thw": vl["image_grid_thw"].tolist()},
-        "views": [v for v, _ in CAMS], "camera_keys": [k for _, k in CAMS],
-        "thumbs": thumbs, "thumb_size": THUMB,
-        "S": S, "token_ids": ids, "tokens": [proc.tokenizer.decode([t]) for t in ids],
-        "image_runs": runs, "image_token_id": image_token_id,
-        "window": {"Wc": WC, "Wd": WD, "Wf": WF},
-        "vit": {"n_block": len(vblocks), "width": qcfg.vision_config.hidden_size,
-                "heads": qcfg.vision_config.num_heads, "patch": qcfg.vision_config.patch_size,
-                "temporal_patch": qcfg.vision_config.temporal_patch_size,
-                "merge": qcfg.vision_config.spatial_merge_size,
-                "deepstack": list(qcfg.vision_config.deepstack_visual_indexes),
-                "n_patch": int(patch.shape[0])},
-        "lm": {"n_layer": SEL, "n_layer_full": n_lm_full, "width": qcfg.text_config.hidden_size,
-               "heads": qcfg.text_config.num_attention_heads, "kv_heads": qcfg.text_config.num_key_value_heads,
-               "head_dim": qcfg.text_config.head_dim, "ffn": qcfg.text_config.intermediate_size},
-        "vlsa": {"n_block": NV, "heads": H_V, "head_dim": D_V},
-        "dit": {"n_block": NB, "width": DIT, "heads": H_A, "head_dim": D_A, "ffn": 4 * DIT,
-                "out_dim": cfg["hidden_size"],
-                "kinds": [s0["blocks"][b]["kind"] for b in range(NB)]},
-        "action_horizon": HOR, "action_dim": ADIM, "state_dim": cfg["max_state_dim"],
-        "behavior_state_dim": 61, "behavior_action_dim": 23, "action_dim_names": ACTION_DIM_NAMES,
-        "state_groups": STATE_GROUPS,
-        "K": K, "num_timestep_buckets": NBUCK, "seed": SEED,
-        "t_disc": [s["t_disc"] for s in steps], "t_cont": [s["t_cont"] for s in steps],
-        "embodiment": {"tag": EMB_TAG, "slot": slot, "ids": emb_ids, "slot_std": slot_std,
-                       "trained": False},
-        "n_params": {"backbone": nparams("backbone."), "vision": nparams("backbone.model.model.visual."),
-                     "lm": nparams("backbone.model.model.language_model."),
-                     "action_head": nparams("action_head."), "dit": nparams("action_head.model."),
-                     "vlsa": nparams("action_head.vl_self_attention."),
-                     "adapters": nparams("action_head.state_encoder.") + nparams("action_head.action_encoder.")
-                     + nparams("action_head.action_decoder.")},
-        "action_norm_head": [float(x) for x in action[:, :23].norm(dim=0)],
-        "asserts": asserts,
+        "model_type": "groot_n1d7", "name": "GR00T N1.7-3B (BEHAVIOR R1 Pro slot)", "checkpoint": MODEL,
+        "step": open(os.path.join(MODEL, "latest")).read().strip(),
+        "variant": {
+            "id": "groot", "title": "GR00T N1.7",
+            "trunk_qk_norm": True, "trunk_causal": True, "trunk_mlp": "swiglu", "trunk_heads": False,
+            "embed_scale": 1, "expert_bias": True, "expert_ada": "adaln", "expert_mlp": "gelu",
+            "expert_final_ada": True, "state_token": True, "time_into_tokens": True, "ada_rows": 2,
+            "trunk_layer_kinds": ["lm"] * SEL + ["vlsa"] * NV, "expert_layer_kinds": kinds,
+        },
+        "n_layer": SEL + NV, "n_head": H, "n_kv_head": KV, "head_dim": HD, "n_embd": C, "intermediate": FF,
+        "vocab_size": int(emb_table.shape[0]), "rms_norm_eps": EPS,
+        "vlsa": {"n_layer": NV, "heads": H_V, "head_dim": D_V, "intermediate": int(Wt(trunk[SEL]["pre"] + ".ff.net.0.proj.weight").shape[0])},
+        "expert_hidden": DIT, "expert_heads": H_A, "expert_kv_heads": H_A, "expert_head_dim": D_A,
+        "expert_intermediate": int(Wt(P + "model.transformer_blocks.0.ff.net.0.proj.weight").shape[0]),
+        "dit_out_dim": cfg["hidden_size"],
+        "T_prefix": S, "T_text": S, "n_state_tokens": 0, "text_start": 0, "n_suffix": NS, "L_joint": S + NS,
+        "n_visual_tokens": int(image_mask.sum()), "p_star": S - 1, "boundary_column": S - 1,
+        "window": {"t0": t0w, "Wt": WT, "Wc": WC, "Wd": WD, "Wf": WF, "Wv": WT, "v0": 0, "embed_gathered": True},
+        "window_token_ids": wids, "window_tokens": pieces[t0w:],
+        "window_is_image": [bool(image_mask[i]) for i in range(t0w, S)],
+        "knack_names": [], "done_names": [],
+        "action_dim": BA, "action_horizon": HOR, "max_action_dim": ADIM, "max_state_dim": cfg["max_state_dim"],
+        "action_dim_names": ACTION_DIM_NAMES, "behavior_action_dim": BA, "state_groups": STATE_GROUPS,
+        "expert_n_layer": NB, "n_layer_pairs": NB, "suffix_visible_prefix": S, "suffix_visible_visual": int(image_mask.sum()),
+        "n_params": nparams(""), "n_params_trunk": nparams("backbone.model.model.language_model."),
+        "n_params_expert": nparams("action_head.model."), "n_params_vision": nparams("backbone.model.model.visual."),
+        "n_params_vlsa": nparams("action_head.vl_self_attention."),
+        "sample": {"row": None, "episode": args.episode, "frame": args.frame, "goal_text": language,
+                   "target_knack": None, "target_done": None, "task_index": fr["task"]["task_index"]},
+        "pred_knack": None, "pred_done": None, "prompt": text,
+        "action_norm": action_n[:, :BA].tolist(),
+        "embodiment": {"tag": EMB_TAG, "slot": slot, "trained": False, "slot_std": slot_std},
+        "fm": {"t": 0.0, "steps": K, "dt": 1.0 / K, "t_list": [s["t"] for s in steps], "t_end": 1.0,
+               "t_disc": [s["t_disc"] for s in steps], "num_timestep_buckets": NBUCK,
+               "seeds": list(range(NPART)), "n_particles": NPART,
+               "particle_chunk_std": float(pchunk.std(0).mean()), "asserts": asserts},
         "notes": [
-            "weights + activations are real: local GR00T-N1.7-3B safetensors, BEHAVIOR 2026-challenge-demos frame",
-            "backbone config/processor: local Qwen3-VL-2B-Instruct (Cosmos-Reason2-2B is not local; same "
-            "architecture, shapes match exactly); weights are GR00T's own backbone.* tensors",
+            "weights + activations are real: local GR00T-N1.7-3B safetensors (global_step " +
+            open(os.path.join(MODEL, "latest")).read().strip() + "), BEHAVIOR 2026-challenge-demos frame "
+            "(same episode/frame as the k005b export)",
+            "backbone config/processor: local Qwen3-VL-2B-Instruct (same architecture, shapes match exactly); "
+            "weights are GR00T's own backbone.* tensors; the LM is truncated to select_layer=16 layers",
+            "deepstack: vision blocks 5/11/17 are added to the image rows after LM layers 0/1/2 (outside the layer); "
+            "L0..L2 mlp_resid is the layer output before that add",
             f"embodiment slot {slot} ({EMB_TAG}) is untrained (per-slot std = init 0.02): the state/action "
-            "adapters are real-but-untrained weights -> toy; the decoded actions carry no meaning",
-            "state = BEHAVIOR 61-dim proprio (q01/q99 -> [-1,1]); the sim template's world-pose keys are "
-            "absent from the 2026 demos, so the 61 dims fill slots 0..60 and 61..131 are zero",
-            "compute in float32 from bf16 weights (official runtime: bf16)",
-            f"noise seed {SEED}; Euler integrates upward t = 0, .25, .5, .75 (t=0 is noise)",
+            "encoders and the action decoder are real-but-untrained weights; the decoded actions carry no meaning",
+            "state = BEHAVIOR 61-dim proprio (q01/q99 -> [-1,1]) in slots 0..60 of 132; actions: dims 0..22 of 132 shown",
+            "only head 0 of the 32 vl_self_attention / DiT heads is exported; to_out / ff biases are folded into the outputs",
+            "compute in float32 from bf16 weights (official runtime: bf16); asserts vs transformers and the official "
+            "Isaac-GR00T AlternateVLDiT / SelfAttentionTransformer",
+            f"noise seed {SEED}; Euler integrates upward t = 0, .25, .5, .75 (t=0 is noise), x += v/4",
         ],
     }
     os.makedirs(out_dir, exist_ok=True)
-    W["config"] = config
+    Wx["config"] = config
     A["config"] = config
-    for fn, obj in (("groot-weights.json", W), ("groot-acts.json", A),
-                    ("groot-fm.json", {"K": K, "steps": fm_steps})):
+    fm_out = {"K": K, "checkpoint_step": config["step"], "in_distribution": False, "steps": fm_steps}
+    for fn, obj in (("groot-weights.json", Wx), ("groot-acts.json", A), ("groot-fm.json", fm_out)):
         path = os.path.join(out_dir, fn)
         with open(path, "w") as f:
             json.dump(obj, f)
         print(f"[write] {path} {os.path.getsize(path) / 1e6:.1f} MB", flush=True)
 
-    with torch.no_grad():
-        check = {
-            "W.D0.to_q[r5,c7]": float(Wt(P + "model.transformer_blocks.0.attn1.to_q.weight")[5, 7]),
-            "W.D0.ada[r3,c9]": float(Wt(P + "model.transformer_blocks.0.norm1.linear.weight")[3, 9]),
-            "A.s0.D0.scale[c7]": float(steps[0]["blocks"][0]["scale"][7]),
-            "A.s0.D0.shift[c7]": float(steps[0]["blocks"][0]["shift"][7]),
-            "A.s2.D17.scale[c3]": float(steps[2]["blocks"][17]["scale"][3]),
-            "A.lm.L15.x_in[t5,c11]": float(cap["lm_in"][15][5, 11]),
-            "A.vlsa.B3.out[t0,c2]": float(vl_tok[0, 2]),
-            "A.s1.v[0,:5]": steps[1]["v"][0, :5].tolist(),
-            "A.action[0,:5]": action[0, :5].tolist(),
-            "asserts": asserts,
-        }
+    check = {
+        "W.E0.q_w[h0,d5,c7]": float(Wt(P + "model.transformer_blocks.0.attn1.to_q.weight")[5, 7]),
+        "A.E0.ada[scale,c7]": float(s0["layers"][0]["scale"][7]),
+        "A.L5.x_in[t=S-1,c11]": float(cap["x_in"][5][S - 1, 11]),
+        "A.L19.out[t=S-1,c2]": float(vl_tok[S - 1, 2]),
+        "A.s1.v[0,:5]": steps[1]["v"][0, :5].tolist(),
+        "A.action_norm[0,:5]": action_n[0, :5].tolist(),
+        "asserts": asserts,
+    }
     with open(os.path.join(out_dir, "groot-check.json"), "w") as f:
         json.dump(check, f, indent=1)
     print("[check]", json.dumps(check), flush=True)

@@ -30,7 +30,12 @@ export function walkthrough04_SelfAttention(args: IWalkthroughArgs) {
 
     let f = state.page.facts!;
     let pi0 = f.id === 'pi0';
-    if (pi0) commentary(wt, null, 0)`
+    let groot = f.id === 'groot';
+    if (groot) commentary(wt, null, 0)`
+注意力是 transformer 层的核心：输入嵌入矩阵中的各列在这里相互“交流”。在其他阶段，各列都是相互独立处理的。
+
+GR00T 主干（${f.trunkName}）的语言模型层用 GQA：每层 ${f.nHead} 个 query head、${f.nKv} 个 key/value head（每 ${f.nHead / f.nKv} 个 query head 共享一组 K/V），head 维度 ${f.headDim}。图中只画 L0 的 head 0（真实数值，显示 ${layout.shape.T} 个 token × ${layout.shape.A} 维的窗口）：其余 head 结构相同、只是权重不同，所以不重复铺开，标注为 ×${f.nHead}。Q/K 在点积前还要经过 q_norm / k_norm（RMSNorm）和 M-RoPE 旋转。主干只做自注意力：这里没有动作 token 参与，DiT 是在主干跑完之后才读它的输出。`;
+    else if (pi0) commentary(wt, null, 0)`
 注意力是 transformer 层的核心：输入嵌入矩阵中的各列在这里相互“交流”。在其他阶段，各列都是相互独立处理的。
 
 π0.5（Gemma-2B）的注意力是 MQA：每层 ${f.nHead} 个 query head 共享 _同一组_ key/value head（${f.nKv} 个 KV 头），head 维度 ${f.headDim}。图中只画 L0 的 head 0（真实数值，显示 ${layout.shape.T} 个 token × ${layout.shape.A} 维的窗口）：其余 ${f.nHead - 1} 个 head 与它结构相同、K/V 完全共用，只是 Q 权重不同，所以不重复铺开，标注为 ×${f.nHead}。Gemma 没有 q_norm / k_norm，Q/K 在点积前只做 RoPE 旋转。`;
@@ -160,7 +165,7 @@ ${embedInline((() => {
     commentary(wt)`
 点积衡量两个向量的相似度：越相似，点积越大；差异越大，点积越小甚至为负。
 
-${pi0 ? '在 π0.5 中，前缀内部是双向注意力：每个前缀 token 都能看到全部前缀 token，所以主干的注意力矩阵没有三角掩码。后缀流（动作专家）的查询可以关注全部前缀和全部后缀；前缀流不会“看到”后缀。' : '在 k005b 中，后缀流（动作专家）的查询可以关注前缀流的全部 K/V，也可以关注后缀自身；前缀流不会“看到”后缀。图中被掩码的位置是真实的 -inf（softmax 后为 0）。'}
+${groot ? '在 GR00T 的语言模型层中，注意力是因果的：每个 token 只能看到它自己和它之前的 token，所以注意力矩阵是下三角，被掩码的位置是真实的 -inf（softmax 后为 0）。主干最后 4 块 VL 自注意力则是双向的。' : pi0 ? '在 π0.5 中，前缀内部是双向注意力：每个前缀 token 都能看到全部前缀 token，所以主干的注意力矩阵没有三角掩码。后缀流（动作专家）的查询可以关注全部前缀和全部后缀；前缀流不会“看到”后缀。' : '在 k005b 中，后缀流（动作专家）的查询可以关注前缀流的全部 K/V，也可以关注后缀自身；前缀流不会“看到”后缀。图中被掩码的位置是真实的 -inf（softmax 后为 0）。'}
 
 点积之后还要除以 sqrt(${c_dimRef('A', DimStyle.A)}) = sqrt(${f.headDim})，其中 ${c_dimRef('A', DimStyle.A)} 是 Q/K/V 向量的长度。这样可避免较大的数值在下一步 softmax 中占据主导。
 
@@ -198,7 +203,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
     breakAfter();
     commentary(wt)`
-以上就是一个 head 的注意力过程：每一列通过用自己的 _query_ 去比较其他列的 _key_，找到相关信息并提取它们的值，并且只能看向允许的位置（后缀可看前缀，前缀不看后缀）。注意力输出随后经过输出投影，再加回残差。
+以上就是一个 head 的注意力过程：每一列通过用自己的 _query_ 去比较其他列的 _key_，找到相关信息并提取它们的值，并且只能看向允许的位置（${groot ? '因果掩码：只看自己和之前的 token' : '后缀可看前缀，前缀不看后缀'}）。注意力输出随后经过输出投影，再加回残差。
 `;
 
 // Running this process for all the columns produces our self-attention matrix, which is a square

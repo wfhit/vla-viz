@@ -66,7 +66,20 @@ export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout, fa
             writeTextToBuffer(state.modelFontBuf, l, new Vec4(0.75, 0.75, 0.75, 1).mul(e.op * tVis), x, y0 + k * (fs + 8), fs, mtx);
         });
     });
-    for (let i = 0; i < nPairs; i++) {
+    // GR00T: the trunk runs once and its output feeds the DiT's cross blocks: one header per layer
+    if (layout.crossDit) {
+        let hdr = (L: ILayerLike, text: string) => {
+            let e = extent(L.transformerLabel.cubes);
+            let vis = e ? e.op * L.transformerLabel.visible : 0;
+            if (!e || vis <= 0) return;
+            let fs = 26;
+            if (fits && !fits(new Vec3(e.minX, e.minY - 12 - fs, e.midZ), new Vec3(e.maxX, e.maxY, e.midZ))) return;
+            drawPairHeader(state, text, e, [e], baseColor.mul(vis), fs);
+        };
+        layout.blocks.forEach((T, i) => hdr(T, `trunk L${i}  (${T.kind === 'vlsa' ? 'VL self-attention' : 'LM'})`));
+        layout.expertLayers.forEach((E, i) => hdr(E, `DiT ${i}  (${E.kind === 'self' ? 'self' : E.kind === 'cross_text' ? 'cross: text' : 'cross: image'})`));
+    }
+    for (let i = 0; i < (layout.crossDit ? 0 : nPairs); i++) {
         let T = layout.blocks[i], E = layout.expertLayers[i];
         let eT = extent(T.transformerLabel.cubes), eE = extent(E.transformerLabel.cubes);
         let vis = Math.max(eT ? eT.op * T.transformerLabel.visible : 0, eE ? eE.op * E.transformerLabel.visible : 0);
@@ -76,15 +89,18 @@ export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout, fa
         if (fits && !fits(new Vec3(e.minX, e.minY - 12 - fs, e.midZ), new Vec3(e.maxX, e.maxY, e.midZ))) continue;
         drawPairHeader(state, `Layer pair ${i}:  trunk L${i}  <->  expert E${i}`, e, [eT, eE], baseColor.mul(vis), fs);
     }
-    let mlpLbl = `MLP (${facts.mlpName})`;
     let towers: ILayerLike[][] = [layout.blocks, layout.expertLayers];
-    for (let layers of towers) {
+    for (let [ti, layers] of towers.entries()) {
+        // GR00T's DiT blocks use a GELU MLP (the trunk's is SwiGLU)
+        let mlpLbl = ti === 1 && layout.crossDit ? 'MLP (GELU)' : `MLP (${facts.mlpName})`;
         layers.forEach((L) => {
             let attnCubes = L.heads.flatMap(h => h.cubes);
             let eAttn = extent(attnCubes);
             if (eAttn) {
                 let color = baseColor.mul(eAttn.op * L.selfAttendLabel.visible);
-                if (color.w > 0) put('Joint Attention', eAttn, () => pinLeft(state, 'Joint Attention', eAttn!, color, 12, eAttn!.maxZ, 26), 12, 26, eAttn.maxZ);
+                let an = !layout.crossDit ? 'Joint Attention' : L.kind === 'cross_text' ? 'Cross Attention (text)'
+                    : L.kind === 'cross_image' ? 'Cross Attention (image)' : 'Self Attention';
+                if (color.w > 0) put(an, eAttn, () => pinLeft(state, an, eAttn!, color, 12, eAttn!.maxZ, 26), 12, 26, eAttn.maxZ);
             }
             let eProj = extent(L.projLabel.cubes.filter(c => c !== L.attnResidual));
             if (eProj && L.projLabel.visible > 0) put('Out Proj', eProj, () => pinLeft(state, 'Out Proj', eProj!, baseColor.mul(eProj!.op * L.projLabel.visible), 10, eProj!.midZ), 10, 10);
@@ -110,6 +126,7 @@ export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout, fa
 }
 
 interface ILayerLike {
+    kind?: string;
     transformerLabel: IBlkLabel; selfAttendLabel: IBlkLabel; projLabel: IBlkLabel; mlpLabel: IBlkLabel;
     attnResidual: IBlkDef;
     heads: { cubes: IBlkDef[], qBlock: IBlkDef, kBlock: IBlkDef, vBlock: IBlkDef, attnMtx: IBlkDef,

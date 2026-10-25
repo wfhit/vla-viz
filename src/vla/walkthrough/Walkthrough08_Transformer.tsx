@@ -45,7 +45,7 @@ export function walkthrough08_Transformer(args: IWalkthroughArgs) {
 拼接好的主干 token 流（${c_blockRef('嵌入', L.residual0)}）从顶部进入第 0 层。黄色是正在计算的子层，后面还没算到的块保持空白、箭头变淡。每一层都按同一顺序走：
 RMSNorm → Q/K/V → 注意力 → softmax·V → o_proj → ⊕残差 → RMSNorm → gate/up → ${f.mlpAct}·up → down_proj → ⊕残差。
 
-本章只看主干。主干右边还有第二座塔：${f.expertName}，它的第 i 层与主干第 i 层共用一次联合注意力；那座塔的逐层展开在 D 章组（D2–D6）。
+${f.id === 'groot' ? `本章只看主干。GR00T 主干的 ${nL} 层里，前 ${nL - 4} 层是 Qwen3 语言模型层；最后 4 层是 vlln 之后的 VL 自注意力块（LayerNorm、32 头 × 64 维、双向、GELU MLP），子层顺序相同。主干右边是第二座塔：${f.expertName}（${f.nExpert} 块），它不与主干逐层配对，而是在主干跑完后通过交叉注意力读主干输出；逐块展开在 D 章组。` : `本章只看主干。主干右边还有第二座塔：${f.expertName}，它的第 i 层与主干第 i 层共用一次联合注意力；那座塔的逐层展开在 D 章组（D2–D6）。`}
 `;
     breakAfter();
     let tEnter = afterTime(null, 1.5);
@@ -61,7 +61,7 @@ RMSNorm → Q/K/V → 注意力 → softmax·V → o_proj → ⊕残差 → RMSN
     breakAfter();
     commentary(wt)`
 
-${f.heads ? `${nL} 层全部穿过，主干最后一层的输出将去往 h* 和 knack / done 头。` : `${nL} 层全部穿过。主干到这里就结束了：π0.5 不读最后一层的输出，没有分类头；每一层的 K/V 已经在各自的层对里交给了动作专家。`}
+${f.id === 'groot' ? `${nL} 层全部穿过。主干到这里就结束了：GR00T 没有分类头，最后一块 VL 自注意力的输出就是 DiT 交叉块读取的 VL token；主干一次推理只跑一次，${f.K} 步 Euler 都复用它。` : f.heads ? `${nL} 层全部穿过，主干最后一层的输出将去往 h* 和 knack / done 头。` : `${nL} 层全部穿过。主干到这里就结束了：π0.5 不读最后一层的输出，没有分类头；每一层的 K/V 已经在各自的层对里交给了动作专家。`}
 
 与深度学习中常见的情形一样，很难精确说出每一层在做什么，但有一个大致的规律：
 靠前的层主要处理局部、视觉层面的特征（如图像 patch 中的边缘、物体轮廓），

@@ -126,6 +126,7 @@ export enum Phase {
 // the chapter list of one engine instance: the same chapters for every model, titled with its
 // own structure; chapters about parts a model does not have (k005b's h* heads) are left out
 export function enginePhaseList(f: IModelFacts): IPhaseGroup[] {
+    let groot = f.id === 'groot';
     let groups: IPhaseGroup[] = [{
         groupId: PhaseGroup.Intro,
         title: '概览',
@@ -139,8 +140,8 @@ export function enginePhaseList(f: IModelFacts): IPhaseGroup[] {
         phases: [
             { id: Phase.Input_Detail_Embedding, title: '输入嵌入' },
             { id: Phase.Input_Detail_LayerNorm, title: 'RMSNorm' },
-            { id: Phase.Input_Detail_SelfAttention, title: `${f.attnName} 联合注意力` },
-            { id: Phase.Input_Detail_Softmax, title: '前缀 Softmax' },
+            { id: Phase.Input_Detail_SelfAttention, title: groot ? `${f.attnName} 自注意力` : `${f.attnName} 联合注意力` },
+            { id: Phase.Input_Detail_Softmax, title: groot ? 'Softmax' : '前缀 Softmax' },
             { id: Phase.Input_Detail_Projection, title: '输出投影与残差' },
             { id: Phase.Input_Detail_Mlp, title: `MLP (${f.mlpName})` },
             { id: Phase.Input_Detail_Transformer, title: `${f.nLayer} 层主干堆叠` },
@@ -161,12 +162,12 @@ export function enginePhaseList(f: IModelFacts): IPhaseGroup[] {
         title: `${f.expertName}与流匹配`,
         phases: [
             { id: Phase.D0_Towers, title: 'D0 两座塔' },
-            { id: Phase.D1_SuffixInput, title: 'D1 后缀输入嵌入' },
+            { id: Phase.D1_SuffixInput, title: groot ? 'D1 DiT 输入嵌入' : 'D1 后缀输入嵌入' },
             { id: Phase.D2_AdaNorm, title: `D2 ${f.adaName}` },
-            { id: Phase.D3_JointAttn, title: 'D3 联合注意力' },
+            { id: Phase.D3_JointAttn, title: groot ? 'D3 交叉 / 自注意力' : 'D3 联合注意力' },
             { id: Phase.D4_Projection, title: 'D4 输出投影与残差' },
-            { id: Phase.D5_Mlp, title: `D5 MLP (${f.mlpName})` },
-            { id: Phase.D6_Stack, title: `D6 ${f.nLayer} 层堆叠与输出` },
+            { id: Phase.D5_Mlp, title: `D5 MLP (${groot ? "GELU" : f.mlpName})` },
+            { id: Phase.D6_Stack, title: groot ? `D6 ${f.nExpert} 块堆叠与输出` : `D6 ${f.nExpert} 层堆叠与输出` },
             { id: Phase.D7_Euler, title: `D7 ${f.K} 步 Euler 与动作块` },
         ],
     });

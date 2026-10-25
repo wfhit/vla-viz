@@ -32,6 +32,7 @@ import { Mat4f } from "@/src/utils/matrix";
 import { Vec3, Vec4 } from "@/src/utils/vector";
 import { drawText, measureText } from "../render/fontRender";
 import { RenderPhase } from "../render/sharedRender";
+import { fmDir } from "../VlaModel";
 
 // Every drawn arrow records its (src, dst) block pair here; auditArrows() lists data blocks
 // that are visible but have no incoming / outgoing arrow (the "orphan" self-check).
@@ -59,13 +60,19 @@ export function auditEdges(cubes: IBlkDef[], srcOk: Set<IBlkDef>, sinkOk: Set<IB
 export function auditArrows(layout: IVlaModelLayout) {
     // sources by construction: the token ids, the FM inputs, te's per-layer AdaNorm γβ, and
     // the bottom x1 which is the same tensor as the FM input x1 (a skip, not a new source)
-    let srcOk = new Set<IBlkDef>([layout.idxObj, layout.fm.state75, layout.fm.x1, layout.fm.timeEmb,
-        layout.actionX1, layout.strip[0], ...layout.expertLayers.flatMap(e => [e.ada, e.ada2])]);
+    // (GR00T adds Timesteps(t) and the learned position table)
+    let srcOk = new Set<IBlkDef>([layout.idxObj, layout.fm.state75, layout.fm.x1, layout.fm.timeEmb, layout.fm.tProj,
+        layout.fm.posEmb, layout.actionX1, layout.strip[0],
+        ...layout.expertLayers.flatMap(e => [e.ada, e.ada2]).filter((b): b is IBlkDef => !!b)]);
     if (layout.expertNorm.ada) srcOk.add(layout.expertNorm.ada);
     let sinkOk = new Set<IBlkDef>([layout.logitsSoftmax, layout.doneProbs, layout.actionChunk, layout.strip[layout.strip.length - 1]]);
     // without a final trunk norm (pi0) the last trunk layer's output is computed but never read:
     // the expert only reads the trunk's per-layer K/V
     if (layout.ln_f.lnResid.absent) sinkOk.add(layout.blocks[layout.blocks.length - 1].mlpResidual);
+    // GR00T trunk-only views (DiT hidden): the VL tokens are the last thing shown; once any cross
+    // block's K/V is visible the bus to it is required
+    let crossKv = layout.expertLayers.filter(e => e.kvSrc).flatMap(e => e.kvGroups.flatMap(g => [g.kBlock, g.vBlock]));
+    if (layout.vlOut && !crossKv.some(b => b.opacity > 0)) sinkOk.add(layout.vlOut);
     return auditEdges(layout.cubes, srcOk, sinkOk);
 }
 
@@ -115,7 +122,14 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
     // flow-matching suffix inputs → the DiT suffix input (the x_t chain runs right → left)
     let fm = layout.fm;
     drawVertArrow(fm.state75, fm.stateProjW, 4);
-    drawArrowBetween(fm.stateProjW, BlockPos.Left, fm.stateEmb, BlockPos.Right, 4);
+    if (fm.stateHidden.absent) {
+        drawArrowBetween(fm.stateProjW, BlockPos.Left, fm.stateEmb, BlockPos.Right, 4);
+    } else {
+        // GR00T's state MLP: L1 → ReLU → L2
+        drawArrowBetween(fm.stateProjW, BlockPos.Left, fm.stateHidden, BlockPos.Right, 4);
+        drawArrowBetween(fm.stateHidden, BlockPos.Left, fm.stateL2W, BlockPos.Right, 4);
+        drawArrowBetween(fm.stateL2W, BlockPos.Left, fm.stateEmb, BlockPos.Right, 4);
+    }
     drawStraightDown(fm.stateEmb, layout.expertIn, 4);
     drawArrowBetween(fm.x1, BlockPos.Left, fm.actionInW, BlockPos.Right, 4);
     drawArrowBetween(fm.actionInW, BlockPos.Left, fm.actionEmb, BlockPos.Right, 4);
@@ -123,8 +137,22 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
     drawVertArrow(fm.timeEmb, fm.timeInW, 4);
     drawArrowBetween(fm.timeInW, BlockPos.Left, fm.timeHidden, BlockPos.Right, 4);
     drawArrowBetween(fm.timeHidden, BlockPos.Left, fm.timeOutW, BlockPos.Right, 4);
-    drawArrowBetween(fm.timeOutW, BlockPos.Left, fm.actionTime, BlockPos.Right, 4);
+    if (fm.actionFeat.absent) {
+        drawArrowBetween(fm.timeOutW, BlockPos.Left, fm.actionTime, BlockPos.Right, 4);
+    } else {
+        // GR00T: W3(.) + the learned position embedding (below) = the action tokens
+        drawArrowBetween(fm.timeOutW, BlockPos.Left, fm.actionFeat, BlockPos.Right, 4);
+        drawArrowBetween(fm.actionFeat, BlockPos.Left, fm.actionTime, BlockPos.Right, 4);
+        drawArrowBetween(fm.posEmb, BlockPos.Top, fm.actionTime, BlockPos.Bot, 4);
+    }
     drawArrowBetween(fm.actionTime, BlockPos.Left, layout.expertIn, BlockPos.Right, 4);
+    if (!fm.tProj.absent) {
+        // GR00T: temb = linear_2(SiLU(linear_1(Timesteps(t)))) → the AdaLN of every block
+        drawVertArrow(fm.tProj, fm.tembW1, 4);
+        drawArrowBetween(fm.tembW1, BlockPos.Left, fm.tembHidden, BlockPos.Right, 4);
+        drawArrowBetween(fm.tembHidden, BlockPos.Left, fm.tembW2, BlockPos.Right, 4);
+        drawArrowBetween(fm.tembW2, BlockPos.Left, fm.cond, BlockPos.Right, 4);
+    }
     if (!layout.variant.time_into_tokens) {
         // pi0: the action tokens are action_in_proj(x_t) alone; the time MLP ends in cond
         drawArrowBetween(fm.actionInW, BlockPos.Left, layout.expertIn, BlockPos.Right, 4);
@@ -154,11 +182,15 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
         drawLn(prev, L.ln1);
         let lnR = L.ln1.lnResid;
         let gated = layout.variant.ada_rows === 3 && !!L.ln1.ada;
+        // a GR00T cross block reads its K/V from the VL tokens (the VL bus), not from its own norm
+        let cross = !!(L as IExpertLayer).kvSrc;
 
         // K/V are shared by the query heads of a kv group: one arrow per group
         for (let grp of L.kvGroups) {
-            drawArrowBetween(lnR, BlockPos.Left, grp.kBlock, BlockPos.Right);
-            drawArrowBetween(lnR, BlockPos.Left, grp.vBlock, BlockPos.Right);
+            if (!cross) {
+                drawArrowBetween(lnR, BlockPos.Left, grp.kBlock, BlockPos.Right);
+                drawArrowBetween(lnR, BlockPos.Left, grp.vBlock, BlockPos.Right);
+            }
             drawHorizArrow(grp.kWeightBlock, grp.kBlock);
             drawHorizArrow(grp.vWeightBlock, grp.vBlock);
         }
@@ -175,6 +207,7 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
 
             drawArrowBotToSide(head.qBlock, attU, 0);
             drawArrowBotToSide(head.kBlock, head.attnMtx, 0);
+            if (cross && hp) drawArrowBotToSide(head.kBlock, hp, 0);
             drawArrowBotToSide(head.vBlock, head.vOutBlock, 0);
 
             drawArrowBetween(attU, BlockPos.Left, head.attnMtxAgg2, BlockPos.Right);
@@ -212,10 +245,17 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
 
     let prev: IBlkDef = layout.residual0;
     for (let i = 0; i < layout.blocks.length; i++) {
+        if (layout.vlln && layout.blocks[i].kind === 'vlsa' && layout.blocks[i - 1]?.kind === 'lm') {
+            // GR00T: the LM's final RMSNorm, then vlln (LayerNorm), then the VL self-attention blocks
+            dry = false;
+            drawLn(prev, layout.ln_f);
+            drawLn(layout.ln_f.lnResid, layout.vlln);
+            prev = layout.vlln.lnResid;
+        }
         prev = drawLayer(layout.blocks[i], prev);
     }
     dry = false;
-    drawLn(prev, layout.ln_f);
+    if (!layout.crossDit) drawLn(prev, layout.ln_f);
 
     let eprev: IBlkDef = layout.expertIn;
     for (let i = 0; i < layout.expertLayers.length; i++) {
@@ -225,6 +265,7 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
     drawLn(eprev, layout.expertNorm);
 
     drawTimeBus();
+    drawVlBus();
 
     // h* (the boundary column of ln_f) → knack head (below) and done head (left)
     drawStraightDown(layout.ln_f.lnResid, layout.hStar, 2, layout.hStar.x + layout.hStar.dx / 2);
@@ -239,8 +280,17 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
     drawVertArrow(layout.doneAgg1, layout.doneProbs, 2);
 
     // DiT final norm (tokens 1..16) → action_out_proj → v; one-step decode x1 − v below
+    // (GR00T: final norm → proj_out_2 → action_decoder L1 + ReLU → L2 → v)
     let v = layout.actionVelocity;
-    drawStraightDown(layout.expertOut, v, 4, v.x + v.dx / 2);
+    if (layout.ditOut.absent) {
+        drawStraightDown(layout.expertOut, v, 4, v.x + v.dx / 2);
+    } else {
+        drawVertArrow(layout.expertOut, layout.ditOut, 4);
+        drawArrowBetween(layout.outProjW, BlockPos.Left, layout.ditOut, BlockPos.Right, 4);
+        drawVertArrow(layout.ditOut, layout.decH, 4);
+        drawArrowBetween(layout.decL1W, BlockPos.Left, layout.decH, BlockPos.Right, 4);
+        drawStraightDown(layout.decH, v, 4, v.x + v.dx / 2);
+    }
     drawArrowBetween(layout.actionWeight, BlockPos.Left, v, BlockPos.Right, 4);
     drawVertArrow(v, layout.actionChunk, 4);
     drawArrowBetween(layout.actionX1, BlockPos.Left, layout.actionChunk, BlockPos.Right, 4);
@@ -311,6 +361,47 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
         }
     }
 
+    // GR00T: the VL tokens (the trunk's last output) → the K/V of every cross block. One vertical
+    // bus per K/V depth slot in the gap between the towers; a branch runs across the margin above
+    // each cross block's K (V) and drops into its top
+    function drawVlBus() {
+        let src = layout.vlOut;
+        if (!src || src.opacity <= 0) return;
+        let w = 1.6;
+        let normal = new Vec3(0, 0, 1);
+        let cross = layout.expertLayers.filter(e => e.kvSrc);
+        let dits = layout.expertLayers.flatMap(e => e.cubes).filter(c => c.opacity > 0);
+        if (!dits.length) return;
+        let ditLeft = Math.min(...dits.map(c => c.x));
+        let trunkRight = Math.max(...layout.blocks.flatMap(b => b.cubes).map(c => c.x + c.dx));
+        let busX = (ditLeft + trunkRight) / 2;
+        let slots = new Map<number, IBlkDef[]>();
+        for (let e of cross) for (let g of e.kvGroups) for (let b of [g.kBlock, g.vBlock]) {
+            if (b.opacity <= 0) continue;
+            rec(src, b);
+            let z = b.z + b.dz / 2;
+            let key = Math.round(z);
+            slots.set(key, [...(slots.get(key) ?? []), b]);
+        }
+        let ys = src.y + src.dy / 2;
+        for (let [, bs] of slots) {
+            let z = bs[0].z + bs[0].dz / 2;
+            let op = Math.min(src.opacity, Math.max(...bs.map(b => b.opacity)));
+            let col = dataColor.mul(op);
+            let yb = bs.map(b => b.y - layout.margin / 2);
+            let y0 = Math.min(ys, ...yb), y1 = Math.max(ys, ...yb);
+            drawA(state, new Vec3(src.x + src.dx + pad, ys, z), new Vec3(busX + w / 2, ys, z), w, normal, col, false);
+            drawA(state, new Vec3(busX, y0 - w / 2, z), new Vec3(busX, y1 + w / 2, z), w, normal, col, false);
+            for (let b of bs) {
+                let yr = b.y - layout.margin / 2;
+                let xc = b.x + b.dx / 2;
+                let c2 = layout.flow?.active.has(b) ? flowColor.mul(op) : col;
+                drawA(state, new Vec3(busX - w / 2, yr, z), new Vec3(xc + w / 2, yr, z), w, normal, c2, false, CornerMode.Right);
+                drawA(state, new Vec3(xc, yr + w / 2, z), new Vec3(xc, b.y - pad, z), w, normal, c2, true);
+            }
+        }
+    }
+
     // the Euler strip: x(t=1) … x(t=0); board j → board j+1 (− v_j / K); the current board
     // feeds the x_t input of the DiT
     function drawEulerStrip() {
@@ -349,7 +440,9 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
         drawA(state, new Vec3(xFar, yLow + w / 2, z), new Vec3(xFar, yTop - w / 2, z), w, normal, col, false, CornerMode.Left);
         drawA(state, new Vec3(xFar + w / 2, yTop, z), new Vec3(dx - w / 2, yTop, z), w, normal, col, false, CornerMode.Left);
         drawA(state, new Vec3(dx, yTop - w / 2, z), new Vec3(dx, dst.y - pad, z), w, normal, col, true, CornerMode.Left);
-        drawWrapLabel({ ...dst, y: yTop - 2, dy: 0 }, `v(t=${(1 - eu.k / (S.length - 1)).toFixed(1)}): x - v/${S.length - 1}`, -1);
+        let FD = fmDir(layout.variant);
+        let K = S.length - 1;
+        drawWrapLabel({ ...dst, y: yTop - 2, dy: 0 }, `v(t=${FD.tOf(eu.k, K).toFixed(Number.isInteger(10 / K) ? 1 : 2)}): x ${FD.sign} v/${K}`, -1);
     }
 
     // straight down from src's bottom into dest's top at src's x (dest is wider)

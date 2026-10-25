@@ -1,4 +1,4 @@
-import { IVlaModelLink, IModelShape, IRealTex, IRmsNormLink, IBlockLayerLink, IExpertLayerLink, modelVariant } from "./VlaModel";
+import { IVlaModelLink, IModelShape, IRealTex, IRmsNormLink, IBlockLayerLink, IExpertLayerLink, modelVariant, fmDir } from "./VlaModel";
 import { isNil } from "@/src/utils/data";
 import { Mat4f } from "@/src/utils/matrix";
 import { Dim, Vec3 } from "@/src/utils/vector";
@@ -282,7 +282,13 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
     let m = vlaGpuModel;
     let V = modelVariant(m?.config);
     let ditName = V.id === 'pi0' ? 'Expert' : 'DiT';
-    let gluName = (k: 'swiglu' | 'geglu') => k === 'geglu' ? 'GELU(gate)*up' : 'SiLU(gate)·up';
+    let groot = V.id === 'groot';
+    let FD = fmDir(V);
+    let gluName = (k: 'swiglu' | 'geglu' | 'gelu') => k === 'gelu' ? 'GELU(fc1)' : k === 'geglu' ? 'GELU(gate)*up' : 'SiLU(gate)·up';
+    // a GELU MLP (GR00T's VL blocks and DiT): fc1 → GELU → fc2, drawn in the gate / act / down slots
+    let mlpNames = (gelu: boolean) => gelu
+        ? { gateW: 'fc1 Weights', upW: '', gate: 'fc1', up: '', downW: 'fc2 Weights' }
+        : { gateW: 'gate_proj Weights', upW: 'up_proj Weights', gate: 'gate', up: 'up', downW: 'down_proj Weights' };
     let cubes: IBlkDef[] = [];
 
     // [Wt] token ids
@@ -324,14 +330,15 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
 
     y += C * cell + margin;
 
-    function createLn(x: number, src: IBlkDef, target?: IRmsNormLink) {
-        return createLnAt(leftX + x, T, src, target);
+    function createLn(x: number, src: IBlkDef, target?: IRmsNormLink, ln = false) {
+        return createLnAt(leftX + x, T, src, target, undefined, ln);
     }
 
     // RMSNorm group whose blocks end at x = lnLeftX (the residual stream sits right of it).
     // With `ada` it is the expert's AdaRMSNorm: γβ(t) (the timestep modulation) sits left of w.
+    // `ln`: a LayerNorm (GR00T): agg = mean | rstd, and β (when the norm has an affine bias) beside γ
     function createLnAt(lnLeftX: number, Tt: number, src: IBlkDef, target?: IRmsNormLink,
-            ada?: { tex: IRealTex | undefined, row0: number, name: string, rows: number }) {
+            ada?: { tex: IRealTex | undefined, row0: number, name: string, rows: number }, ln = false) {
         let resLeftX = lnLeftX - Tt * cell - margin;
 
         let lnAgg1 = mk({
@@ -340,7 +347,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             access: acc(target?.agg, [0, 0, 0, 0], [1, 0, 0]),
             deps: { add: [[src, 'xi']], special: BlKDepSpecial.LayerNormMu },
             dimX: DimStyle.T, dimY: DimStyle.None, small: true,
-            name: 'RMS Agg',
+            name: ln ? 'LN Agg' : 'RMS Agg',
         });
         let lnAgg2 = mk({
             t: 'a', cx: Tt, cz: B, cy: 1, y: y + cell,
@@ -360,12 +367,14 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             dimX: DimStyle.None, dimY: DimStyle.C,
             name: ada ? 'w' : 'γ', small: true,
         });
-        // RMSNorm has no β: placeholder only (never rendered)
+        // RMSNorm has no β: placeholder only (never rendered); a LayerNorm's β sits left of γ
+        let hasBeta = ln && !!target?.bias && !target.bias.meta.absent;
         let lnMu = mk({
             t: 'w', cx: 1, cz: 1, cy: C, y: y,
             xR: resLeftX - cell * 1 - margin, zM: 0,
+            access: hasBeta ? acc(target!.bias, [0, 0, 0], [0, 1, 0]) : undefined,
             dimX: DimStyle.None, dimY: DimStyle.C,
-            name: '', small: true, hidden: true,
+            name: hasBeta ? 'β' : '', small: true, hidden: !hasBeta,
         });
         // AdaRMSNorm: [γ(t) | β(t)] (pi0: [scale | shift | gate]) for this sublayer (columns =
         // modulation rows; rows = channels), right of the norm output, where the te(t) bus reaches it
@@ -377,6 +386,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             name: ada.name,
         }) : null;
         let adds: [IBlkDef, string][] = [[src, 'xy'], [lnAgg1, 'xi'], [lnAgg2, 'xi'], [lnSigma, '0y']];
+        if (hasBeta) adds.push([lnMu, '0y']);
         if (adaBlk) adds.push([adaBlk, '0y']);
         let lnResid = mk({
             t: 'i', cx: Tt, cz: B, cy: C, y: y,
@@ -384,9 +394,9 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             access: acc(target?.output, [0, 1, 0], [1, 0, 0]),
             deps: { add: adds, special: ada ? BlKDepSpecial.AdaLayerNorm : BlKDepSpecial.LayerNorm },
             dimX: DimStyle.T, dimY: DimStyle.C,
-            name: ada ? 'AdaRMSNorm' : 'RMSNorm',
+            name: ln ? (ada ? 'AdaLayerNorm' : 'LayerNorm') : ada ? 'AdaRMSNorm' : 'RMSNorm',
         });
-        let lnCubes = adaBlk ? [lnAgg1, lnAgg2, lnSigma, adaBlk, lnResid] : [lnAgg1, lnAgg2, lnSigma, lnResid];
+        let lnCubes = [lnAgg1, lnAgg2, lnSigma, ...(hasBeta ? [lnMu] : []), ...(adaBlk ? [adaBlk] : []), lnResid];
         return { lnAgg1, lnAgg2, lnResid, lnSigma, lnMu, ada: adaBlk, cubes: lnCubes };
     }
 
@@ -398,8 +408,14 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
     let by = (b: IBlkDef) => b.y - offset.y;
     let bxR = (b: IBlkDef) => b.x - offset.x + b.dx;
 
-    function createLayer(src: IBlkDef, target: IBlockLayerLink | undefined) {
-        let ln1 = createLn(0, src, target?.ln_1);
+    function createLayer(src: IBlkDef, target: IBlockLayerLink | undefined, li: number = 0) {
+        // GR00T's VL self-attention blocks: LayerNorm (γ β), q/k/v biases, non-causal, GELU MLP
+        let vlsa = V.trunk_layer_kinds?.[li] === 'vlsa';
+        let nHeads = target?.heads.length ?? shape.nHeads;
+        let nKvHeads = target?.kv.length ?? shape.nKvHeads;
+        let groupSize = nHeads / nKvHeads;
+        let MN = mlpNames(vlsa);
+        let ln1 = createLn(0, src, target?.ln_1, vlsa);
 
         let interGroupMargin = 3 * margin + (C * cell) / 16;
         let qkvMargin = 1 * margin + (C * cell) / 16;
@@ -443,16 +459,17 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             let kBiasBlock = mk({
                 t: 'w', cx: 1, cz: 1, cy: A, y: y,
                 xR: qkvBiasLeftX, zM: kMid,
-                access: acc(kv?.kNorm, [0, 0, 0], [0, 1, 0]),
+                access: acc(vlsa ? kv?.kBias : kv?.kNorm, [0, 0, 0], [0, 1, 0]),
                 dimX: DimStyle.None, dimY: DimStyle.A, small: true,
-                name: 'k_norm γ',
+                name: vlsa ? 'k bias' : 'k_norm γ',
             });
-            // V has no bias / norm in Qwen3: placeholder only
+            // V has no bias / norm in Qwen3: placeholder only (the VL blocks have a v bias)
             let vBiasBlock = mk({
                 t: 'w', cx: 1, cz: 1, cy: A, y: y,
                 xR: qkvBiasLeftX, zM: vMid,
-                dimX: DimStyle.None, dimY: DimStyle.A, small: true, hidden: true,
-                name: '',
+                access: vlsa ? acc(kv?.vBias, [0, 0, 0], [0, 1, 0]) : undefined,
+                dimX: DimStyle.None, dimY: DimStyle.A, small: true, hidden: !vlsa,
+                name: vlsa ? 'v bias' : '',
             });
             let kBlock = mk({
                 t: 'i', cx: T, cz: B, cy: A, y: y,
@@ -466,12 +483,13 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
                 t: 'i', cx: T, cz: B, cy: A, y: y,
                 xR: attnLeftX, zM: vMid,
                 access: acc(kv?.v, [0, 1, 0], [1, 0, 0]),
-                deps: { dot: [[vWeightBlock, 'iy'], [ln1.lnResid, 'xi']], dotLen: C },
+                deps: { dot: [[vWeightBlock, 'iy'], [ln1.lnResid, 'xi']], add: vlsa ? [[vBiasBlock, '0y']] : undefined, dotLen: C },
                 dimX: DimStyle.T, dimY: DimStyle.A,
                 name: `V vectors (kv ${g})`,
             });
             groups.push({ kWeightBlock, vWeightBlock, kBiasBlock, vBiasBlock, kBlock, vBlock,
-                cubes: [kWeightBlock, vWeightBlock, kBiasBlock, kBlock, vBlock] });
+                cubes: vlsa ? [kWeightBlock, vWeightBlock, kBiasBlock, vBiasBlock, kBlock, vBlock]
+                    : [kWeightBlock, vWeightBlock, kBiasBlock, kBlock, vBlock] });
         }
 
         let heads = [];
@@ -491,9 +509,9 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             let qBiasBlock = mk({
                 t: 'w', cx: 1, cz: 1, cy: A, y: y,
                 xR: qkvBiasLeftX, zM: headZMid,
-                access: acc(ht?.qNorm, [0, 0, 0], [0, 1, 0]),
+                access: acc(vlsa ? ht?.qBias : ht?.qNorm, [0, 0, 0], [0, 1, 0]),
                 dimX: DimStyle.None, dimY: DimStyle.A, small: true,
-                name: 'q_norm γ',
+                name: vlsa ? 'q bias' : 'q_norm γ',
             });
             let qBlock = mk({
                 t: 'i', cx: T, cz: B, cy: A, y: y,
@@ -509,11 +527,11 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
                 t: 'i', cx: T, cz: B, cy: T, y: attn1Y,
                 xR: attnLeftX, zM: headZMid,
                 access: acc(ht?.attnScores, [1, 0, 0], [0, 1, 0]),
-                deps: { dot: [[qBlock, 'yi'], [grp.kBlock, 'xi']], lowerTri: V.trunk_causal, dotLen: A, special: BlKDepSpecial.Attention },
+                deps: { dot: [[qBlock, 'yi'], [grp.kBlock, 'xi']], lowerTri: V.trunk_causal && !vlsa, dotLen: A, special: BlKDepSpecial.Attention },
                 dimX: DimStyle.T, dimY: DimStyle.T,
                 special: BlkSpecial.Attention,
                 transpose: true,
-                name: 'Joint Attention',
+                name: groot ? 'Self Attention' : 'Joint Attention',
             });
 
             let attnMtxAgg1 = mk({
@@ -538,11 +556,11 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
                 t: 'i', cx: T, cz: B, cy: T, y: attn1Y,
                 xR: attn2LeftX, zM: headZMid,
                 access: acc(ht?.attnProbs, [1, 0, 0], [0, 1, 0]),
-                deps: { add: [[attnMtx, 'xy'], [attnMtxAgg1, 'iy'], [attnMtxAgg2, 'iy']], lowerTri: V.trunk_causal, special: BlKDepSpecial.Softmax },
+                deps: { add: [[attnMtx, 'xy'], [attnMtxAgg1, 'iy'], [attnMtxAgg2, 'iy']], lowerTri: V.trunk_causal && !vlsa, special: BlKDepSpecial.Softmax },
                 dimX: DimStyle.T, dimY: DimStyle.T,
                 special: BlkSpecial.Attention,
                 transpose: true,
-                name: 'Prefix Softmax',
+                name: groot ? 'Softmax' : 'Prefix Softmax',
             });
 
             let vOutBlock = mk({
@@ -634,7 +652,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         // room for the S-shaped entry arrow ⊕ → next norm
         y = vFinalZ + C * cell + 3 * margin;
 
-        let ln2 = createLn(0, attnResidual, target?.ln_2);
+        let ln2 = createLn(0, attnResidual, target?.ln_2, vlsa);
 
         // SwiGLU: gate & up weights [F, C], drawn side by side
         let mlpFcWeight = mk({
@@ -642,14 +660,14 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             xR: attnLeftX, zM: 0,
             access: acc(target?.gateWeight, [0, 1, 0], [1, 0, 0]),
             dimX: DimStyle.C4, dimY: DimStyle.C,
-            name: 'gate_proj Weights',
+            name: MN.gateW,
         });
         let mlpUpWeight = mk({
             t: 'w', cx: F, cz: 1, cy: C, y: y,
             xR: attnLeftX - F * cell - margin, zM: 0,
             access: acc(target?.upWeight, [0, 1, 0], [1, 0, 0]),
             dimX: DimStyle.C4, dimY: DimStyle.C,
-            name: 'up_proj Weights',
+            name: MN.upW,
         });
         // no MLP biases in Qwen3: placeholder only
         let mlpFcBias = mk({
@@ -667,7 +685,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             access: acc(target?.gate, [1, 0, 0], [0, 1, 0]),
             deps: { dot: [[mlpFcWeight, 'xi'], [ln2.lnResid, 'yi']], dotLen: C },
             dimX: DimStyle.C4, dimY: DimStyle.T,
-            name: 'gate',
+            name: MN.gate,
             transpose: true,
         });
         let mlpUp = mk({
@@ -676,7 +694,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             access: acc(target?.up, [1, 0, 0], [0, 1, 0]),
             deps: { dot: [[mlpUpWeight, 'xi'], [ln2.lnResid, 'yi']], dotLen: C },
             dimX: DimStyle.C4, dimY: DimStyle.T,
-            name: 'up',
+            name: MN.up,
             transpose: true,
         });
         y += T * cell + margin;
@@ -687,7 +705,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             access: acc(target?.act, [1, 0, 0], [0, 1, 0]),
             deps: { add: [[mlpFc, 'xy'], [mlpUp, 'xy']], special: BlKDepSpecial.SwiGlu },
             dimX: DimStyle.C4, dimY: DimStyle.T,
-            name: gluName(V.trunk_mlp),
+            name: vlsa ? gluName('gelu') : gluName(V.trunk_mlp),
             transpose: true,
         });
         y += T * cell + margin;
@@ -697,7 +715,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             xR: attnLeftX, zM: 0,
             access: acc(target?.downWeight, [1, 0, 0], [0, 1, 0]),
             dimX: DimStyle.C4, dimY: DimStyle.C,
-            name: 'down_proj Weights',
+            name: MN.downW,
         });
 
         let mlpProjBias = mk({
@@ -740,6 +758,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         cubes.push(...blockCubes);
 
         return {
+            kind: vlsa ? 'vlsa' : 'lm',
             ln1,
             heads,
             kvGroups: groups,
@@ -772,18 +791,26 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
     // the real ones: 17 suffix tokens, AdaRMSNorm (γβ(t) beside w), q/k/v biases (no q/k norm),
     // 16 query heads sharing 2 kv heads (8 per group), and a joint score row
     // [prefix keys (the trunk's cached K of the same layer) | suffix keys].
-    let nHeadsE = m?.config.expert_heads ?? 16;
-    let nKvE = m?.config.expert_kv_heads ?? 2;
+    let nHeadsE = m?.expertLayers[0]?.heads.length ?? m?.config.expert_heads ?? 16;
+    let nKvE = m?.expertLayers[0]?.kv.length ?? m?.config.expert_kv_heads ?? 2;
     let groupSizeE = nHeadsE / nKvE;
     // the AdaNorm slot + the te(t) bus between the norm and the residual stream
     let adaRoom = V.ada_rows * cell + margin;
-    let adaName = (i: number) => V.ada_rows === 3 ? `scale${i} shift${i} gate${i} (t)` : `gamma${i} beta${i} (t)`;
+    let adaLn = V.expert_ada === 'adaln';
+    let adaName = (i: number) => V.ada_rows === 3 ? `scale${i} shift${i} gate${i} (t)` : adaLn ? 'scale shift (t)' : `gamma${i} beta${i} (t)`;
+    // GR00T: the DiT is not layer-paired with the trunk; its cross blocks read the trunk's final VL tokens
+    let crossDit = !!V.expert_layer_kinds;
 
     function createExpertLayer(resMid: number, src: IBlkDef, el: IExpertLayerLink | undefined,
-            adaTex: IRealTex | undefined, li: number, trunk: ReturnType<typeof createLayer> | null) {
+            adaTex: IRealTex | undefined, li: number, trunk: ReturnType<typeof createLayer> | null, vlOut: IBlkDef | null = null) {
+        let kind = V.expert_layer_kinds?.[li];
+        let cross = !!kind && kind !== 'self' && !!vlOut;
         let Tt = nSuffix;
+        let Tk = cross ? T : Tt;            // keys: the VL window (cross) or the DiT tokens
+        let Ty = Math.max(T, Tt);           // row pitch: the tallest score block
+        let MN = mlpNames(V.expert_mlp === 'gelu');
         let eLeftX = resMid - Tt * cell / 2 - margin;
-        let ln1 = createLnAt(eLeftX - adaRoom, Tt, src, el?.ln_1, { tex: adaTex, row0: 0, name: adaName(1), rows: V.ada_rows });
+        let ln1 = createLnAt(eLeftX - adaRoom, Tt, src, el?.ln_1, { tex: adaTex, row0: 0, name: adaName(1), rows: V.ada_rows }, adaLn);
 
         let interGroupMargin = 3 * margin + (C * cell) / 16;
         let qkvMargin = 1 * margin + (C * cell) / 16;
@@ -792,7 +819,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         let groupWidth = groupSlots * slot + interGroupMargin;
 
         let attn1Y = y + A * cell + margin;
-        let vOutY = attn1Y + T * cell + margin;
+        let vOutY = attn1Y + Ty * cell + margin;
 
         let attnLeftX = eLeftX - (Tt + 2) * cell - 2 * margin;
         let qkvValLeftX = attnLeftX - Tt * cell - margin;
@@ -802,6 +829,14 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         let aggR = scPR - T * cell - margin;
         let smR = aggR - cell - margin;
         let smPR = smR - Tt * cell - seam;
+        if (crossDit) {
+            // one score block per GR00T block: the VL keys (cross) or the DiT keys (self)
+            scPR = attnLeftX;
+            aggR = attnLeftX - Tk * cell - margin;
+            smR = aggR - cell - margin;
+            smPR = smR;
+        }
+        let kvIn = cross ? vlOut! : ln1.lnResid;
 
         // one representative head per view (bbycroft style, "x16 heads"): every head / kv group
         // shares head 0's slots (q | K | V around z = 0); only head 0 / kv 0 are drawn
@@ -834,15 +869,15 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
                 dimX: DimStyle.None, dimY: DimStyle.A, small: true, name: 'v bias',
             });
             let kBlock = mk({
-                t: 'i', cx: Tt, cz: B, cy: A, y: y, xR: attnLeftX, zM: kMid,
+                t: 'i', cx: Tk, cz: B, cy: A, y: y, xR: attnLeftX, zM: kMid,
                 access: acc(kv?.k, [0, 1, 0], [1, 0, 0]),
-                deps: { dot: [[kWeightBlock, 'iy'], [ln1.lnResid, 'xi']], add: [[kBiasBlock, '0y']], dotLen: C },
+                deps: { dot: [[kWeightBlock, 'iy'], [kvIn, 'xi']], add: [[kBiasBlock, '0y']], dotLen: C },
                 dimX: DimStyle.T, dimY: DimStyle.A, name: `K vectors (kv ${g})`,
             });
             let vBlock = mk({
-                t: 'i', cx: Tt, cz: B, cy: A, y: y, xR: attnLeftX, zM: vMid,
+                t: 'i', cx: Tk, cz: B, cy: A, y: y, xR: attnLeftX, zM: vMid,
                 access: acc(kv?.v, [0, 1, 0], [1, 0, 0]),
-                deps: { dot: [[vWeightBlock, 'iy'], [ln1.lnResid, 'xi']], add: [[vBiasBlock, '0y']], dotLen: C },
+                deps: { dot: [[vWeightBlock, 'iy'], [kvIn, 'xi']], add: [[vBiasBlock, '0y']], dotLen: C },
                 dimX: DimStyle.T, dimY: DimStyle.A, name: `V vectors (kv ${g})`,
             });
             groups.push({ kWeightBlock, vWeightBlock, kBiasBlock, vBiasBlock, kBlock, vBlock,
@@ -878,16 +913,17 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             let attnMtxP = mk({
                 t: 'i', cx: T, cz: B, cy: Tt, y: attn1Y, xR: scPR, zM: headZMid,
                 access: acc(ht?.scoresP, [1, 0, 0], [0, 1, 0]),
-                deps: tg ? { dot: [[qBlock, 'yi'], [tg.kBlock, 'xi']], dotLen: A, special: BlKDepSpecial.Attention } : undefined,
+                deps: cross ? { dot: [[qBlock, 'yi'], [grp.kBlock, 'xi']], dotLen: A, special: BlKDepSpecial.Attention }
+                    : tg ? { dot: [[qBlock, 'yi'], [tg.kBlock, 'xi']], dotLen: A, special: BlKDepSpecial.Attention } : undefined,
                 dimX: DimStyle.T, dimY: DimStyle.T, special: BlkSpecial.Attention, transpose: true,
-                name: 'Joint Attention',
+                name: crossDit ? `Cross Attention (${kind === 'cross_text' ? 'text' : 'image'} keys)` : 'Joint Attention',
             });
             let attnMtx = mk({
                 t: 'i', cx: Tt, cz: B, cy: Tt, y: attn1Y, xR: attnLeftX, zM: headZMid,
                 access: acc(ht?.scoresS, [1, 0, 0], [0, 1, 0]),
                 deps: { dot: [[qBlock, 'yi'], [grp.kBlock, 'xi']], dotLen: A, special: BlKDepSpecial.Attention },
                 dimX: DimStyle.T, dimY: DimStyle.T, special: BlkSpecial.Attention, transpose: true,
-                name: '',
+                name: crossDit ? 'Self Attention' : '',
             });
             let attnMtxAgg1 = mk({
                 t: 'a', cx: 1, cz: B, cy: Tt, y: attn1Y, xR: aggR - cell, zM: headZMid,
@@ -906,19 +942,19 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
                 access: acc(ht?.probsP, [1, 0, 0], [0, 1, 0]),
                 deps: { add: [[attnMtxP, 'xy'], [attnMtxAgg1, 'iy'], [attnMtxAgg2, 'iy']], special: BlKDepSpecial.Softmax },
                 dimX: DimStyle.T, dimY: DimStyle.T, special: BlkSpecial.Attention, transpose: true,
-                name: 'Joint Softmax',
+                name: crossDit ? 'Cross Softmax' : 'Joint Softmax',
             });
             let attnMtxSm = mk({
                 t: 'i', cx: Tt, cz: B, cy: Tt, y: attn1Y, xR: smR, zM: headZMid,
                 access: acc(ht?.probsS, [1, 0, 0], [0, 1, 0]),
                 deps: { add: [[attnMtx, 'xy'], [attnMtxAgg1, 'iy'], [attnMtxAgg2, 'iy']], special: BlKDepSpecial.Softmax },
                 dimX: DimStyle.T, dimY: DimStyle.T, special: BlkSpecial.Attention, transpose: true,
-                name: '',
+                name: crossDit ? 'Self Softmax' : '',
             });
             let vOutBlock = mk({
                 t: 'i', cx: Tt, cz: B, cy: A, y: vOutY, xR: attnLeftX, zM: headZMid,
                 access: acc(ht?.attnOut, [0, 1, 0], [1, 0, 0]),
-                deps: { dot: [[grp.vBlock, 'iy'], [attnMtxSm, 'ix']], dotLen: Tt },
+                deps: { dot: [[grp.vBlock, 'iy'], [cross ? attnMtxSmP : attnMtxSm, 'ix']], dotLen: Tk },
                 dimX: DimStyle.T, dimY: DimStyle.A, name: 'V Output',
             });
 
@@ -979,17 +1015,20 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
 
         y = vFinalZ + C * cell + 3 * margin;
 
-        let ln2 = createLnAt(eLeftX - adaRoom, Tt, attnResidual, el?.ln_2, { tex: adaTex, row0: V.ada_rows, name: adaName(2), rows: V.ada_rows });
+        // GR00T's norm3 is a plain LayerNorm (no affine, no t); the others modulate both norms
+        let ln2 = adaLn
+            ? createLnAt(eLeftX - adaRoom, Tt, attnResidual, el?.ln_2, undefined, true)
+            : createLnAt(eLeftX - adaRoom, Tt, attnResidual, el?.ln_2, { tex: adaTex, row0: V.ada_rows, name: adaName(2), rows: V.ada_rows });
 
         let mlpFcWeight = mk({
             t: 'w', cx: F, cz: 1, cy: C, y: y, xR: attnLeftX, zM: 0,
             access: acc(el?.gateWeight, [0, 1, 0], [1, 0, 0]),
-            dimX: DimStyle.C4, dimY: DimStyle.C, name: 'gate_proj Weights',
+            dimX: DimStyle.C4, dimY: DimStyle.C, name: MN.gateW,
         });
         let mlpUpWeight = mk({
             t: 'w', cx: F, cz: 1, cy: C, y: y, xR: attnLeftX - F * cell - margin, zM: 0,
             access: acc(el?.upWeight, [0, 1, 0], [1, 0, 0]),
-            dimX: DimStyle.C4, dimY: DimStyle.C, name: 'up_proj Weights',
+            dimX: DimStyle.C4, dimY: DimStyle.C, name: MN.upW,
         });
 
         y += C * cell + margin;
@@ -998,16 +1037,16 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             t: 'i', cx: F, cz: B, cy: Tt, y: y, xR: attnLeftX, zM: 0,
             access: acc(el?.gate, [1, 0, 0], [0, 1, 0]),
             deps: { dot: [[mlpFcWeight, 'xi'], [ln2.lnResid, 'yi']], dotLen: C },
-            dimX: DimStyle.C4, dimY: DimStyle.T, name: 'gate', transpose: true,
+            dimX: DimStyle.C4, dimY: DimStyle.T, name: MN.gate, transpose: true,
         });
         let mlpUp = mk({
             t: 'i', cx: F, cz: B, cy: Tt, y: y, xR: attnLeftX - F * cell - margin, zM: 0,
             access: acc(el?.up, [1, 0, 0], [0, 1, 0]),
             deps: { dot: [[mlpUpWeight, 'xi'], [ln2.lnResid, 'yi']], dotLen: C },
-            dimX: DimStyle.C4, dimY: DimStyle.T, name: 'up', transpose: true,
+            dimX: DimStyle.C4, dimY: DimStyle.T, name: MN.up, transpose: true,
         });
 
-        y += T * cell + margin;
+        y += Ty * cell + margin;
 
         let mlpAct = mk({
             t: 'i', cx: F, cz: B, cy: Tt, y: y, xR: attnLeftX, zM: 0,
@@ -1016,12 +1055,12 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             dimX: DimStyle.C4, dimY: DimStyle.T, name: gluName(V.expert_mlp), transpose: true,
         });
 
-        y += T * cell + margin;
+        y += Ty * cell + margin;
 
         let mlpProjWeight = mk({
             t: 'w', cx: F, cz: 1, cy: C, y: y, xR: attnLeftX, zM: 0,
             access: acc(el?.downWeight, [1, 0, 0], [0, 1, 0]),
-            dimX: DimStyle.C4, dimY: DimStyle.C, name: 'down_proj Weights',
+            dimX: DimStyle.C4, dimY: DimStyle.C, name: MN.downW,
         });
         let mlpResult = mk({
             t: 'i', cx: Tt, cz: B, cy: C, y: y, xL: attnLeftX + margin, zM: 0,
@@ -1049,8 +1088,11 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
 
         return {
             layer: li,
+            kind: kind ?? 'joint',
+            // the K/V source of a cross block (GR00T: the trunk's final VL tokens)
+            kvSrc: cross ? vlOut : null,
             ln1, heads, kvGroups: groups,
-            ada: ln1.ada!, ada2: ln2.ada!,
+            ada: ln1.ada!, ada2: ln2.ada,
             projWeight, attnOut, attnResidual, ln2,
             mlpFcWeight, mlpUpWeight, mlpFc, mlpUp, mlpAct, mlpProjWeight, mlpResult, mlpResidual,
             transformerLabel, selfAttendLabel, projLabel, mlpLabel,
@@ -1103,61 +1145,123 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         let fmActionTime = mk({
             t: 'i', cx: actH, cy: C, cz: B, y: fmY, xL: nextX(actH), zM: 0,
             access: acc(fmM?.actionTime, [0, 1, 0], [1, 0, 0]),
-            dimX: DimStyle.T, dimY: DimStyle.C, name: 'time_mlp_out -> tokens 1..16',
+            dimX: DimStyle.T, dimY: DimStyle.C, name: groot ? `W3(.) + pos -> tokens 1..${actH}` : 'time_mlp_out -> tokens 1..16',
         });
+        // GR00T: W3's output and the learned position table it is added to (below)
+        let fmActionFeat = absentBlk('action feat'), fmPosEmb = absentBlk('pos emb');
+        if (groot) {
+            fmActionFeat = mk({
+                t: 'i', cx: actH, cy: C, cz: B, y: fmY, xL: nextX(actH), zM: 0,
+                access: acc(fmM?.actionFeat, [0, 1, 0], [1, 0, 0]),
+                dimX: DimStyle.T, dimY: DimStyle.C, name: 'action_encoder W3(.)',
+            });
+            fmPosEmb = mk({
+                t: 'i', cx: actH, cy: C, cz: B, y: fmY + C * cell + margin, xL: bx(fmActionTime), zM: 0,
+                access: acc(fmM?.posEmb, [0, 1, 0], [1, 0, 0]),
+                dimX: DimStyle.T, dimY: DimStyle.C, name: 'position_embedding (learned)',
+            });
+        }
         let fmTimeOutW = mk({
             t: 'w', cx: C, cy: C, cz: 1, y: fmY, xL: nextX(C), zM: 0,
             access: acc(fmM?.timeOutW, [1, 0, 0], [0, 1, 0]),
-            dimX: DimStyle.C, dimY: DimStyle.C, name: 'action_time_mlp_out W',
+            dimX: DimStyle.C, dimY: DimStyle.C, name: groot ? 'action_encoder W3' : 'action_time_mlp_out W',
         });
         let fmTimeHidden = mk({
             t: 'i', cx: actH, cy: C, cz: B, y: fmY, xL: nextX(actH), zM: 0,
             access: acc(fmM?.timeHidden, [0, 1, 0], [1, 0, 0]),
-            dimX: DimStyle.T, dimY: DimStyle.C, name: 'SiLU(time_mlp_in)',
+            dimX: DimStyle.T, dimY: DimStyle.C, name: groot ? 'swish(W2 [a_emb, tau])' : 'SiLU(time_mlp_in)',
         });
         let fmTimeInW = mk({
             t: 'w', cx: C, cy: C, cz: 1, y: fmY, xL: nextX(C), zM: 0,
             access: acc(fmM?.timeInW, [1, 0, 0], [0, 1, 0]),
-            dimX: DimStyle.C, dimY: DimStyle.C, name: 'action_time_mlp_in W',
+            dimX: DimStyle.C, dimY: DimStyle.C, name: groot ? 'action_encoder W2' : 'action_time_mlp_in W',
         });
         let fmActionEmb = mk({
             t: 'i', cx: actH, cy: C, cz: B, y: fmY, xL: nextX(actH), zM: 0,
             access: acc(fmM?.actionEmb, [0, 1, 0], [1, 0, 0]),
-            dimX: DimStyle.T, dimY: DimStyle.C, name: 'action_in_proj(x_t)',
+            dimX: DimStyle.T, dimY: DimStyle.C, name: groot ? 'a_emb = W1(x_t)' : 'action_in_proj(x_t)',
         });
         let fmActionInW = mk({
             t: 'w', cx: actD, cy: C, cz: 1, y: fmY, xL: nextX(actD), zM: 0,
             access: acc(fmM?.actionInW, [1, 0, 0], [0, 1, 0]),
-            dimX: DimStyle.None, dimY: DimStyle.C, name: 'action_in_proj W',
+            dimX: DimStyle.None, dimY: DimStyle.C, name: groot ? 'action_encoder W1' : 'action_in_proj W',
         });
         let fmX1 = mk({
             t: 'i', cx: actH, cy: actD, cz: B, y: fmY, xL: nextX(actH), zM: 0,
             access: acc(m?.actionX1, [0, 1, 0], [1, 0, 0]),
-            dimX: DimStyle.T, dimY: DimStyle.None, name: 'x_t (t=1: noise x1)',
+            dimX: DimStyle.T, dimY: DimStyle.None, name: `x_t (t=${FD.tNoise}: noise ${FD.noise})`,
         });
         let fmTimeEmb = mk({
             t: 'i', cx: C, cy: 1, cz: B, y: fmY - margin - cell, xL: bx(fmTimeInW), zM: 0,
             access: acc(fmM?.timeEmb, [0, 0, 0], [1, 0, 0]),
-            dimX: DimStyle.C, dimY: DimStyle.None, name: 'te = sincos(t)',
+            dimX: DimStyle.C, dimY: DimStyle.None, name: groot ? 'tau = sincos(t)' : 'te = sincos(t)',
         });
         let fmStateEmb = mk({
             t: 'i', cx: 1, cy: C, cz: B, y: fmY - margin - C * cell, xL: bx(expertIn), zM: 0,
             access: acc(fmM?.stateEmb, [0, 0, 0], [0, 1, 0]),
-            dimX: DimStyle.None, dimY: DimStyle.C, name: 'state_proj -> token 0',
+            dimX: DimStyle.None, dimY: DimStyle.C, name: groot ? 'state_encoder -> token 0' : 'state_proj -> token 0',
         });
+        // GR00T: a 2-layer state MLP (L1 → ReLU → L2) instead of one projection
+        let fmStateL2W = absentBlk('state L2'), fmStateHidden = absentBlk('state hidden');
+        let sx = bx(expertIn) + cell + margin;
+        if (groot) {
+            fmStateL2W = mk({
+                t: 'w', cx: C, cy: C, cz: 1, y: by(fmStateEmb), xL: sx, zM: 0,
+                access: acc(fmM?.stateL2W, [1, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.C, dimY: DimStyle.C, name: 'state_encoder L2',
+            });
+            fmStateHidden = mk({
+                t: 'i', cx: 1, cy: C, cz: B, y: by(fmStateEmb), xL: bxR(fmStateL2W) + margin, zM: 0,
+                access: acc(fmM?.stateHidden, [0, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.None, dimY: DimStyle.C, name: 'ReLU(L1(state))',
+            });
+            sx = bxR(fmStateHidden) + margin;
+        }
         let fmStateProjW = mk({
-            t: 'w', cx: nState, cy: C, cz: 1, y: by(fmStateEmb), xL: bx(expertIn) + cell + margin, zM: 0,
+            t: 'w', cx: nState, cy: C, cz: 1, y: by(fmStateEmb), xL: sx, zM: 0,
             access: acc(fmM?.stateProjW, [1, 0, 0], [0, 1, 0]),
-            dimX: DimStyle.None, dimY: DimStyle.C, name: 'state_proj W',
+            dimX: DimStyle.None, dimY: DimStyle.C, name: groot ? 'state_encoder L1' : 'state_proj W',
         });
         let fmState75 = mk({
             t: 'i', cx: nState, cy: 1, cz: B, y: by(fmStateEmb) - margin - cell, xL: bx(fmStateProjW), zM: 0,
             access: acc(fmM?.state75, [0, 0, 0], [1, 0, 0]),
-            dimX: DimStyle.None, dimY: DimStyle.None, name: 'state75 (normalized)',
+            dimX: DimStyle.None, dimY: DimStyle.None, name: groot ? `state${nState} (normalized)` : 'state75 (normalized)',
         });
-        let fmCond = absentBlk('cond');
+        // GR00T: temb = linear_2(SiLU(linear_1(Timesteps(t)))), the AdaLN input of every block
+        let fmCond = absentBlk('cond'), fmTembW2 = absentBlk('temb W2'), fmTembHidden = absentBlk('temb hidden');
+        let fmTembW1 = absentBlk('temb W1'), fmTProj = absentBlk('t proj');
+        if (groot) {
+            let ty = by(fmState75) - margin - C * cell;
+            let tx = bx(expertIn);
+            fmCond = mk({
+                t: 'i', cx: 1, cy: C, cz: B, y: ty, xL: tx, zM: 0,
+                access: acc(fmM?.cond, [0, 1, 0], [0, 0, 0]),
+                dimX: DimStyle.None, dimY: DimStyle.C, name: 'temb (AdaLN input)',
+            });
+            fmTembW2 = mk({
+                t: 'w', cx: C, cy: C, cz: 1, y: ty, xL: bxR(fmCond) + margin, zM: 0,
+                access: acc(fmM?.tembW2, [1, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.C, dimY: DimStyle.C, name: 'timestep linear_2',
+            });
+            fmTembHidden = mk({
+                t: 'i', cx: 1, cy: C, cz: B, y: ty, xL: bxR(fmTembW2) + margin, zM: 0,
+                access: acc(fmM?.tembHidden, [0, 1, 0], [0, 0, 0]),
+                dimX: DimStyle.None, dimY: DimStyle.C, name: 'SiLU(linear_1)',
+            });
+            fmTembW1 = mk({
+                t: 'w', cx: C, cy: C, cz: 1, y: ty, xL: bxR(fmTembHidden) + margin, zM: 0,
+                access: acc(fmM?.tembW1, [1, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.C, dimY: DimStyle.C, name: 'timestep linear_1',
+            });
+            fmTProj = mk({
+                t: 'i', cx: C, cy: 1, cz: B, y: ty - margin - cell, xL: bx(fmTembW1), zM: 0,
+                access: acc(fmM?.tProj, [0, 0, 0], [1, 0, 0]),
+                dimX: DimStyle.C, dimY: DimStyle.None, name: 'Timesteps(t)',
+            });
+        }
         return { fmState75, fmStateProjW, fmStateEmb, fmX1, fmActionInW, fmActionEmb, fmTimeEmb,
-            fmTimeInW, fmTimeHidden, fmTimeOutW, fmActionTime, fmCond };
+            fmTimeInW, fmTimeHidden, fmTimeOutW, fmActionTime, fmCond,
+            fmActionFeat, fmPosEmb, fmStateL2W, fmStateHidden, fmTembW2, fmTembHidden, fmTembW1, fmTProj };
     }
 
     // pi0: the action tokens are action_in_proj(x_t) alone; t enters only through the AdaNorms.
@@ -1203,13 +1307,18 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         });
         return { fmState75: absentBlk('state'), fmStateProjW: absentBlk('state_proj'), fmStateEmb: absentBlk('state token'),
             fmX1, fmActionInW, fmActionEmb: absentBlk('action emb'), fmTimeEmb, fmTimeInW, fmTimeHidden, fmTimeOutW,
-            fmActionTime: absentBlk('action time'), fmCond };
+            fmActionTime: absentBlk('action time'), fmCond,
+            fmActionFeat: absentBlk('action feat'), fmPosEmb: absentBlk('pos emb'), fmStateL2W: absentBlk('state L2'),
+            fmStateHidden: absentBlk('state hidden'), fmTembW2: absentBlk('temb W2'), fmTembHidden: absentBlk('temb hidden'),
+            fmTembW1: absentBlk('temb W1'), fmTProj: absentBlk('t proj') };
     }
 
     let { fmState75, fmStateProjW, fmStateEmb, fmX1, fmActionInW, fmActionEmb, fmTimeEmb, fmTimeInW, fmTimeHidden,
-        fmTimeOutW, fmActionTime, fmCond } = V.time_into_tokens ? fmChainTokens() : fmChainCond();
-    let fmCubes = [fmState75, fmStateProjW, fmStateEmb, fmX1, fmActionInW, fmActionEmb, fmTimeEmb,
-        fmTimeInW, fmTimeHidden, fmTimeOutW, fmActionTime, fmCond];
+        fmTimeOutW, fmActionTime, fmCond, fmActionFeat, fmPosEmb, fmStateL2W, fmStateHidden, fmTembW2, fmTembHidden,
+        fmTembW1, fmTProj } = V.time_into_tokens ? fmChainTokens() : fmChainCond();
+    let fmCubes = [fmTProj, fmTembW1, fmTembHidden, fmTembW2, fmCond, fmState75, fmStateProjW, fmStateHidden, fmStateL2W,
+        fmStateEmb, fmX1, fmActionInW, fmActionEmb, fmTimeEmb, fmTimeInW, fmTimeHidden, fmTimeOutW, fmActionFeat,
+        fmPosEmb, fmActionTime];
     // top of the input cluster: the te(t) bus runs across just above it
     let fmTopY = Math.min(...fmCubes.filter(c => !c.absent).map(c => by(c)));
 
@@ -1221,58 +1330,101 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
     let strip: IBlkDef[] = [];
     for (let k = 0; k <= nEuler; k++) {
         let tex = k === 0 ? fmS?.steps[0]?.tex['x'] : fmS?.steps[k - 1]?.tex['x_next'];
-        let tk = 1 - k / nEuler;
+        let tk = FD.tOf(k, nEuler);
+        let td = Number.isInteger(10 / nEuler) ? 1 : 2;
         strip.push(mk({
             t: 'i', cx: actH, cy: actD, cz: B, y: stripY, xL: bx(fmX1) + k * (actH * cell + margin), zM: 0,
             access: acc(tex, [0, 1, 0], [1, 0, 0]),
             dimX: DimStyle.T, dimY: DimStyle.None, hidden: true,
-            name: k === nEuler ? `x(t=0) = action (K=${nEuler})` : `x(t=${tk.toFixed(1)})`,
+            name: k === nEuler ? `x(t=${FD.tAct}) = action (K=${nEuler})` : `x(t=${tk.toFixed(td)})`,
         }));
     }
 
     let expertLayers: ReturnType<typeof createExpertLayer>[] = [];
     let expertSrc = expertIn;
-    for (let i = 0; i < nBlocks; i++) {
+    type ILn = ReturnType<typeof createLnAt>;
+    let ln_f: ILn | null = null;
+    let vlln: ILn | null = null;
+    let yF: number, yF1: number;
+    if (crossDit) {
+        // GR00T: the trunk column runs first (LM layers → final RMSNorm → vlln → VL blocks), the DiT
+        // column beside it from the top; its cross blocks read the trunk's last output (the VL tokens)
+        let yTop = y;
+        for (let i = 0; i < nBlocks; i++) {
+            if (V.trunk_layer_kinds?.[i] === 'vlsa' && V.trunk_layer_kinds?.[i - 1] === 'lm') {
+                y += blockHalfMargin;
+                ln_f = createLn(0, blockSrc, m?.ln_f);
+                ln_f.lnResid.name = 'final RMSNorm';
+                y += margin;
+                vlln = createLn(0, ln_f.lnResid, m?.vlln, true);
+                vlln.lnResid.name = 'vlln (LayerNorm)';
+                cubes.push(...ln_f.cubes, ...vlln.cubes);
+                blockSrc = vlln.lnResid;
+                y += blockHalfMargin;
+            }
+            y += blockHalfMargin;
+            let block = createLayer(blockSrc, m?.blocks[i], i);
+            blocks.push(block);
+            blockSrc = block.mlpResidual;
+            y += blockHalfMargin;
+        }
+        blocks[blocks.length - 1].mlpResidual.name = 'VL tokens (K/V of the cross blocks)';
+        let yTrunk = y;
+        y = yTop;
+        let nE = m?.config.n_layer_pairs ?? V.expert_layer_kinds!.length;
+        for (let i = 0; i < nE; i++) {
+            y += blockHalfMargin;
+            let ex = createExpertLayer(resMidX + eDX, expertSrc, m?.expertLayers[i], fmM?.ada[i], i, null, blockSrc);
+            expertLayers.push(ex);
+            expertSrc = ex.mlpResidual;
+            y += blockHalfMargin;
+        }
         y += blockHalfMargin;
-        let y0 = y;
-        let block = createLayer(blockSrc, m?.blocks[i]);
-        let y1 = y;
-        y = y0;
-        let ex = createExpertLayer(resMidX + eDX, expertSrc, m?.expertLayers[i], fmM?.ada[i], i, block);
-        y = Math.max(y, y1);
-        blocks.push(block);
-        expertLayers.push(ex);
-        blockSrc = block.mlpResidual;
-        expertSrc = ex.mlpResidual;
-        y += blockHalfMargin;
-    }
+        yF = y;
+        yF1 = yTrunk;
+    } else {
+        for (let i = 0; i < nBlocks; i++) {
+            y += blockHalfMargin;
+            let y0 = y;
+            let block = createLayer(blockSrc, m?.blocks[i], i);
+            let y1 = y;
+            y = y0;
+            let ex = createExpertLayer(resMidX + eDX, expertSrc, m?.expertLayers[i], fmM?.ada[i], i, block);
+            y = Math.max(y, y1);
+            blocks.push(block);
+            expertLayers.push(ex);
+            blockSrc = block.mlpResidual;
+            expertSrc = ex.mlpResidual;
+            y += blockHalfMargin;
+        }
 
-    y += blockHalfMargin;
-    let yF = y;
-    let ln_f = createLn(0, blockSrc, m?.ln_f);
-    let yF1 = y;
-    y = yF;
+        y += blockHalfMargin;
+        yF = y;
+        ln_f = createLn(0, blockSrc, m?.ln_f);
+        yF1 = y;
+        y = yF;
+        cubes.push(...ln_f.cubes);
+    }
+    let lnF = ln_f!;
     // the DiT's final RMSNorm (plain, not t-modulated), level with the trunk's ln_f
     let expertNormX = resMidX + eDX - nSuffix * cell / 2 - margin;
     let expertNorm = V.expert_final_ada
         ? createLnAt(expertNormX - adaRoom, nSuffix, expertSrc, m?.expertNorm,
-            { tex: m?.expertFinalAda, row0: 0, name: 'scale shift (t)', rows: 2 })
+            { tex: m?.expertFinalAda, row0: 0, name: 'scale shift (t)', rows: 2 }, adaLn)
         : createLnAt(expertNormX, nSuffix, expertSrc, m?.expertNorm);
-    expertNorm.lnResid.name = `${ditName} final ${V.expert_final_ada ? 'AdaRMSNorm' : 'RMSNorm'}`;
+    expertNorm.lnResid.name = `${ditName} final ${V.expert_final_ada ? (adaLn ? 'AdaLayerNorm' : 'AdaRMSNorm') : 'RMSNorm'}`;
     let expertOut = expertNorm.lnResid;
     y = Math.max(y, yF1);
-
-    cubes.push(...ln_f.cubes);
 
     y += C * cell + margin;
 
     // ---- the heads: h* = ln_f out at the boundary token (the last token of the window) ----
-    let hR = bxR(ln_f.lnResid);
+    let hR = bxR(lnF.lnResid);
     let hStar = mk({
         t: 'i', cx: 1, cy: C, cz: B, y: y,
         xR: hR, zM: 0,
         access: acc(m?.hStar, [0, 0, 0], [0, 1, 0]),
-        deps: { add: [[ln_f.lnResid, '0y']] },
+        deps: { add: [[lnF.lnResid, '0y']] },
         dimX: DimStyle.None, dimY: DimStyle.C,
         name: 'h* (boundary state)',
     });
@@ -1367,6 +1519,38 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         name: 'Done Softmax',
     });
 
+    // GR00T's exit: proj_out_2 → dit_out, action_decoder layer1 → ReLU → dec_h, then layer2 (below)
+    let ditOut = absentBlk('dit_out'), outProjW = absentBlk('proj_out_2'), decH = absentBlk('dec_h'), decL1W = absentBlk('dec_l1');
+    let vSrc = expertOut;
+    if (groot) {
+        let ox = bx(expertOut);
+        ditOut = mk({
+            t: 'i', cx: nSuffix, cy: C, cz: B, y: y, xL: ox, zM: 0,
+            access: acc(m?.ditOut, [0, 1, 0], [1, 0, 0]),
+            dimX: DimStyle.T, dimY: DimStyle.C, name: 'proj_out_2 -> dit_out',
+        });
+        outProjW = mk({
+            t: 'w', cx: C, cy: C, cz: 1, y: y, xL: bxR(ditOut) + margin, zM: 0,
+            access: acc(m?.outProjW, [1, 0, 0], [0, 1, 0]),
+            dimX: DimStyle.C, dimY: DimStyle.C, name: 'proj_out_2 Weights',
+        });
+        ditOut.deps = depArgsToDeps({ dot: [[outProjW, 'iy'], [expertOut, 'xi']], dotLen: C });
+        y += C * cell + margin;
+        decH = mk({
+            t: 'i', cx: nSuffix, cy: C, cz: B, y: y, xL: ox, zM: 0,
+            access: acc(m?.decH, [0, 1, 0], [1, 0, 0]),
+            dimX: DimStyle.T, dimY: DimStyle.C, name: 'ReLU(decoder L1)',
+        });
+        decL1W = mk({
+            t: 'w', cx: C, cy: C, cz: 1, y: y, xL: bxR(decH) + margin, zM: 0,
+            access: acc(m?.decL1W, [1, 0, 0], [0, 1, 0]),
+            dimX: DimStyle.C, dimY: DimStyle.C, name: 'action_decoder L1 Weights',
+        });
+        decH.deps = depArgsToDeps({ dot: [[decL1W, 'iy'], [ditOut, 'xi']], dotLen: C });
+        y += C * cell + margin;
+        vSrc = decH;
+    }
+
     // DiT exit, straight under its final norm: drop token 0, action_out_proj → v (16 × 23);
     // the one-step decode x1 − v below it. In the K-step decode v instead feeds the strip.
     let ax = bx(expertOut) + cell;
@@ -1382,23 +1566,23 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         xL: ax + actH * cell + margin, zM: 0,
         access: acc(m?.actionWeight, [1, 0, 0], [0, 1, 0]),
         dimX: DimStyle.C, dimY: DimStyle.None,
-        name: 'action_out_proj Weights',
+        name: groot ? 'action_decoder L2 Weights' : 'action_out_proj Weights',
     });
-    (actionVelocity.deps as any) = depArgsToDeps({ dot: [[actionWeight, 'iy'], [expertOut, 'xi']], dotLen: C });
+    (actionVelocity.deps as any) = depArgsToDeps({ dot: [[actionWeight, 'iy'], [vSrc, 'xi']], dotLen: C });
     let chunkY = y + actD * cell + margin;
     let actionChunk = mk({
         t: 'i', cx: actH, cy: actD, cz: B, y: chunkY,
         xL: ax, zM: 0,
         access: acc(m?.actionChunk, [0, 1, 0], [1, 0, 0]),
         dimX: DimStyle.T, dimY: DimStyle.None,
-        name: 'Action Chunk = x1 - v (K=1)',
+        name: `Action Chunk = ${FD.noise} ${FD.sign} v (K=1)`,
     });
     let actionX1 = mk({
         t: 'i', cx: actH, cy: actD, cz: B, y: chunkY,
         xL: ax + actH * cell + margin, zM: 0,
         access: acc(m?.actionX1, [0, 1, 0], [1, 0, 0]),
         dimX: DimStyle.T, dimY: DimStyle.None,
-        name: 'x1 (skip: same input x1)',
+        name: `${FD.noise} (skip: same input ${FD.noise})`,
     });
     actionChunk.deps = depArgsToDeps({ add: [[actionX1, 'xy'], [actionVelocity, 'xy']] });
 
@@ -1422,7 +1606,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
 
     let headCubes = [hStar, lmHeadWeight, logits, logitsAgg1, logitsAgg2, logitsSoftmax,
         doneWeight, doneLogits, doneAgg1, doneAgg2, doneProbs];
-    let actionCubes = [actionVelocity, actionWeight, actionChunk, actionX1];
+    let actionCubes = [ditOut, outProjW, decH, decL1W, actionVelocity, actionWeight, actionChunk, actionX1];
     // cube order = compute order: the prefix (trunk + heads) is complete before the suffix
     // starts, so the trunk chapters' sweeps never walk into the expert
     let expertLayerCubes = expertLayers.flatMap(e => e.cubes);
@@ -1447,7 +1631,11 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         idxObj,
         tokEmbedObj,
         residual0,
-        ln_f,
+        ln_f: lnF,
+        vlln,
+        // GR00T: the trunk's last output = the K/V source of the DiT's cross blocks
+        vlOut: crossDit ? blocks[blocks.length - 1].mlpResidual : null,
+        ditOut, outProjW, decH, decL1W, crossDit,
         hStar,
         lmHeadWeight,
         logits,
@@ -1475,8 +1663,10 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         fm: { state75: fmState75, stateProjW: fmStateProjW, stateEmb: fmStateEmb, x1: fmX1,
             actionInW: fmActionInW, actionEmb: fmActionEmb, timeEmb: fmTimeEmb, timeInW: fmTimeInW,
             timeHidden: fmTimeHidden, timeOutW: fmTimeOutW, actionTime: fmActionTime, cond: fmCond,
-            // where the te(t) bus starts (te itself, or pi0's cond) and the height it crosses at
-            busSrc: V.time_into_tokens ? fmTimeEmb : fmCond, topY: fmTopY + offset.y, cubes: fmCubes },
+            actionFeat: fmActionFeat, posEmb: fmPosEmb, stateL2W: fmStateL2W, stateHidden: fmStateHidden,
+            tembW2: fmTembW2, tembHidden: fmTembHidden, tembW1: fmTembW1, tProj: fmTProj,
+            // where the te(t) bus starts (te itself, or the cond / temb vector) and the height it crosses at
+            busSrc: fmCond.absent ? fmTimeEmb : fmCond, topY: fmTopY + offset.y, cubes: fmCubes },
         variant: V,
         expertLabel,
         embedLabel,

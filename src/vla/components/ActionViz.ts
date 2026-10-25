@@ -5,7 +5,7 @@
 //    the one-step Euler decode animated: x(τ) = x1 − τ·v, τ: 0 → 1 (t = 1 → 0)
 import { IProgramState, vlaLayout } from "../Program";
 import { IVlaModelLayout } from "../VlaModelLayout";
-import { IVlaModelLink } from "../VlaModel";
+import { fmDir, IVlaModelLink } from "../VlaModel";
 import { addLine } from "../render/lineRender";
 import { addPrimitiveRestart, addVert } from "../render/triRender";
 import { drawText, IFontOpts, measureText } from "../render/fontRender";
@@ -114,10 +114,12 @@ function drawNormCompare(state: IProgramState, layout: IVlaModelLayout, m: IVlaM
     if (!e || !el || !ada) return;
     let blk = viz.normWhich === 1 ? e.ada : e.ada2;
     let out = (viz.normWhich === 1 ? el.ln_1 : el.ln_2).output.localBuffer;
-    if (blk.opacity <= 0) return;
-    // rows per norm: [g, b] (k005b) or [scale, shift, gate] (pi0); the gate acts at the residual
+    if (!blk || blk.opacity <= 0) return;
+    // rows per norm: [g, b] (k005b) or [scale, shift, gate] (pi0); the gate acts at the residual.
+    // GR00T modulates only norm1 (AdaLayerNorm [scale, shift]); its norm3 is a plain LayerNorm
     let R = layout.variant.ada_rows, gated = R === 3;
-    let wc = ada.localBuffer.length / (2 * R);
+    let adaLn = layout.variant.expert_ada === 'adaln';
+    let wc = ada.localBuffer.length / ((e.ada2 ? 2 : 1) * R);
     let g0 = (viz.normWhich - 1) * R;
     let nTok = out.length / wc, t = Math.min(viz.normTok, nTok - 1);
     let a = viz.normCmp;
@@ -145,10 +147,10 @@ function drawNormCompare(state: IProgramState, layout: IVlaModelLayout, m: IVlaM
     state.render.sharedRender.activePhase = prev;
     let txt = new Vec4(0.1, 0.1, 0.15, 1).mul(a);
     let ty = blk.y - 13;
-    let nm = `${gated ? 'adaRMS' : 'AdaRMSNorm'}${viz.normWhich}`;
-    sceneText(state, `${nm} layer ${i}, suffix token ${t}, ch 0-${wc - 1}`, x0 - lim, ty, z, 2.4, txt);
-    sceneText(state, gated ? 'grey  : RMSNorm(x)  (before t-modulation)' : 'grey  : RMSNorm(x)*w  (before t-modulation)', x0 - lim, ty + 3.5, z, 2.2, grey);
-    sceneText(state, gated ? 'orange: (1+scale(t))*n + shift(t)  (after)' : 'orange: (1+g(t))*n + b(t)  (after)', x0 - lim, ty + 6.5, z, 2.2, orange);
+    let nm = adaLn ? 'AdaLayerNorm' : `${gated ? 'adaRMS' : 'AdaRMSNorm'}${viz.normWhich}`;
+    sceneText(state, `${nm} ${adaLn ? 'block' : 'layer'} ${i}, ${adaLn ? 'DiT' : 'suffix'} token ${t}, ch 0-${wc - 1}`, x0 - lim, ty, z, 2.4, txt);
+    sceneText(state, adaLn ? 'grey  : LayerNorm(x)  (before t-modulation)' : gated ? 'grey  : RMSNorm(x)  (before t-modulation)' : 'grey  : RMSNorm(x)*w  (before t-modulation)', x0 - lim, ty + 3.5, z, 2.2, grey);
+    sceneText(state, gated || adaLn ? 'orange: (1+scale(t))*n + shift(t)  (after)' : 'orange: (1+g(t))*n + b(t)  (after)', x0 - lim, ty + 6.5, z, 2.2, orange);
     let lr = state.render.lineRender;
     addLine(lr, 0.6, txt, new Vec3(x0, blk.y, z), new Vec3(x0, blk.y + blk.dy, z), undefined, undefined, 0);
 }
@@ -161,7 +163,9 @@ function drawStripTitle(state: IProgramState, layout: IVlaModelLayout, m: IVlaMo
     let K = S.length - 1;
     let x = S[0].x, z = S[0].z + S[0].dz / 2, a = S[0].opacity;
     let y = S[0].y - 24;
-    sceneText(state, `Euler strip: x(t=1) noise -> x(t=0) action,  K=${K} DiT passes,  x <- x - v/${K}`, x, y, z, 4, new Vec4(0.1, 0.1, 0.15, 1).mul(a));
+    let FD = fmDir(layout.variant);
+    let td = Number.isInteger(10 / K) ? 1 : 2;
+    sceneText(state, `Euler strip: x(t=${FD.tNoise}) noise -> x(t=${FD.tAct}) action,  K=${K} DiT passes,  x <- x ${FD.sign} v/${K}`, x, y, z, 4, new Vec4(0.1, 0.1, 0.15, 1).mul(a));
     if (fs && !fs.inDistribution) {
         sceneText(state, `preview: pre-stamp weights (step_${fs.checkpointStep}, trained at t=1 only; t<1 is out of distribution)`,
             x, y + 6, z, 3, Vec4.fromHexColor('#b45309').mul(a));
@@ -169,8 +173,8 @@ function drawStripTitle(state: IProgramState, layout: IVlaModelLayout, m: IVlaMo
     if (viz.eulerPass >= 0) {
         let k = viz.eulerPass;
         let cells = Array.from({ length: K }, (_, j) => j < k ? '[#]' : j === k ? '[>]' : '[ ]').join('');
-        let t = fs?.steps[Math.min(k, K - 1)]?.t ?? 1 - k / K;
-        let txt = k >= K ? `${cells}  done: x(t=0) = action chunk` : `${cells}  pass ${k + 1}/${K}   t = ${t.toFixed(1)}`;
+        let t = fs?.steps[Math.min(k, K - 1)]?.t ?? FD.tOf(k, K);
+        let txt = k >= K ? `${cells}  done: x(t=${FD.tAct}) = action chunk` : `${cells}  pass ${k + 1}/${K}   t = ${t.toFixed(td)}`;
         sceneText(state, txt, x, y + 12, z, 4, Vec4.fromHexColor('#a16207').mul(a));
     }
 }
@@ -207,6 +211,8 @@ function arrow3(state: IProgramState, a: Vec3, b: Vec3, thick: number, color: Ve
 // suffix attention mass
 function drawJointLinks(state: IProgramState, layout: IVlaModelLayout, m: IVlaModelLink, viz: IActionVizState,
     isVisible?: (cubes: IBlkDef[]) => boolean) {
+    // GR00T: no layer pairing; its cross blocks read the VL tokens over the VL bus (Arrow.ts)
+    if (layout.crossDit) return;
     let flow = layout.flow;
     for (let i = 0; i < layout.expertLayers.length; i++) {
         let e = layout.expertLayers[i];
@@ -245,7 +251,13 @@ function drawMassBars(state: IProgramState, layout: IVlaModelLayout, m: IVlaMode
     let mass = layerMass(m, i, viz.massStep);
     let nVis = cfg.suffix_visible_visual, nTxt = cfg.suffix_visible_prefix - cfg.suffix_visible_visual;
     let nAns = cfg.T_text - cfg.suffix_visible_prefix;
-    let rows: [string, number | null, Vec4][] = [
+    // GR00T: a cross block attends to [image | text] VL tokens, a self block to [state | action] tokens
+    let rows: [string, number | null, Vec4][] = layout.crossDit ? [
+        [`state token (self)`, mass[0], new Vec4(0.6, 0.6, 0.6, 1)],
+        [`image ${nVis} VL tokens (cross)`, mass[1], Vec4.fromHexColor('#0ea5e9')],
+        [`text ${nTxt} VL tokens (cross)`, mass[2], Vec4.fromHexColor('#22c55e')],
+        [`action ${cfg.n_suffix - 1} tokens (self)`, mass[3], Vec4.fromHexColor('#f59e0b')],
+    ] : [
         [`state  ${cfg.n_state_tokens} cols  MASKED`, null, new Vec4(0.6, 0.6, 0.6, 1)],
         [`visual ${nVis} cols`, mass[1], Vec4.fromHexColor('#0ea5e9')],
         [`text   ${nTxt} cols`, mass[2], Vec4.fromHexColor('#22c55e')],
@@ -303,6 +315,7 @@ function drawBarField(state: IProgramState, layout: IVlaModelLayout, m: IVlaMode
     let tau = Math.max(0, Math.min(1, viz.decode));
     let alpha = viz.field;
     let isVel = viz.fieldMode === 'velocity';
+    let FD = fmDir(layout.variant), sg = FD.fwd ? 1 : -1;
 
     // base plane
     let plane = new Vec4(0.55, 0.6, 0.68, 1).mul(0.35 * alpha);
@@ -320,7 +333,7 @@ function drawBarField(state: IProgramState, layout: IVlaModelLayout, m: IVlaMode
     for (let s = 0; s < nSteps; s++) {
         for (let d = 0; d < nDims; d++) {
             let i = s * nDims + d;
-            let val = isVel ? vel[i] : x1[i] - tau * vel[i];
+            let val = isVel ? vel[i] : x1[i] + sg * tau * vel[i];
             let h = val * heightScale;
             let base = isVel ? divergingColor(val) : groupColorOf(d);
             let x0 = xOf(d), z0 = zOf(s);
@@ -328,7 +341,7 @@ function drawBarField(state: IProgramState, layout: IVlaModelLayout, m: IVlaMode
             let cx = x0 + barW / 2, cz = z0 + barW / 2;
             if (viz.showVelocity > 0 && !isVel) {
                 // this component's Euler step: from x1 to x1 − v
-                let yA = f.y - x1[i] * heightScale, yB = f.y - (x1[i] - vel[i]) * heightScale;
+                let yA = f.y - x1[i] * heightScale, yB = f.y - (x1[i] + sg * vel[i]) * heightScale;
                 addLine(lr, 1.5, new Vec4(1, 1, 1, 1).mul(0.85 * viz.showVelocity * alpha), new Vec3(cx, yA, cz), new Vec3(cx, yB, cz), undefined, undefined, 0);
             }
             if (viz.target > 0 && !isVel) {
@@ -374,10 +387,13 @@ function drawBarField(state: IProgramState, layout: IVlaModelLayout, m: IVlaMode
         let opts: IFontOpts = { color: txt, size: 2.4, mtx: Mat4f.fromTranslation(new Vec3(xOf(nDims - 1) + barW + 3, f.y - 1.5, zOf(s) + barW / 2)) };
         drawText(fb, `step ${s}`, 0, 0, opts);
     }
-    let tNow = 1 - tau;
+    let tNow = FD.fwd ? tau : 1 - tau;
+    let N = FD.noise;
     let title = isVel
-        ? `velocity v = action_out_proj(expert)  ${nSteps} x ${nDims}   blue +, red -`
-        : `action chunk ${nSteps} x ${nDims}  |  x(t) = x1 - (1 - t) v,  t = ${tNow.toFixed(2)}${tau >= 1 ? '  (decoded: x1 - v)' : '  [interp only]'}`;
+        ? `velocity v = ${FD.fwd ? 'action_decoder(DiT)' : 'action_out_proj(expert)'}  ${nSteps} x ${nDims}   blue +, red -`
+        : FD.fwd
+            ? `action chunk ${nSteps} x ${nDims}  |  x(t) = x0 + t v,  t = ${tNow.toFixed(2)}${tau >= 1 ? '  (decoded: x0 + v)' : '  [interp only]'}`
+            : `action chunk ${nSteps} x ${nDims}  |  x(t) = ${N} - (1 - t) v,  t = ${tNow.toFixed(2)}${tau >= 1 ? `  (decoded: ${N} - v)` : '  [interp only]'}`;
     let topY = f.y - heightScale * 2.6;
     let titleOpts: IFontOpts = { color: txt, size: 3.2, mtx: Mat4f.fromTranslation(new Vec3(xOf(0), topY, zFront)) };
     drawText(fb, title, 0, -3.2, titleOpts);
@@ -418,6 +434,7 @@ function drawParticles(state: IProgramState, layout: IVlaModelLayout, m: IVlaMod
     let a = viz.particles;
     let tri = state.render.triRender, lr = state.render.lineRender;
     let hs = f.heightScale;
+    let FD = fmDir(layout.variant), sg = FD.fwd ? 1 : -1, N = FD.noise;
     let z = zFront - 2;
     let at = (k: number, which: number, d: number) => P[((k * 3 + which) * H + s) * D + d];
     let guide = new Vec4(0.6, 0.6, 0.65, 1).mul(0.6 * a);
@@ -432,7 +449,7 @@ function drawParticles(state: IProgramState, layout: IVlaModelLayout, m: IVlaMod
         for (let k = 0; k < K; k++) {
             let px = cx + (k - (K - 1) / 2) * 0.42;
             let y0 = f.y - at(k, 0, d) * hs;
-            let yc = f.y - (at(k, 0, d) - tau * at(k, 1, d)) * hs;
+            let yc = f.y - (at(k, 0, d) + sg * tau * at(k, 1, d)) * hs;
             let col = particleColors[k % particleColors.length];
             addLine(lr, 0.7, col.mul(0.55 * a), new Vec3(px, y0, z + 0.2), new Vec3(px, yc, z + 0.2), undefined, undefined, 0);
             box(tri, px - 0.25, px + 0.25, yc - 0.25, yc + 0.25, z, z + 0.5, col, a, true);
@@ -456,7 +473,7 @@ function drawParticles(state: IProgramState, layout: IVlaModelLayout, m: IVlaMod
     }
     let fm = cfg.fm;
     let lines = [
-        `${K} noise particles, step ${s}: x1_k -> x1_k - v_k (one real t=1 forward each)`,
+        `${K} noise particles, step ${s}: ${N}_k -> ${N}_k ${FD.sign} v_k (one real t=${FD.tNoise} forward each)`,
         tau >= 1 ? `black = mean of ${K} (MSE ${fm.mse_mean_chunk.toFixed(3)}), red = label a, single MSE ${Math.min(...fm.mse_per_particle).toFixed(2)}..${Math.max(...fm.mse_per_particle).toFixed(2)}` : `tau = ${tau.toFixed(2)}`,
     ];
     lines.forEach((l, j) => drawText(fb, l, 0, 0, { color: txt, size: 2.4, mtx: Mat4f.fromTranslation(new Vec3(xOf(0), f.y - 3.2 * hs + j * 3.8, z)) }));

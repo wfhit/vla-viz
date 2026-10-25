@@ -42,12 +42,25 @@ export interface IModelVariant {
     trunk_heads: boolean;          // knack / done heads read h* off the trunk
     embed_scale: number;           // embed_out = row × embed_scale
     expert_bias: boolean;          // q/k/v biases in the expert
-    expert_ada: 'adarms' | 'adarms_gated';
-    expert_mlp: 'swiglu' | 'geglu';
+    expert_ada: 'adarms' | 'adarms_gated' | 'adaln';
+    expert_mlp: 'swiglu' | 'geglu' | 'gelu';
     expert_final_ada: boolean;     // the expert's final norm is t-modulated too
     state_token: boolean;          // suffix token 0 = state_proj(state)
     time_into_tokens: boolean;     // te is mixed into the action tokens (k005b) vs only via AdaNorm (pi0)
     ada_rows: number;              // rows of one sublayer's modulation: 2 = γ β, 3 = scale shift gate
+    // GR00T: the trunk = LM layers then VL self-attention blocks (LayerNorm, GELU MLP, biases);
+    // the DiT is not layer-paired with it: it runs after the trunk, its cross-attention blocks
+    // read the trunk's final VL tokens as K/V, its self-attention blocks only the 41 DiT tokens
+    trunk_layer_kinds?: ('lm' | 'vlsa')[];
+    expert_layer_kinds?: ('cross_text' | 'cross_image' | 'self')[];
+}
+
+// the Euler direction: k005b / pi0 integrate t = 1 (noise) → 0 with x ← x − v/K; GR00T t = 0 → 1, x ← x + v/K
+export function fmDir(V: IModelVariant) {
+    let fwd = V.id === 'groot';
+    return fwd
+        ? { fwd, tNoise: 0, tAct: 1, sign: '+', noise: 'x0', tOf: (k: number, K: number) => k / K }
+        : { fwd, tNoise: 1, tAct: 0, sign: '-', noise: 'x1', tOf: (k: number, K: number) => 1 - k / K };
 }
 
 export const k005bVariant: IModelVariant = {
@@ -111,12 +124,21 @@ export interface IK005bConfig {
     pred_knack: string | null;
     pred_done: boolean | null;
     fm: IK005bFmConfig;
+    // GR00T only
+    expert_head_dim?: number;
+    vlsa?: { n_layer: number; heads: number; head_dim: number; intermediate: number };
+    dit_out_dim?: number;
+    max_action_dim?: number;
+    max_state_dim?: number;
+    window_is_image?: boolean[];
+    embodiment?: { tag: string; slot: number; trained: boolean; slot_std: Record<string, number[]> };
 }
 
 // flow matching facts measured by the exporter (tools/export_k005b.py export_flow_matching)
 export interface IK005bFmConfig {
     t: number; steps: number; min_period: number; max_period: number;
     dt?: number; t_list?: number[];  // pi0: the K-step decode schedule
+    t_disc?: number[];               // GR00T: the integer timesteps (t · 1000)
     seeds: number[]; n_particles: number;
     mse: number; mse_zero: number; mse_mean_chunk: number; mse_per_particle: number[];
     particle_chunk_std: number; state_valid: number;
@@ -158,14 +180,16 @@ export interface IRealTex extends IBufferTex {
 }
 
 export interface IRmsNormLink {
-    agg: IRealTex;      // [Wt, 2]: mean(x²) over full C | rsqrt(mean+eps)
+    agg: IRealTex;      // [Wt, 2]: mean(x²) over full C | rsqrt(mean+eps)  (LayerNorm: mean | rstd)
     weight: IRealTex;   // γ [C]
+    bias?: IRealTex;    // β [C] (LayerNorm only)
     output: IRealTex;
 }
 
 export interface IHeadLink {
     qWeight: IRealTex;
     qNorm: IRealTex;
+    qBias: IRealTex;
     q: IRealTex;
     attnScores: IRealTex;
     attnAgg: IRealTex;
@@ -177,6 +201,8 @@ export interface IKvGroupLink {
     kWeight: IRealTex;
     vWeight: IRealTex;
     kNorm: IRealTex;
+    kBias: IRealTex;
+    vBias: IRealTex;
     k: IRealTex;
     v: IRealTex;
 }
@@ -269,6 +295,7 @@ export interface IVlaModelLink {
     embedOut: IRealTex;
     blocks: IBlockLayerLink[];
     ln_f: IRmsNormLink;
+    vlln: IRmsNormLink;       // GR00T: LayerNorm between the LM and the VL self-attention blocks
     hStar: IRealTex;
     knackWeight: IRealTex;
     knackBias: IRealTex;
@@ -285,6 +312,10 @@ export interface IVlaModelLink {
     expertNorm: IRmsNormLink;
     expertFinalAda: IRealTex; // [2, Wc] scale | shift of the final AdaRMSNorm (pi0)
     expertOut: IRealTex;
+    outProjW: IRealTex;       // GR00T: proj_out_2 → dit_out → action_decoder.layer1 → ReLU → dec_h
+    ditOut: IRealTex;
+    decL1W: IRealTex;
+    decH: IRealTex;
     actionWeight: IRealTex;
     actionBias: IRealTex;
     actionX1: IRealTex;
@@ -307,6 +338,15 @@ export interface IFmLink {
     timeInW: IRealTex;      // [64 of 768, 64 of 1536]
     timeOutW: IRealTex;     // [64 of 768, 64 of 768]
     cond: IRealTex;         // [1, Wc] the AdaNorm input when te is not mixed into the tokens (pi0)
+    // GR00T: state 2-layer MLP, action_encoder W3 out, learned positions, the timestep encoder
+    stateHidden: IRealTex;
+    stateL2W: IRealTex;
+    actionFeat: IRealTex;
+    posEmb: IRealTex;
+    tProj: IRealTex;
+    tembW1: IRealTex;
+    tembHidden: IRealTex;
+    tembW2: IRealTex;
     ada: IRealTex[];        // per layer [4, 64 of 768]: γ_in, β_in, γ_post, β_post
     target: IRealTex;       // [16, 23] label a
     u: IRealTex;            // [16, 23] x1 − a
@@ -527,7 +567,10 @@ export function createModelGpuLink(gl: WebGL2RenderingContext, data: IK005bData)
     let optional = new Set(['q_norm', 'k_norm', 'q_b', 'k_b', 'v_b', 'ln1_w', 'ln2_w', 'expert_norm_w', 'lnf_w', 'lnf_agg',
         'lnf_out', 'h_star', 'knack_w', 'knack_b', 'knack_logits', 'knack_agg', 'knack_probs', 'done_w', 'done_b',
         'done_logits', 'done_agg', 'done_probs', 'fm_state75', 'fm_state_emb', 'fm_state_proj_w', 'fm_action_emb',
-        'fm_action_time', 'fm_target', 'fm_u', 'fm_cond', 'expert_final_ada']);
+        'fm_action_time', 'fm_target', 'fm_u', 'fm_cond', 'expert_final_ada', 'ln1_b', 'ln2_b', 'up_w', 'mlp_up', 'up',
+        'scp', 'pp', 'scs', 'ps', 'vlln_agg', 'vlln_w', 'vlln_b', 'vlln_out', 'out_proj_w', 'dit_out', 'dec_l1_w', 'dec_h',
+        'fm_state_hidden', 'fm_state_l2_w', 'fm_action_feat', 'fm_pos_emb', 'fm_t_proj', 'fm_temb_w1', 'fm_temb_hidden',
+        'fm_temb_w2', 'expert_norm_w']);
     let has = (src: Record<string, ITensorEntry>, k: string) => !!src[k];
     let tex = (src: Record<string, ITensorEntry>, k: string, sub?: number) => {
         if (!src[k] && optional.has(k.replace(/^[LE]\d+\./, ''))) return absentTex(gl, k);
@@ -538,16 +581,21 @@ export function createModelGpuLink(gl: WebGL2RenderingContext, data: IK005bData)
     let w = (k: string, sub?: number) => tex(W, k, sub);
     let a = (k: string, sub?: number) => tex(A, k, sub);
 
-    let H = config.n_head, KV = config.n_kv_head;
+    // head / kv-group counts per layer come from the export (GR00T's VL blocks export head 0 only)
+    let nSub = (k: string) => get(W, k).shape[0];
+    let KV = config.n_kv_head;
     let blocks: IBlockLayerLink[] = [];
     for (let i = 0; i < config.n_layer; i++) {
         let qNorm = w(`L${i}.q_norm`);
         let kNorm = w(`L${i}.k_norm`);
+        let H = nSub(`L${i}.q_w`), KVi = nSub(`L${i}.k_w`);
+        let bias = (k: string, h: number) => has(W, `L${i}.${k}`) ? w(`L${i}.${k}`, h) : absentTex(gl, `L${i}.${k}`);
         let heads: IHeadLink[] = [];
         for (let h = 0; h < H; h++) {
             heads.push({
                 qWeight: w(`L${i}.q_w`, h),
                 qNorm,
+                qBias: bias('q_b', h),
                 q: a(`L${i}.q`, h),
                 attnScores: a(`L${i}.attn_scores`, h),
                 attnAgg: a(`L${i}.attn_agg`, h),
@@ -556,24 +604,26 @@ export function createModelGpuLink(gl: WebGL2RenderingContext, data: IK005bData)
             });
         }
         let kv: IKvGroupLink[] = [];
-        for (let g = 0; g < KV; g++) {
+        for (let g = 0; g < KVi; g++) {
             kv.push({
                 kWeight: w(`L${i}.k_w`, g),
                 vWeight: w(`L${i}.v_w`, g),
                 kNorm,
+                kBias: bias('k_b', g),
+                vBias: bias('v_b', g),
                 k: a(`L${i}.k`, g),
                 v: a(`L${i}.v`, g),
             });
         }
         blocks.push({
             xIn: a(`L${i}.x_in`),
-            ln_1: { agg: a(`L${i}.ln1_agg`), weight: w(`L${i}.ln1_w`), output: a(`L${i}.ln1_out`) },
+            ln_1: { agg: a(`L${i}.ln1_agg`), weight: w(`L${i}.ln1_w`), bias: w(`L${i}.ln1_b`), output: a(`L${i}.ln1_out`) },
             heads,
             kv,
             oWeight: w(`L${i}.o_w`),
             oOut: a(`L${i}.o_out`),
             attnResid: a(`L${i}.attn_resid`),
-            ln_2: { agg: a(`L${i}.ln2_agg`), weight: w(`L${i}.ln2_w`), output: a(`L${i}.ln2_out`) },
+            ln_2: { agg: a(`L${i}.ln2_agg`), weight: w(`L${i}.ln2_w`), bias: w(`L${i}.ln2_b`), output: a(`L${i}.ln2_out`) },
             gateWeight: w(`L${i}.gate_w`),
             upWeight: w(`L${i}.up_w`),
             downWeight: w(`L${i}.down_w`),
@@ -585,6 +635,12 @@ export function createModelGpuLink(gl: WebGL2RenderingContext, data: IK005bData)
         });
     }
 
+    // the expert's exported heads (GR00T: head 0 of 32); its K/V rows: the trunk's tiling (pi0 / k005b
+    // tile expert kv head g to trunk group g·KV/kvE) or, without a pairing, the export's own index
+    let HE = Math.min(config.expert_heads, nSub('E0.q_w'));
+    let KVE = Math.min(config.expert_kv_heads, nSub('E0.k_w'));
+    let kvRow = (g: number) => get(A, 'E0.k').shape[0] === KV ? g * (KV / config.expert_kv_heads) : g;
+
     return {
         gl,
         config,
@@ -594,6 +650,7 @@ export function createModelGpuLink(gl: WebGL2RenderingContext, data: IK005bData)
         embedOut: a('embed_out'),
         blocks,
         ln_f: { agg: a('lnf_agg'), weight: w('lnf_w'), output: a('lnf_out') },
+        vlln: { agg: a('vlln_agg'), weight: w('vlln_w'), bias: w('vlln_b'), output: a('vlln_out') },
         hStar: a('h_star'),
         knackWeight: w('knack_w'),
         knackBias: w('knack_b'),
@@ -608,7 +665,7 @@ export function createModelGpuLink(gl: WebGL2RenderingContext, data: IK005bData)
         expertIn: a('expert_in'),
         expertLayers: Array.from({ length: config.n_layer_pairs }, (_, i) => ({
             ln_1: { agg: a(`E${i}.ln1_agg`), weight: w(`E${i}.ln1_w`), output: a(`E${i}.ln1`) },
-            heads: Array.from({ length: config.expert_heads }, (_, h) => ({
+            heads: Array.from({ length: HE }, (_, h) => ({
                 qWeight: w(`E${i}.q_w`, h),
                 qBias: w(`E${i}.q_b`, h),
                 q: a(`E${i}.q`, h),
@@ -619,13 +676,13 @@ export function createModelGpuLink(gl: WebGL2RenderingContext, data: IK005bData)
                 probsS: a(`E${i}.ps`, h),
                 attnOut: a(`E${i}.vo`, h),
             })),
-            kv: Array.from({ length: config.expert_kv_heads }, (_, g) => ({
+            kv: Array.from({ length: KVE }, (_, g) => ({
                 kWeight: w(`E${i}.k_w`, g),
                 kBias: w(`E${i}.k_b`, g),
                 vWeight: w(`E${i}.v_w`, g),
                 vBias: w(`E${i}.v_b`, g),
-                k: a(`E${i}.k`, g * (KV / config.expert_kv_heads)),
-                v: a(`E${i}.v`, g * (KV / config.expert_kv_heads)),
+                k: a(`E${i}.k`, kvRow(g)),
+                v: a(`E${i}.v`, kvRow(g)),
             })),
             oWeight: w(`E${i}.o_w`),
             oOut: a(`E${i}.o`),
@@ -645,6 +702,10 @@ export function createModelGpuLink(gl: WebGL2RenderingContext, data: IK005bData)
         expertNorm: { agg: a('expert_out_agg'), weight: w('expert_norm_w'), output: a('expert_out') },
         expertFinalAda: a('expert_final_ada'),
         expertOut: a('expert_out'),
+        outProjW: w('out_proj_w'),
+        ditOut: a('dit_out'),
+        decL1W: w('dec_l1_w'),
+        decH: a('dec_h'),
         actionWeight: w('action_w'),
         actionBias: w('action_b'),
         actionX1: a('action_x1'),
@@ -665,6 +726,14 @@ export function createModelGpuLink(gl: WebGL2RenderingContext, data: IK005bData)
             target: a('fm_target'),
             u: a('fm_u'),
             cond: a('fm_cond'),
+            stateHidden: a('fm_state_hidden'),
+            stateL2W: a('fm_state_l2_w'),
+            actionFeat: a('fm_action_feat'),
+            posEmb: a('fm_pos_emb'),
+            tProj: a('fm_t_proj'),
+            tembW1: a('fm_temb_w1'),
+            tembHidden: a('fm_temb_hidden'),
+            tembW2: a('fm_temb_w2'),
             errDim: has(A, 'fm_err_dim') ? get(A, 'fm_err_dim').data : new Float32Array(0),
             particles: get(A, 'fm_particles').data,
             particlesMass: get(A, 'fm_particles_mass').data,

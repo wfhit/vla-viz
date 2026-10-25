@@ -15,12 +15,15 @@ const flowStageNames = ['RMSNorm', 'Q K V', 'attention', 'softmax · V', 'o_proj
     'RMSNorm', 'gate / up', 'SiLU · up', 'down_proj', '+ residual'];
 export const nFlowStages = flowStageNames.length;
 
-function layerStages(L: IVlaModelLayout, i: number): IFlowStage[] {
+// `i`/`ei`: the trunk / expert layer of this unit (-1: none). Paired models run layer i of both
+// towers in one unit; GR00T runs the trunk units first, then the DiT units
+function layerStages(L: IVlaModelLayout, i: number, ei: number): IFlowStage[] {
     let b = L.blocks[i];
-    let e = L.expertLayers[i];
+    let e = L.expertLayers[ei];
     let st = (k: number, trunk: IBlkDef[], expert: IBlkDef[]) => ({ name: k === 8 && L.variant.trunk_mlp === 'geglu'
-        ? 'GELU · up' : flowStageNames[k], trunk, expert });
+        ? 'GELU · up' : flowStageNames[k], trunk: b ? trunk : [], expert });
     let eh = e ? e.heads : [];
+    if (!b) b = L.blocks[0];
     return [
         st(0, b.ln1.cubes, e ? e.ln1.cubes : []),
         st(1, [...b.kvGroups.flatMap(g => [g.kWeightBlock, g.vWeightBlock, g.kBlock, g.vBlock]),
@@ -42,9 +45,9 @@ function layerStages(L: IVlaModelLayout, i: number): IFlowStage[] {
 
 // everything computed after the stack: final norms, heads, expert output, action decode
 function downstream(L: IVlaModelLayout): IBlkDef[] {
-    return [...L.ln_f.cubes, L.hStar, L.logits, L.logitsAgg1, L.logitsAgg2, L.logitsSoftmax,
+    return [...L.ln_f.cubes, ...(L.vlln?.cubes ?? []), L.hStar, L.logits, L.logitsAgg1, L.logitsAgg2, L.logitsSoftmax,
         L.doneLogits, L.doneAgg1, L.doneAgg2, L.doneProbs,
-        ...L.expertNorm.cubes, L.actionVelocity, L.actionChunk];
+        ...L.expertNorm.cubes, L.ditOut, L.decH, L.actionVelocity, L.actionChunk];
 }
 
 function disable(b: IBlkDef) {
@@ -57,13 +60,18 @@ function disable(b: IBlkDef) {
 // the current stage's blocks are highlighted, and `layout.flow` tells the arrow renderer which
 // arrows to light / fade. Returns the current layer and stage (stage -1 = the entry).
 export function applyFlowPass(L: IVlaModelLayout, pos: number, opts: { expert?: boolean, suffixOnly?: boolean } = {}) {
-    let nL = L.blocks.length;
+    let withExpert = opts.expert ?? true;
+    let nT = L.blocks.length, nE = L.expertLayers.length;
+    let units: [number, number][] = opts.suffixOnly ? Array.from({ length: nE }, (_, j) => [L.crossDit ? -1 : j, j])
+        : !withExpert ? Array.from({ length: nT }, (_, j) => [j, -1])
+        : L.crossDit ? [...Array.from({ length: nT }, (_, j) => [j, -1] as [number, number]), ...Array.from({ length: nE }, (_, j) => [-1, j] as [number, number])]
+        : Array.from({ length: nT }, (_, j) => [j, j]);
+    let nL = units.length;
     let total = nL * nFlowStages;
     let g = Math.floor(pos);
     let active = new Set<IBlkDef>(), pending = new Set<IBlkDef>();
-    let withExpert = opts.expert ?? true;
     for (let i = 0; i < nL; i++) {
-        let stages = layerStages(L, i);
+        let stages = layerStages(L, units[i][0], units[i][1]);
         for (let s = 0; s < nFlowStages; s++) {
             let k = i * nFlowStages + s;
             // suffix-only (a decode pass): the prefix is the cached encode — only the DiT runs
@@ -77,7 +85,7 @@ export function applyFlowPass(L: IVlaModelLayout, pos: number, opts: { expert?: 
         if (!opts.suffixOnly) active.add(L.residual0);
         if (withExpert) active.add(L.expertIn);
     }
-    if (g < total) (opts.suffixOnly ? [...L.expertNorm.cubes, L.actionVelocity] : downstream(L)).forEach(b => pending.add(b));
+    if (g < total) (opts.suffixOnly ? [...L.expertNorm.cubes, L.ditOut, L.decH, L.actionVelocity] : downstream(L)).forEach(b => pending.add(b));
     for (let b of pending) disable(b);
     for (let b of active) if (b.t === 'i') b.highlight = Math.max(b.highlight, 0.45);
     L.flow = g >= total ? null : { active, pending };
@@ -103,7 +111,7 @@ export function applyFmStep(L: IVlaModelLayout, m: IVlaModelLink | null, k: numb
             [e.ln2.lnResid, 'ln2'], [e.mlpResult, 'mlp'], [e.mlpResidual, 'out']];
         for (let [b, n] of per) set(b, `E${i}.${n}`);
         set(e.ada, `E${i}.ada`);
-        set(e.ada2, `E${i}.ada`);
+        if (e.ada2) set(e.ada2, `E${i}.ada`);
         if (k > 0) {
             e.heads.forEach(h => [h.qBlock, h.attnMtxP, h.attnMtx, h.attnMtxAgg1, h.attnMtxAgg2,
                 h.attnMtxSmP, h.attnMtxSm, h.vOutBlock].forEach(disable));
@@ -121,8 +129,16 @@ export function applyFmStep(L: IVlaModelLayout, m: IVlaModelLink | null, k: numb
     set(L.fm.timeHidden, 'fm_time_mlp_hidden');
     set(L.fm.actionTime, 'fm_action_time');
     set(L.fm.timeEmb, 'fm_time_emb');
+    // GR00T's extra per-step inputs and exit
+    set(L.fm.actionFeat, 'fm_action_feat');
+    set(L.fm.tProj, 'fm_t_proj');
+    set(L.fm.tembHidden, 'fm_temb_hidden');
+    set(L.ditOut, 'dit_out');
+    set(L.decH, 'dec_h');
     set(L.actionVelocity, 'v');
-    L.fm.x1.name = `x_t (t=${st.t.toFixed(1)})`;
-    L.fm.timeEmb.name = `te = sincos(t=${st.t.toFixed(1)})`;
+    let td = Number.isInteger(10 / fs.K) ? 1 : 2;
+    L.fm.x1.name = `x_t (t=${st.t.toFixed(td)})`;
+    L.fm.timeEmb.name = `${L.crossDit ? 'tau' : 'te'} = sincos(t=${st.t.toFixed(td)})`;
+    if (!L.fm.tProj.absent) L.fm.tProj.name = `Timesteps(t=${st.t.toFixed(td)})`;
     return true;
 }

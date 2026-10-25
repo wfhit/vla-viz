@@ -23,7 +23,14 @@ export function walkthrough02_Embedding(args: IWalkthroughArgs) {
 
     let f = state.page.facts!;
     let pi0 = f.id === 'pi0';
-    if (pi0) commentary(wt)`
+    let groot = f.id === 'groot';
+    let nImgW = cfg?.window_is_image ? cfg.window_is_image.filter(x => x).length : 0;
+    if (groot) commentary(wt)`
+GR00T 主干的输入序列由两类 token 组成：${cfg?.n_visual_tokens ?? '…'} 个视觉 token（3 路相机各 64 个，经 ${f.visionName} 和 merger 投影到 ${f.dModel} 维），以及 ${cfg ? cfg.T_prefix - cfg.n_visual_tokens : '…'} 个语言 token（聊天模板包裹的指令），共 ${cfg?.T_prefix ?? '…'} 个。本体状态不在这里，它在 DiT 中才被编码。
+3D 中的${c_blockRef('_输入索引_', layout.idxObj, DimStyle.TokenIdx)}是真实序列里 token ${cfg ? `${cfg.window.t0}–${cfg.window.t0 + cfg.window.Wt - 1}` : '…'} 的 id：前 ${nImgW} 列是最后一路相机的图像占位符 <|image_pad|>，其余是指令文本。
+
+下面以窗口最后一个 token（${exampleTok}，id ${exampleId}）为例，看看它如何生成${c_blockRef('_输入嵌入_', layout.residual0)}的最后一列。`;
+    else if (pi0) commentary(wt)`
 π0.5 的前缀由两类 token 组成：${cfg?.n_visual_tokens ?? '…'} 个视觉 token（3 路相机各 256 个，经 ${f.visionName} 和投影层），以及 ${cfg?.T_text ?? '…'} 个语言 token（"Task: …, State: …;\nAction: "，状态是其中的离散化数字），共 ${cfg?.T_prefix ?? '…'} 个。
 3D 中的${c_blockRef('_输入索引_', layout.idxObj, DimStyle.TokenIdx)}是真实提示词里 token ${cfg ? `${cfg.window.t0}–${cfg.window.t0 + cfg.window.Wt - 1}` : '…'} 的 id（前缀的最后 ${cfg?.window.Wt ?? 32} 个 token）。
 
@@ -40,7 +47,12 @@ k005b 的前缀由三类 token 组成：${cfg?.n_visual_tokens ?? '…'} 个视�
 
     breakAfter();
 
-    if (pi0) commentary(wt)`
+    if (groot) commentary(wt)`
+用该 token 的 id（${c_dimRef(String(exampleId), DimStyle.TokenIdx)}）从左侧的${c_blockRef('_嵌入表_', layout.tokEmbedObj)}（真实形状 ${cfg?.vocab_size ?? '…'} × ${f.dModel}）中取出对应的一行。图中只画窗口里这 ${cfg?.window.Wv ?? 32} 个 token 各自查到的那一行（通道 0–${(cfg?.window.Wc ?? 64) - 1}），悬停可见真实行号。
+
+结果是一个长度为 ${c_dimRef(`_C_ = ${f.dModel}`, DimStyle.C)} 的向量，称为输入嵌入。Qwen3-VL 没有可学习的位置表：位置信息在注意力里通过 M-RoPE 旋转 Q/K 注入。
+    `;
+    else if (pi0) commentary(wt)`
 用该 token 的 id（${c_dimRef(String(exampleId), DimStyle.TokenIdx)}）从左侧的${c_blockRef('_嵌入表_', layout.tokEmbedObj)}（真实形状 ${cfg?.vocab_size ?? '…'} × ${f.dModel}）中取出对应的一行。词表有 25 万行，图中只画窗口里这 ${cfg?.window.Wv ?? 32} 个 token 各自查到的那一行（通道 0–${(cfg?.window.Wc ?? 64) - 1}），悬停可见真实行号。
 
 Gemma 把取出的行再乘以 √${f.dModel} ≈ ${Math.sqrt(f.dModel).toFixed(2)}，结果是一个长度为 ${c_dimRef(`_C_ = ${f.dModel}`, DimStyle.C)} 的向量，称为输入嵌入。Gemma 没有可学习的位置表：位置信息在注意力里通过 RoPE 旋转 Q/K 注入。
@@ -57,7 +69,10 @@ Gemma 把取出的行再乘以 √${f.dModel} ≈ ${Math.sqrt(f.dModel).toFixed(
 
     breakAfter();
 
-    if (pi0) commentary(wt)`
+    if (groot) commentary(wt)`
+嵌入表是训练得到的（蓝色表示可学习参数）。文本 token 取出的这一行直接成为输入嵌入的这一列；图像占位符查到的行随后被视觉塔输出整列替换，所以图像列的输入嵌入是视觉特征而不是嵌入表行。
+`;
+    else if (pi0) commentary(wt)`
 嵌入表是训练得到的（蓝色表示可学习参数）。取出的这一行乘以 √${f.dModel} 后成为输入嵌入的这一列。
 `;
     else commentary(wt)`
@@ -75,7 +90,7 @@ Gemma 把取出的行再乘以 √${f.dModel} ≈ ${Math.sqrt(f.dModel).toFixed(
     breakAfter();
 
     commentary(wt)`
-对窗口中的每个 token 重复同样的查表${pi0 ? '' : '（id 不在显示行范围内的 token，其嵌入行没有画出，但输入嵌入列仍是真实值）'}。
+对窗口中的每个 token 重复同样的查表${pi0 ? '' : groot ? '（图像列随后被视觉特征替换）' : '（id 不在显示行范围内的 token，其嵌入行没有画出，但输入嵌入列仍是真实值）'}。
 `;
 
     breakAfter();

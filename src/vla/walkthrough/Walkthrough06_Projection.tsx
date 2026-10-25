@@ -36,7 +36,7 @@ export function walkthrough06_Projection(args: IWalkthroughArgs) {
 
     commentary(wt)`
 
-${f.id === 'pi0' ? 'π0.5' : 'k005b'} 中 head 数 × head 维度（${f.nHead} × ${f.headDim}）恰好等于 ${c_dimRef(`C = ${f.dModel}`, DimStyle.C)}，
+${f.id === 'pi0' ? 'π0.5' : f.id === 'groot' ? 'GR00T 主干' : 'k005b'} 中 head 数 × head 维度（${f.nHead} × ${f.headDim}）恰好等于 ${c_dimRef(`C = ${f.dModel}`, DimStyle.C)}，
 因此拼回去后长度还是 ${c_dimRef('C', DimStyle.C)}。图中显示的是真实 o_proj 权重的一个 64 × 64 窗口。
 
 接着用输出投影矩阵（output projection）对每一列做矩阵-向量乘法（无 bias），把各 head 的信息混合起来，
@@ -52,7 +52,7 @@ ${f.id === 'pi0' ? 'π0.5' : 'k005b'} 中 head 数 × head 维度（${f.nHead} �
 
 现在得到了注意力层的输出。我们不直接把它交给下一阶段，而是逐元素加回到这一层的输入上，
 即绿色竖直箭头所示的_残差连接_（residual connection / residual pathway）。
-在 ${f.id === 'pi0' ? 'π0.5' : 'k005b'} 中，prefix（VLM）流和 suffix（action expert）流各自经过自己的输出投影，并分别加回各自的残差流。
+${f.id === 'groot' ? 'GR00T 的主干只有一条流：这里加回的就是主干自己的残差流。DiT 有自己的 o_proj 和残差，在 D 章组里展开。' : `在 ${f.id === 'pi0' ? 'π0.5' : 'k005b'} 中，prefix（VLM）流和 suffix（action expert）流各自经过自己的输出投影，并分别加回各自的残差流。`}
 `;
 
     breakAfter();

@@ -63,7 +63,7 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
 
 这些聚合值只需对整列算一次，因此存放在聚合层中。
 
-最后把每个元素乘以可学习的${c_blockRef(f.id === 'pi0' ? '增益 (1 + \u03b3)' : '增益 (\u03b3)', ln.lnSigma)}，得到${c_blockRef('归一化结果', ln.lnResid)}。RMSNorm 没有偏置 β。${f.id === 'pi0' ? 'Gemma 的 checkpoint 存的是 γ，前向时乘以 1 + γ，图中显示的就是 1 + γ。' : ''}`;
+最后把每个元素乘以可学习的${c_blockRef(f.id === 'pi0' ? '增益 (1 + \u03b3)' : '增益 (\u03b3)', ln.lnSigma)}，得到${c_blockRef('归一化结果', ln.lnResid)}。RMSNorm 没有偏置 β。${f.id === 'pi0' ? 'Gemma 的 checkpoint 存的是 γ，前向时乘以 1 + γ，图中显示的就是 1 + γ。' : f.id === 'groot' ? '（主干最后 4 块 VL 自注意力用的是带 β 的 LayerNorm，不是 RMSNorm。）' : ''}`;
 
     breakAfter();
 
@@ -73,7 +73,7 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
 
     breakAfter();
     commentary(wt)`
-对${c_blockRef('输入嵌入矩阵', layout.residual0)}的每一列都做同样的归一化，得到${c_blockRef('归一化后的输入嵌入', ln.lnResid)}，接下来送入联合注意力层。
+对${c_blockRef('输入嵌入矩阵', layout.residual0)}的每一列都做同样的归一化，得到${c_blockRef('归一化后的输入嵌入', ln.lnResid)}，接下来送入${f.id === 'groot' ? '自注意力层' : '联合注意力层'}。
 `;
 
     breakAfter();

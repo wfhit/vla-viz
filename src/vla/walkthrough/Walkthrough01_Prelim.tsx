@@ -12,7 +12,20 @@ export function walkthrough01_Prelim(args: IWalkthroughArgs) {
     initialFrame(state, args.layout.cubes, 296, 16, { fill: 1.0 });
 
     let f = state.page.facts!;
-    if (f.id === 'pi0') commentary(wt, null, 0)`
+    if (f.id === 'groot') commentary(wt, null, 0)`
+在深入细节之前，先退一步看几个基本概念。
+
+本讲解只关注 _推理_（inference），不涉及训练。3D 场景中的每个数值都来自真实的 GR00T N1.7 checkpoint：权重直接读自本地 GR00T-N1.7-3B 的 safetensors，激活是对一帧真实 BEHAVIOR 演示数据做前向时抓下来的（由 tools/export_groot.py 导出，并与官方 Isaac-GR00T 实现逐项核对）。因为真实张量太大，每个张量只画一个真实窗口，悬停可看到真实下标与整张量统计。
+
+_Token_：模型处理的最小单位。3 路相机画面经 ${f.visionName} 变成视觉 token；指令按 Qwen 词表切成语言 token。本体状态不进主干，而是在 DiT 里成为 1 个 state token；DiT 另有 ${f.actH} 个动作 token。
+
+_嵌入_（embedding）：每个 token 先被映射成一个向量（主干中是 ${f.dModel} 维，DiT 中是 ${f.expertD} 维），之后所有计算都在这些向量上进行。
+
+_向量与矩阵乘法_：一个向量乘以一个权重矩阵，得到另一个向量——每个输出元素都是一次点积。Q/K/V、输出投影、MLP 都只是不同的矩阵乘法。
+
+好，开始吧！
+`;
+    else if (f.id === 'pi0') commentary(wt, null, 0)`
 在深入细节之前，先退一步看几个基本概念。
 
 本讲解只关注 _推理_（inference），不涉及训练。3D 场景中的每个数值都来自真实的 π0.5 checkpoint：权重直接读自本地 openpi-comet checkpoint，激活是对一帧真实 BEHAVIOR 演示数据做前向时抓下来的（由 tools/export_pi0.py 导出，并与 openpi 的参考前向逐项核对）。因为真实张量太大，每个张量只画一个真实窗口，悬停可看到真实下标与整张量统计。

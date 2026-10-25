@@ -11,8 +11,8 @@ fabricated mappings. No toy data. No popups/overlays — in-scene walkthrough st
 | Page | Model | Weights (local) | Status |
 |---|---|---|---|
 | `/vla` | k005b dual-head VLA | `outputs/k005b-task0-v3/checkpoints` (step_150000) | REWORK DONE (a)(b)(c) + single-column layer-pair stack (28 pairs: trunk Li beside expert Ei, pair headers, tower titles beside the column; old 14+14 wrap deleted), self-tested: 84-shot sweep audit empty, build OK, /pi0 261 + /groot 292 edges clean; awaiting Hermes re-acceptance |
-| `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`) | DONE + ACCEPTED (Hermes, 2026-10-25: auditEdges 261 edges noIn/noOut empty on P5/P7 re-run independently, 0 console errors, no overlays, 2 weight spot-checks exact vs openpi checkpoint) |
-| `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | DONE + ACCEPTED (Hermes, 2026-10-25) |
+| `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`) | ENGINE INSTANCE (111ec10): same 3D engine as /vla, single-column 18 layer pairs, MQA joint attention, gated adaRMSNorm, 10-step Euler; self-test: audit noIn/noOut empty (1494 edges; trunk single-layer 650, RMSNorm 1514, D7 1495), 0 console errors, build OK; awaiting Hermes re-acceptance |
+| `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | ENGINE INSTANCE (walls in src/groot deleted): same 3D engine as /vla, single column trunk 20 (16 LM + 4 vlsa) beside DiT 32 (cross text/self/cross image/self), VL-token bus to cross K/V, AdaLayerNorm, 4-step Euler t 0->1; all chapters have groot text; self-test: audit noIn/noOut empty (1809 edges; trunk single-layer 720, D7 1810), 0 console errors, build OK; slot 23 untrained -> action has no semantics (stated in D7); awaiting Hermes re-acceptance |
 
 Input frames for ALL pages: local BEHAVIOR dataset
 `~/workspace/behavior_challenge_data/dataset/{behavior-1k-knack, 2026-challenge-demos}`.

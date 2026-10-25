@@ -162,15 +162,15 @@
 ### 3.1 分层
 
 ```
-src/vla/                 唯一引擎（层视图、层对竖向对叠、章节导航、播放条、箭头+审计、标签去重）
-src/vla/models/k005b.ts  ModelSpec 实例（/vla）
-src/vla/models/pi05.ts   ModelSpec 实例（/pi0）
-src/vla/models/groot.ts  ModelSpec 实例（/groot）
-src/vla/walkthrough/*    章节骨架共用；每章文案/数值按 ModelSpec 取（per-model text table）
-tools/export_{k005b,pi0,groot}.py  → 同一 "VLA schema" 的 JSON
+src/vla/                     唯一引擎（层视图、层对竖向对叠、章节导航、播放条、箭头+审计、标签去重）
+src/vla/ModelFacts.ts        三个模型实例的事实表（k005b / pi0 / groot：层数、宽度、头数、K、名称）
+src/vla/pages.ts             makeEnginePage(id, 数据前缀, facts, 初始相机) → /vla、/pi0、/groot
+src/vla/VlaModelLayout.ts    按 config 生成：joint（k005b/π0.5）或 crossDit（GR00T，L.crossDit）
+src/vla/walkthrough/*        章节骨架共用；文案按 f.id 分支取真值
+tools/export_{k005b,pi0,groot}.py  → 同一 "VLA schema" 的 JSON（public/{,pi0-,groot-}*.json）
 ```
 
-完成后删除 `src/pi0/*`、`src/groot/*` 的墙式 Layout/Scene/Walkthrough（死代码立即删）。
+`src/pi0/*`、`src/groot/*` 的墙式实现已删除（111ec10 / 本次 groot 提交）。
 
 ### 3.2 ModelSpec（驱动 createLayer / createExpertLayer）
 
@@ -200,9 +200,9 @@ tools/export_{k005b,pi0,groot}.py  → 同一 "VLA schema" 的 JSON
 
 ### 3.5 施工顺序
 
-1. ModelSpec 抽取：k005b 走 spec 路径，/vla 84 张截图审计不变。
-2. 扩展 export_pi0.py → 全层 schema；/pi0 切到引擎实例，删除 `src/pi0` 墙。
-3. 同理处理 /groot（cross/self 交替 + AdaLN + 4 步 Euler）。
+1. ✅ 事实表抽取：k005b 走 facts 路径，/vla 审计不变（2332 边）。
+2. ✅ export_pi0.py → 全层 schema；/pi0 切到引擎实例，删除 `src/pi0` 墙（111ec10，审计 1494 边）。
+3. ✅ /groot 同理（主干 20 = LM 16 + vlsa 4；DiT 32 块 cross 文本/self/cross 图像/self 交替；AdaLN；4 步 Euler；删除 `src/groot` 墙；审计 1809 边，主干单层章 720 边）。
 4. 每步：tsc、截图逐章自测、审计为空、`next build`，然后提交。
 
 ---
@@ -228,24 +228,13 @@ tools/export_{k005b,pi0,groot}.py  → 同一 "VLA schema" 的 JSON
    x_t(32×32) → action_in_proj → 32 动作 token      v(32×32) → Euler 轨迹带 x(t=1.0) … x(t=0)（10 步）→ 反归一化 → R1 Pro 23 维动作
 ```
 
-- 全部块画成**竖墙**：token 沿 x，通道沿 y；显示窗口 16（堆叠）/ 32（单板）/ 64（解剖）通道。
-- 两塔各 18 层一一对齐，每层一根紫红 `kv` 箭头（前缀 L_l → 专家 L_l），标该层动作 query 投在前缀上的注意力份额。
-- π0.5 与 π0 的结构差异按真实结构画：时间经 `time_mlp` 走 **adaRMSNorm**（每层 scale/shift/gate 三根小棒），state 离散化进文本前缀，**没有单独 state token**。
-- 右侧两块第 0 层解剖板（前缀流、专家流）：norm → Q/K/V → 注意力（联合掩码块同时喂两边）→ o_proj → 残差 → norm → GeGLU → 残差；前缀 K/V 以 `kv` 箭头进专家注意力。
+- 引擎实例（§3）：与 /vla 同一 3D 场景、章组步进、播放条；单列竖向对叠 18 个层对（主干 Li 绿块 ‖ 专家 Ei 橙块并排）。
+- 每层对共用一次联合注意力：专家 query 看前缀 K/V + 自身后缀 K/V；前缀不看后缀。
+- π0.5 的结构差异按真实结构画：时间经 `time_mlp` 走**门控 adaRMSNorm**（scale/shift/gate），state 离散化进文本前缀，**没有单独 state token**；主干无 final norm、无输出头。
 
-### 5.2 章组（实现版）
+### 5.2 章组（引擎版，与 /vla 同一骨架）
 
-| 章 | 内容 | 真值 |
-|---|---|---|
-| P0 全貌 | 墙的约定、显示窗口、双塔拓扑 | 层数、宽度、参数量 |
-| P1 三路相机 → SigLIP → 768 图像 token | 3 路 patch 嵌入、27 块、投影 | 块范数 41.9 / 100.1 / 455.7 |
-| P2 指令 + 离散化状态 = 117 文本 token | 词嵌入；state 段高亮 | 真 token id |
-| P3 18 层前缀塔 | 逐层穿行；L0 head0 注意力 | token 范数 38.5 → 4051.2 |
-| P4 动作 token 与时间条件 | action_in_proj；time_mlp → cond → 总线 | 真 cond |
-| P5 第 0 层解剖 | 两流联合注意力 + 掩码；门控残差 | 前缀份额 95%；残差核对 3.8e-6 |
-| P6 两座塔逐层耦合 | 18 根 K/V 耦合箭头 | 每层前缀份额（L17 降到 22%） |
-| P7 10 步 Euler 去噪 | 10 次专家穿行（缓存前缀 K/V），轨迹带逐格出现 | 每步 x_t、v、|v|≈36；最终 23 维动作 |
-| P8 三个模型对照 | §7 | — |
+概览（总览、预备知识）→ 主干：一层展开（输入嵌入、RMSNorm、MQA 联合注意力、前缀 Softmax、输出投影与残差、MLP (GeGLU)、18 层主干堆叠）→ 动作专家与流匹配（D0 两座塔 … D6 18 层堆叠与输出、D7 10 步 Euler 与动作块）。每章文案按 `f.id === 'pi0'` 取真值。
 
 ### 5.3 数据：`tools/export_pi0.py`
 
@@ -273,30 +262,19 @@ tools/export_{k005b,pi0,groot}.py  → 同一 "VLA schema" 的 JSON
    final AdaLN → proj_out_2 → action_dec[slot 23] → v(40×132) → Euler 轨迹带 x_t0 … x_t4（4 步，t: 0 → 1）
 ```
 
-- 全部块按 llm-viz 惯例画成**竖墙**：token 沿 x，通道沿 y，z 一格厚；显示窗口 16（堆叠）/ 32（单板）/ 64（解剖）通道，标注于 G0。
-- 主干与 DiT **串联**；DiT 左侧两根 K/V 竖条（文本 24 / 图像 192），交叉块从对应竖条取 K/V（粉 = 文本、紫 = 图像），自注意力块无外连。
-- slot 23 = `sim_behavior_r1_pro`：编解码权重是**未训练的初始化值**，场景和文案标 toy；DiT/主干为真权重真激活。
-- 右侧两块解剖板：D0（交叉注意力）和 D1（自注意力），逐件画 AdaLN → 注意力 → 残差 → LN → GELU FF → 残差。
+- 引擎实例（§3，`L.crossDit`）：与 /vla 同一 3D 场景、章组步进、播放条。单列竖向对叠：左列主干 20 层（16 层 Qwen3 LM + 4 块 vlsa），右列 DiT 32 块；**不逐层配对**——每层一个独立标题（`trunk Li (LM|VL self-attention)`、`DiT i (cross: text|self|cross: image)`）。
+- 主干最后输出 = VL token（`L.vlOut`），经两塔间的竖直总线（`drawVlBus`）接到每个交叉块的 K/V；自注意力块无外连。主干单层章（DiT 隐藏）时 VL token 是合法终点（审计 sink）。
+- DiT 每块：AdaLayerNorm（无仿射 LN + 由 temb 线性层给出的 scale/shift）→ 交叉/自注意力（32 头 × 48，只画 head 0，标 ×32）→ o_proj → ⊕ → 无参 LN → GELU FF → ⊕；时间总线把 temb 送到每块。
+- slot 23 = `sim_behavior_r1_pro`：state/action 编解码权重是**未训练的初始化值**，文案如实说明（动作无物理语义，不反归一化，不与 k005b 数值对比）；主干与 DiT 为真权重真激活。
 
-### 6.2 章组（实现版）
+### 6.2 章组（引擎版，与 /vla 同一骨架）
 
-| 章 | 内容 | 真值 |
-|---|---|---|
-| G0 全貌 | 墙的约定、显示窗口、串联拓扑 | 层数、宽度 |
-| G1 三路相机 + 指令 = 216 token | 视觉塔 → merger；文本嵌入 | 真 patch / token 激活 |
-| G2 16 层 LM 与 VL 头 | LM 逐层穿行，L0/L15 头均值注意力图；VL 头 | 每层激活、注意力 |
-| G3 本体适配器（slot 23） | state 61 → 隐层 → 状态 token（toy 标注） | 真槽切片 |
-| G4 动作 token 与时间嵌入 | W1(a) ‖ tau → W2 → swish → W3 → +pos；Timesteps(256) → temb | temb 范数 |
-| G5 D0 解剖：交叉注意力 | AdaLN → cross-attn（K/V = 文本）→ FF | scale/shift 真值 |
-| G6 D1 解剖：自注意力 | 41 token 内部自注意力 | 真激活 |
-| G7 32 块交替堆叠 | 文/自/图/自 ×8；图像块在三相机上的注意力份额 | 份额、平均 token 范数 |
-| G8 4 步 Euler 去噪 | 4 次 DiT 穿行，轨迹带逐格出现；时间方向与 π0/k005b 相反 | 每步 x_t、v、|v| |
-| G9 三个模型对照 | §7 | — |
+概览（总览、预备知识）→ 主干：一层展开（输入嵌入、RMSNorm、GQA 自注意力、Softmax、输出投影与残差、MLP (SwiGLU)、20 层主干堆叠）→ DiT 动作头与流匹配（D0 两座塔、D1 DiT 输入嵌入、D2 AdaLayerNorm、D3 交叉 / 自注意力、D4 输出投影与残差、D5 MLP (GELU)、D6 32 块堆叠与输出、D7 4 步 Euler 与动作块，t: 0 → 1）。每章文案按 `f.id === 'groot'` 取真值。
 
 ### 6.3 数据：`tools/export_groot.py`
 
 - **权重（零下载，NAS 本地）**：`/home/frank/workspace/model/nvidia/GR00T-N1.7-3B`（6.5 GB，safetensors；含 `experiment_cfg/`、`embodiment_id.json`、`dataset_statistics.json`）。跑前向约 8 GB 显存。
-  - §1.1 的结构事实按 N1.6 核对，实现前须按 N1.7 的 `config.json` / `final_model_config.json` 重新核对（DiT 块数、交替模式、Euler 步数、主干截断层数），章组 G1–G7 随之修正。
+  - 结构事实已按 N1.7 config 与 Isaac-GR00T 源码核对（`groot-understanding.md`）。
 - **代码**：用与 N1.7 匹配的 Isaac-GR00T 版本的 processor 和 model 类加载。只用代码，不改模型。
 - **输入**：同一帧 BEHAVIOR 观测，按 checkpoint 内注册的 `sim_behavior_r1_pro` modality 模板组装（3 相机 head/left_wrist/right_wrist 256²、state 键表、23 维动作 base/torso/双臂/双夹爪、32 步）。
   - **核查结论（`groot-understanding.md` §3）**：该 checkpoint 的训练混合里没有 BEHAVIOR 数据；R1 Pro 槽的 state/action 编解码权重是初始化值（std 与未参训槽相同）。真正训练过的是 `real_r1_pro_sharpa_*`（真机 + Sharpa 灵巧手，62 维 EEF+手关节），不借用。
