@@ -46,6 +46,22 @@ export const HomePage: React.FC = () => {
                     </div>
                 </div>
             </div>
+            <div className={s.projectCard} onClick={() => router.push('/pi0')}>
+                <div className={s.cardImageWrapper}>
+                    <div className={s.cardImage}>
+                        <img src="/images/pi0-viz-screenshot.jpg" alt="π0.5 场景截图" />
+                    </div>
+                </div>
+                <div className={s.cardContent}>
+                    <div className={s.cardTitle}>
+                        <Link href="/pi0">π0.5</Link>
+                    </div>
+                    <div>
+                        PaliGemma 前缀（SigLIP + Gemma 2B，18 层）+ 300M 动作专家，逐层联合注意力、adaRMSNorm 时间条件，
+                        状态离散化进提示词，10 步 Euler 解码出 32 × 32 动作块（R1 Pro 23 维）。openpi-comet BEHAVIOR 微调检查点的真实权重与激活。
+                    </div>
+                </div>
+            </div>
         </div>
     </div>;
 }

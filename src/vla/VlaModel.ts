@@ -275,13 +275,13 @@ export async function fetchTensorFile<C = IK005bConfig>(url: string) {
         if (!e || !e.shape || !e.data) {
             continue;
         }
-        if (e.dtype !== 'torch.float32') {
+        if (e.dtype !== 'torch.float32' && e.dtype !== 'torch.float16') {
             throw new Error(`tensor ${k}: unsupported dtype ${e.dtype}`);
         }
         out[k] = {
             name: k,
             shape: e.shape,
-            data: new Float32Array(base64ToArrayBuffer(e.data)),
+            data: e.dtype === 'torch.float16' ? decodeF16(e.data) : new Float32Array(base64ToArrayBuffer(e.data)),
             fullShape: e.full_shape,
             offset: e.offset,
             stats: e.stats,

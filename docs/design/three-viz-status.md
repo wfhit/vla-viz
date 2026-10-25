@@ -1,6 +1,6 @@
 # THREE-VIZ MISSION STATUS (single source of truth — read this first in any session)
 
-Last updated: 2026-10-25. Owner: Hermes (orchestration + checking). Maker: Copilot Opus 5.5 (tmux `vlaviz:opus`).
+Last updated: 2026-10-25 (/pi0 done). Owner: Hermes (orchestration + checking). Maker: Copilot Opus 5.5 (tmux `vlaviz:opus`).
 
 ## Mission
 
@@ -11,7 +11,7 @@ fabricated mappings. No toy data. No popups/overlays — in-scene walkthrough st
 | Page | Model | Weights (local) | Status |
 |---|---|---|---|
 | `/vla` | k005b dual-head VLA | `outputs/k005b-task0-v3/checkpoints` (step_150000) | DONE + verified |
-| `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`; base ref: HF cache `lerobot/pi0_base`) | IN PROGRESS |
+| `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`) | DONE (self-tested, awaiting Hermes acceptance) |
 | `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | DONE (self-tested, awaiting Hermes acceptance) |
 
 Input frames for ALL pages: local BEHAVIOR dataset
@@ -31,13 +31,18 @@ Input frames for ALL pages: local BEHAVIOR dataset
 - pi0: state and action dims are INDEPENDENT projections (61-dim state -> state token;
   23/32-dim action -> action tokens). Never ask "how do the dims map" — per-embodiment
   projection configs are the answer (precedent: official GR00T BEHAVIOR baseline).
+  pi0.5 (the implemented /pi0 model) has no state token: state is discretized into the
+  text prefix; time enters via adaRMSNorm; action chunk 32x32 -> first 23 dims = R1 Pro.
 
 ## Remaining steps (in order)
 
 1. ~~`/groot`: verify the 6 details -> exporter -> page -> self-test -> commit.~~ DONE:
    `tools/export_groot.py` -> `public/groot-*.json`; `src/groot/*`; G0-G9 self-test: 0 console
    errors, arrow audit empty (292 edges); `next build` OK; homepage card added.
-2. `/pi0`: exporter (pi05 weights, BEHAVIOR frames) -> page -> self-test -> commit.
+2. ~~`/pi0`: exporter (pi05 weights, BEHAVIOR frames) -> page -> self-test -> commit.~~ DONE:
+   `tools/export_pi0.py` (+ `tools/ref_pi0_jax.py`, official JAX agreement 2.6e-5) ->
+   `public/pi0-*.json`; `src/pi0/*`; P0-P8 self-test: 0 console errors, arrow audit empty
+   (261 edges); `next build` OK; homepage card added.
 3. Hermes acceptance per page: value spot-check vs weights, step-through screenshots,
    no orphan arrows, no popups. Fail -> back to Opus.
 4. Homepage: three cards -> `/vla` `/pi0` `/groot`. Final report to Frank.

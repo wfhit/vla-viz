@@ -187,76 +187,46 @@ public/data/groot/*  public/data/pi0/*
 
 ---
 
-## 5. /pi0 场景与章组
+## 5. /pi0 场景与章组（按 π0.5 实现，2026-10-25 定稿）
 
-### 5.1 场景结构：并排双塔、逐层拼接
+> 早先按 π0 base 写的草图（state token、时间并进动作 token、50×32 动作块、pi0_base zero-shot）已作废：本地 `pi0_base` 缓存不完整，零下载约束下主线改用 π0.5 b1k 微调版。下面是落地版本。
+
+### 5.1 场景结构：并排双塔、逐层 K/V 耦合
 
 ```
-   [3 相机 224²]            [文本 prompt]        [state 32] [噪声 50×32]
-        │                        │                  │           │
-   SigLIP 27 层 ──proj──┐   Gemma 词嵌入             state_proj  action_in_proj ‖ τ → MLP
-                        ▼        ▼                  ▼           ▼
-                 ┌── 前缀序列 (图像 768 + 文本) ──┐  ┌─ 后缀 (1 + 50) ─┐
-   层 0..17      │   Gemma-2B 层 i  (2048 宽)     │⇄│ 专家层 i (1024) │   ← 每层一道"拼接带"
-                 └────────────────────────────────┘  └────────────────┘
-                                                            │ action_out_proj
-                                                       v (50×32) → Euler → 动作块
+ 3 相机 224² → SigLIP 27 块 → 768 图像 token ┐
+ 指令 + 离散化 state → Gemma 词嵌入 → 117 文本 token ┴→ 前缀 885 token
+                                                   │
+   前缀塔 18 层（Gemma 2B，2048 宽）  ──K/V──▶  专家塔 18 层（Gemma 300M，1024 宽）  ◀── 右侧时间总线 cond → 每层 adaRMS scale/shift/gate
+                                                   │ final adaRMS → action_out_proj
+   x_t(32×32) → action_in_proj → 32 动作 token      v(32×32) → Euler 轨迹带 x(t=1.0) … x(t=0)（10 步）→ 反归一化 → R1 Pro 23 维动作
 ```
 
-- 主干塔（宽）和专家塔（窄）**并排**，各 18 层，一一对齐。
-- **每层画一道"拼接带"**，跨在两塔之间：
-  - 两侧的 Q/K/V 在带上**物理拼成一条序列**。
-  - 带上画块因果掩码，三块：前缀↔前缀，后缀→前缀，后缀↔后缀。
-  - 注意力后**再拆回**两侧，各自走 o_proj 和 MLP。
-- 与 k005b 的视觉差别：k005b 是专家"借"主干 KV，箭头单向（主干→专家）；π0 是两侧真正拼成一次注意力，但前缀行被掩码挡住不看后缀，所以箭头仍是单向。两页都要把这一点用掩码热力图画出来。
-- 宽度差异直接可见：主干 2048，专家 1024；头宽相同（256），这是能拼接的原因。
+- 全部块画成**竖墙**：token 沿 x，通道沿 y；显示窗口 16（堆叠）/ 32（单板）/ 64（解剖）通道。
+- 两塔各 18 层一一对齐，每层一根紫红 `kv` 箭头（前缀 L_l → 专家 L_l），标该层动作 query 投在前缀上的注意力份额。
+- π0.5 与 π0 的结构差异按真实结构画：时间经 `time_mlp` 走 **adaRMSNorm**（每层 scale/shift/gate 三根小棒），state 离散化进文本前缀，**没有单独 state token**。
+- 右侧两块第 0 层解剖板（前缀流、专家流）：norm → Q/K/V → 注意力（联合掩码块同时喂两边）→ o_proj → 残差 → norm → GeGLU → 残差；前缀 K/V 以 `kv` 箭头进专家注意力。
 
-### 5.2 章组（播放顺序）
+### 5.2 章组（实现版）
 
 | 章 | 内容 | 真值 |
 |---|---|---|
-| P0 总览 | 双塔、拼接带、10 步回路的一屏地图 | 层数、宽度、参数量（来自权重头） |
-| P1 前缀 | 3 路图像经 SigLIP（窗口化 patch）、projector，得到图像 token；文本经 Gemma 嵌入 | 真 patch 嵌入窗口、真 token id |
-| P2 后缀 | state_proj；动作 token = MLP([a ‖ τ])；**指出无 adaLN**，t 只从这里进 | 真 W 窗口、真 τ 正弦向量 |
-| P3 一层解剖 | RMSNorm → Q/K/V（两侧各自投影）→ **拼接** → 掩码注意力 → 拆回 → o_proj → 残差 → GeGLU MLP → 残差 | 第 0 层真激活窗口 |
-| P4 逐层穿行 | 前缀和后缀同时穿过 18 层，拼接带逐层点亮 | 每层残差范数 |
-| P5 前缀 KV 复用 | 推理时前缀只算一次，后缀 10 次复用 18 层 KV | 真 KV 缓存窗口 |
-| P6 10 步 Euler | 噪声 → 10 次专家穿行（t = 1.0, 0.9, …, 0.1）→ 轨迹带 → 动作块 50×32 | 每步真 x_t、v、‖v‖ |
-| P7 对照 | 与 /vla、/groot 的差异条目（§7） | — |
+| P0 全貌 | 墙的约定、显示窗口、双塔拓扑 | 层数、宽度、参数量 |
+| P1 三路相机 → SigLIP → 768 图像 token | 3 路 patch 嵌入、27 块、投影 | 块范数 41.9 / 100.1 / 455.7 |
+| P2 指令 + 离散化状态 = 117 文本 token | 词嵌入；state 段高亮 | 真 token id |
+| P3 18 层前缀塔 | 逐层穿行；L0 head0 注意力 | token 范数 38.5 → 4051.2 |
+| P4 动作 token 与时间条件 | action_in_proj；time_mlp → cond → 总线 | 真 cond |
+| P5 第 0 层解剖 | 两流联合注意力 + 掩码；门控残差 | 前缀份额 95%；残差核对 3.8e-6 |
+| P6 两座塔逐层耦合 | 18 根 K/V 耦合箭头 | 每层前缀份额（L17 降到 22%） |
+| P7 10 步 Euler 去噪 | 10 次专家穿行（缓存前缀 K/V），轨迹带逐格出现 | 每步 x_t、v、|v|≈36；最终 23 维动作 |
+| P8 三个模型对照 | §7 | — |
 
 ### 5.3 数据：`tools/export_pi0.py`
 
-- **权重（零下载，NAS 本地）**：
-  - **主权重**：`/home/frank/workspace/model/openpi_comet/pi05-b1kpt12-cs32`（另有 `pi05-b1kpt50-cs32`）。π0.5 在 BEHAVIOR-1K 上微调，openpi JAX/orbax 格式（`params/` zarr 分片 + `assets/behavior-1k/2025-challenge-demos/norm_stats.json`）。导出器直接读 zarr 数组（`zarr`/`tensorstore`，不经 JAX 运行时），在 PyTorch 里按 openpi 结构重建前向。
-    - 含真 `action_in_proj`/`action_out_proj`/`time_mlp_*` 与 R1 Pro 归一化统计：**本体适配层是训练过的真权重，无 toy，动作有语义**。
-    - 与 π0 的结构差异（章组按 π0.5 真实结构画）：专家用 **adaRMSNorm** 注入时间（`time_mlp` → 每层 scale/shift/gate），不再把时间并进动作 token；state 离散化进文本前缀，**没有单独的 state token**。
-  - **对照权重**：HF 缓存 `models--lerobot--pi0_base`。⚠ 核查结果：该缓存是本会话中途被叫停的下载，`model.safetensors` **不完整**（`.incomplete`，10.7/≈14 GB）。零下载约束下 π0 base 暂不可用；页面主线用 π0.5，π0 base 仅在补齐后作为对照章，否则 π0↔π0.5 差异只用文案讲。
-  - 前向用 bf16，约 7 GB 显存；窗口切片保留原始精度。
-- **输入样本（已裁决）**：BEHAVIOR challenge 原始 demo 帧，不用 π0 自己的训练数据。
-  - **数据位置**：
-    - 索引：`/home/frank/workspace/behavior_challenge_data/dataset/behavior-1k-knack/index`（schema.yaml、episodes.parquet、tasks.parquet、stats.json）。
-    - 原始数据：`bytes_pointer.json` 指向容器路径 `/workspace/dataset/2026-challenge-demos/{data,videos}`，宿主机对应 `.../behavior_challenge_data/dataset/2026-challenge-demos/`。
-    - 数据为 R1Pro，30 fps，20000 条 episode；state 61 维，action 23 维；相机为 HEVC 视频。
-  - **选帧**：默认与 k005b 导出**同一 episode、同一 frame**。`export_k005b.py` 已记录 row、episode、frame，三页可同帧对照。帧直接从 demos 的 parquet 和 hevc 视频解码，不走 k005b 的训练样本表。
-  - **相机映射**（3 路 RGB → π0 的 3 个输入槽，各 resize/pad 到 224²）：
-    - `observation.rgb.zed_link_camera_0`（头部）→ `base_0_rgb`
-    - `observation.rgb.left_realsense_link_camera_0` → `left_wrist_0_rgb`
-    - `observation.rgb.right_realsense_link_camera_0` → `right_wrist_0_rgb`
-    - 深度通道不用。
-  - **语言**：该 episode 的任务描述来自 `tasks.parquet`，经 PaliGemma tokenizer 编码。
-  - **R1 Pro embodiment 配置（D6 已撤销，非问题）**：state 维度与 action 维度本来独立，各自经自己的投影进隐空间（k005b 即 `state_proj` 61→768 与 `action_in_proj` 23→768 互不相干；BEHAVIOR 官方 GR00T N1.7 baseline 也是写一份 R1 Pro embodiment 配置：state 61→隐层、action 23→隐层）。π0 同理：给它的状态/动作编解码层写一份 R1 Pro 配置（`tools/pi0_r1pro.yaml`：state 61、action 23、三相机键），**不做任何跨维映射设计**。
-    - 若 `pi0_base` 里没有 R1 Pro 已训练的编解码权重，这几层是唯一非真值部件，3D 中标 `toy: R1 Pro adapter (untrained)`；主干与专家权重、全部激活仍是真值。
-  - **归一化**：pi0_base 没有 R1Pro 统计量。state 用 `index/stats.json` 做 mean/std 归一化，并在导出 JSON 中记录所用统计量。
-- **真值标注**：pi0_base 是预训练底模，没在 BEHAVIOR 上微调。激活和权重是真的，但输出动作对 R1Pro **无语义保证**。
-  - 场景里标一行 `pi0_base zero-shot on BEHAVIOR frame: activations real, actions not calibrated for R1Pro`。
-  - 动作块按 R1 Pro 配置解码为 50×23，按 R1Pro 名称标注。
-- **hook**：
-  - 每层两侧 RMSNorm 输入输出、Q/K/V、注意力权重（窗口化）、MLP。
-  - 10 步循环里的 x_t、v、t。
-  - 前缀 KV 缓存。
-- **自检**：
-  - 导出器内部重放 Euler 更新，与 hook 值逐元素对照。
-  - 残差恒等式精确成立（同 k005b）。
+- **权重（零下载）**：`~/workspace/model/openpi_comet/pi05-b1kpt12-cs32`（openpi orbax/zarr），直接读数组，在 PyTorch fp32 里按 openpi 结构重建前向（官方运行时为 bf16）。`action_in/out_proj`、`time_mlp_*` 与 R1 Pro 归一化统计都是训练过的真权重——**无 toy 部件**。唯一外部取用是 PaliGemma tokenizer 资产（4 MB，非权重）。
+- **输入**：BEHAVIOR 2026-challenge-demos 第 0 条 episode 第 0 帧，三相机（head / left_wrist / right_wrist）解码自 HEVC；任务文本来自 `tasks.parquet`；state 按 checkpoint 的 norm_stats 归一化后离散化进前缀。注：demos 的 `base_qvel` 可能是世界坐标系。
+- **输出**：`public/pi0-weights.json`（0.8 MB）、`pi0-acts.json`（3.0 MB，含 L0 head0 前缀注意力 f16）、`pi0-fm.json`（2.1 MB，10 步全塔激活）、`pi0-check.json`（抽查点）。
+- **自检**：残差/门控恒等式、Euler 恒等式（1.2e-7）、掩码核对（改动作 token 前缀激活不变）；`tools/ref_pi0_jax.py` 用官方 openpi JAX `sample_actions` 同输入同噪声对照，归一化动作最大差 2.6e-5。
 
 ---
 

@@ -55,3 +55,4 @@ src/cpu/tests/*_.s
 
 # IDE
 /.idea/
+__pycache__/

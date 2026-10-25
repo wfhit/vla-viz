@@ -61,7 +61,7 @@ function texAll(gl: WebGL2RenderingContext, ts: Record<string, ITensorEntry>) {
     return out;
 }
 
-function downsampleThumb(b64: string, size: number, n: number) {
+export function downsampleThumb(b64: string, size: number, n: number) {
     let px = new Uint8Array(base64ToArrayBuffer(b64));
     let f = size / n;
     let rgb = new Float32Array(n * n * 3);

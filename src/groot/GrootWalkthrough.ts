@@ -306,6 +306,5 @@ Euler 恒等式（x_next = x_t + v/4）导出时核对过，最大误差 ${cfg ?
     } break;
     }
 
-    // TEMP camera-tuning hook
     endWalkthroughFrame(wt);
 }
