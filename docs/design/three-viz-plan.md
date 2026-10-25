@@ -155,29 +155,55 @@
 
 ---
 
-## 3. 代码架构：共享渲染器，模型各自独立
+## 3. 代码架构：同一引擎，多模型实例（Frank 裁决 2026-10-25，取代旧"各自独立"方案）
 
-现状：k005b 专用代码约 5.4k 行（`export_k005b.py` + `VlaModelLayout.ts` + `VlaModel.ts` + walkthrough），布局和模型强耦合。
+**裁决**：/groot 与 /pi0 必须与 /vla 风格完全相同——3D 场景 + 章组步进 + 播放条 + 真权重真激活的 bbycroft 式逐层 walkthrough；不允许平铺静态页/文字页/"墙"式独立实现。三页是**同一引擎的三个模型实例**，只换模型结构与数据。
 
-建议**不做"通用 VLA 布局引擎"**。三种耦合拓扑差异太大，抽象过早会把三页都拖坏。
+### 3.1 分层
 
 ```
-src/vla/        k005b（路由 /vla）
-src/groot/      GrootLayout.ts  GrootModel.ts  walkthrough/G*.tsx
-src/pi0/        Pi0Layout.ts    Pi0Model.ts    walkthrough/P*.tsx
-src/vizcore/    从 src/vla 抽出的纯渲染件：块/箭头/文字绘制、相机、播放条、
-                窗口化 tensor 纹理、审计(audit) 钩子 —— 只抽"已被两页复用"的东西
-tools/export_groot.py  tools/export_pi0.py   （以 export_k005b.py 为模板）
-public/data/groot/*  public/data/pi0/*
+src/vla/                 唯一引擎（层视图、层对竖向对叠、章节导航、播放条、箭头+审计、标签去重）
+src/vla/models/k005b.ts  ModelSpec 实例（/vla）
+src/vla/models/pi05.ts   ModelSpec 实例（/pi0）
+src/vla/models/groot.ts  ModelSpec 实例（/groot）
+src/vla/walkthrough/*    章节骨架共用；每章文案/数值按 ModelSpec 取（per-model text table）
+tools/export_{k005b,pi0,groot}.py  → 同一 "VLA schema" 的 JSON
 ```
 
-- 抽 `vizcore` 是**按需**进行：做 /pi0 时发现要复制的渲染件才搬过去，并保证 /vla 截图不变。
-- 每页沿用 k005b 的硬约束：
-  - 箭头必须有起止块（audit 的 noIn/noOut 为空）。
-  - 3D 文字只用 ASCII。
-  - 无弹窗。
-  - FOV 不动。
-  - 真值标注。
+完成后删除 `src/pi0/*`、`src/groot/*` 的墙式 Layout/Scene/Walkthrough（死代码立即删）。
+
+### 3.2 ModelSpec（驱动 createLayer / createExpertLayer）
+
+| 字段 | k005b | π0.5 (/pi0) | GR00T N1.7 (/groot) |
+|---|---|---|---|
+| 主干 | Qwen3-VL-2B, 28 层, C=2048, 16 头/8 kv, hd128, SwiGLU, RMSNorm | Gemma 2B, 18 层, C=2048, 8 头/1 kv, hd256, GeGLU, RMSNorm | Cosmos-Reason2(Qwen3-VL) 取 16 层 + vlln + 4 层 vlsa 自注意力 |
+| 专家 | 28 层, 768, 16 头/2 kv, SwiGLU, AdaRMSNorm | 18 层, 1024, AdaRMSNorm + gate_a/gate_f 门控残差, GeGLU | DiT 32 层, 32 头×48, AdaLN(scale/shift), GELU FF |
+| 专家注意力类型（逐层） | joint（前缀+后缀） | joint（逐层 KV 拼接） | 偶数层 cross（只看 216 VL token）/ 奇数层 self（41 token） |
+| 层对 | 主干 Li ↔ 专家 Ei，28 对 | 主干 Li ↔ 专家 Ei，18 对 | VL 主干堆 → 32 层 DiT（cross 层箭头接 VL 输出，不是逐层配对） |
+| 后缀 token | 1 state + 16 action | 32 action × 32 维 | 1 state + 40 action |
+| Euler 步数 K | 10 | 10 | 4 |
+| 输出头 | knack/done（仅 k005b） | 无 | 无 |
+
+专家注意力块按 kind 生成：joint = 前缀段 + 后缀段两部分；cross = 只有前缀段；self = 只有后缀段。布局统一采用"竖向对叠"（单列，见 dit-section-design §1.1）。
+
+### 3.3 数据：统一 VLA schema
+
+以 k005b 导出格式为标准：每层 `L#.q` 逐头窗口、`ln` 聚合、MLP、`E#.scp/scs/pp/ps/vo`、`ada` 等。现有 pi0/groot 导出只覆盖 L0 / D0–D1，无逐头、无逐层权重 → 扩展 `export_pi0.py`、`export_groot.py`（纯 torch 复现，已与官方核对）输出全层、全头的同构 schema。数据源不变：NAS 本地权重 + 本地 BEHAVIOR 帧，零下载。
+
+### 3.4 硬约束（三页一致）
+
+- 箭头必须有起止块（`__arrowAudit` 的 noIn/noOut 为空）。
+- 3D 文字只用 ASCII。
+- 无弹窗。
+- FOV 不动。
+- 真值标注；toy 必须标明。
+
+### 3.5 施工顺序
+
+1. ModelSpec 抽取：k005b 走 spec 路径，/vla 84 张截图审计不变。
+2. 扩展 export_pi0.py → 全层 schema；/pi0 切到引擎实例，删除 `src/pi0` 墙。
+3. 同理处理 /groot（cross/self 交替 + AdaLN + 4 步 Euler）。
+4. 每步：tsc、截图逐章自测、审计为空、`next build`，然后提交。
 
 ---
 
