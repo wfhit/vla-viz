@@ -37,7 +37,9 @@
 
 ## 1. 事实核对（全部来自 config、权重头、源码，非记忆）
 
-### 1.1 GR00T N1.6
+### 1.1 GR00T N1.6（历史核对；实际用 N1.7，以 `groot-understanding.md` 为准）
+
+> ⚠ 页面改用本地 N1.7-3B 后，主干已换成 Cosmos-Reason2-2B（Qwen3-VL 结构，视觉塔 24 块/1024/patch 16，新增 vl_self_attention 4 块），动作维 132、horizon 40。下文 N1.6 事实中 DiT 部分（32 块、交替交叉/自注意力、AdaLN、4 步向上积分）经权重形状核对在 N1.7 中仍成立，其余以 `docs/design/groot-understanding.md` 为准。
 
 **来源**
 - HF `nvidia/GR00T-N1.6-3B`：config.json、`model.safetensors.index.json`。
@@ -311,9 +313,9 @@ public/data/groot/*  public/data/pi0/*
 - **权重（零下载，NAS 本地）**：`/home/frank/workspace/model/nvidia/GR00T-N1.7-3B`（6.5 GB，safetensors；含 `experiment_cfg/`、`embodiment_id.json`、`dataset_statistics.json`）。跑前向约 8 GB 显存。
   - §1.1 的结构事实按 N1.6 核对，实现前须按 N1.7 的 `config.json` / `final_model_config.json` 重新核对（DiT 块数、交替模式、Euler 步数、主干截断层数），章组 G1–G7 随之修正。
 - **代码**：用与 N1.7 匹配的 Isaac-GR00T 版本的 processor 和 model 类加载。只用代码，不改模型。
-- **输入**：同一帧 BEHAVIOR 观测，embodiment = `behavior_r1_pro`（24）。
-  - `statistics.json` 里有该本体的归一化统计，所以输出动作**有语义**，可与 k005b 同帧对比。这是三页里最强的并列对照。
-  - 前提：需确认 R1Pro 的 modality 配置（相机键、state/action 维度切片）能从仓库的 embodiment 配置里取到。确认不了时退回仓库自带示例数据（如 GR1 或 G1），见决策点 D3。
+- **输入**：同一帧 BEHAVIOR 观测，按 checkpoint 内注册的 `sim_behavior_r1_pro` modality 模板组装（3 相机 head/left_wrist/right_wrist 256²、state 键表、23 维动作 base/torso/双臂/双夹爪、32 步）。
+  - **核查结论（`groot-understanding.md` §3）**：该 checkpoint 的训练混合里没有 BEHAVIOR 数据；R1 Pro 槽的 state/action 编解码权重是初始化值（std 与未参训槽相同）。真正训练过的是 `real_r1_pro_sharpa_*`（真机 + Sharpa 灵巧手，62 维 EEF+手关节），不借用。
+  - 因此：主干与 DiT 真权重、真激活；本体适配槽标 `toy`；**输出动作无语义，不与 k005b 做数值对比**（原"最强并列对照"一说作废，对照改为结构与激活层面）。
 - **hook**：
   - SigLIP2 和 Qwen3 每层残差。
   - vlln 输出。
@@ -336,7 +338,7 @@ public/data/groot/*  public/data/pi0/*
 不另建 /compare 页。做法如下：
 1. **首页**：三张卡片并列（/groot、/pi0、/vla），各配一张场景截图和一句耦合拓扑描述。
 2. **每页末章（G7/P7/V-对照）**：同一张差异表（即 §0 的表），当前模型那列高亮。每一行可点击，跳到另一页对应的章，例如"耦合"跳到对方的 G5/P4/D 组。
-3. **同帧同机器人**：/pi0 和 /vla 已确定用同一帧 BEHAVIOR demo；/groot 视 D3 而定。最后一章并列画动作块，注明 π0 是 zero-shot，k005b（以及 GR00T 若用 embodiment 24）针对 R1Pro。
+3. **同帧同机器人**：三页都用同一帧 BEHAVIOR demo。最后一章并列画动作块：k005b 与 π0.5 COMET 在 BEHAVIOR 上训练过、动作有语义；GR00T N1.7 的 R1 Pro 槽未训练，只并列结构与激活，动作块标 toy。
 
 ---
 
@@ -364,7 +366,7 @@ public/data/groot/*  public/data/pi0/*
 | 风险 | 影响 | 对策 |
 |---|---|---|
 | 许可证：GR00T 为 NVIDIA OneWay Noncommercial；π0 权重受 Gemma 条款约束 | **已裁决：纯内部使用，不公开部署**，非阻塞 | 页面角落注明来源和许可证名称即可 |
-| GR00T 的 R1Pro modality 配置不在公开仓 | 不能用 BEHAVIOR 帧做出有语义的动作 | 退回仓库示例本体（D3） |
+| GR00T N1.7 本地版的 R1 Pro 槽未在 BEHAVIOR 上训练 | 动作无语义 | 模板齐全可直接跑；适配槽标 toy，对照只比结构与激活（`groot-understanding.md` §3） |
 | π0.5 COMET 为 openpi JAX/orbax 格式 | 无现成 PyTorch 加载 | 直接读 zarr 数组，PyTorch 重建前向，与 openpi 参考输出逐项比对自检 |
 | demo 视频为 HEVC | 导出器需要能解码 HEVC 的环境 | 复用 behavior_challenge 现有数据加载代码；不行就用 ffmpeg 抽单帧 |
 | 显存/内存 | 14 GB fp32 加载需要约 28 GB 内存峰值（60 GB 够） | bf16 前向；按需 mmap 读取窗口 |
@@ -379,7 +381,7 @@ public/data/groot/*  public/data/pi0/*
 |---|---|---|
 | D1 | 页面顺序 | ✅ π0 先，GR00T 后 |
 | D2 | π0 输入帧 | ✅ BEHAVIOR 原始 demo 真实帧（`behavior-1k-knack` → `2026-challenge-demos`），不用 π0 训练数据 |
-| D3 | GR00T 输入帧 | ⏳ 待定，GR00T 阶段再议。推荐 BEHAVIOR 同帧 + embodiment 24，R1Pro 配置拿不到时退回示例本体 |
+| D3 | GR00T 输入帧 | ✅ BEHAVIOR 本地同帧 + checkpoint 内的 `sim_behavior_r1_pro` 模板；该槽未训练，标 toy（`groot-understanding.md` §3） |
 | D4 | 许可证 | ✅ 纯内部使用，不公开部署 |
 | D5 | 改名范围 | ✅ 法则 5：可见层与内部一次清完，已完成（§2） |
 | D6 | π0 的 state 映射 | ✅ **撤销（伪问题）**：state/action 各自投影进隐层，写一份 R1 Pro embodiment 配置即可（§5.3）。此类本体适配问题以后按此模式直接处理，不再提问 |
