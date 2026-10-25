@@ -30,6 +30,22 @@ export const HomePage: React.FC = () => {
                     </div>
                 </div>
             </div>
+            <div className={s.projectCard} onClick={() => router.push('/groot')}>
+                <div className={s.cardImageWrapper}>
+                    <div className={s.cardImage}>
+                        <img src="/images/groot-viz-screenshot.jpg" alt="GR00T N1.7 场景截图" />
+                    </div>
+                </div>
+                <div className={s.cardContent}>
+                    <div className={s.cardTitle}>
+                        <Link href="/groot">GR00T N1.7</Link>
+                    </div>
+                    <div>
+                        System 2：Cosmos-Reason2 视觉语言主干（16 层）；System 1：32 块 DiT 动作头（文本/图像交叉注意力与自注意力交替、AdaLN 时间条件），
+                        4 步 Euler 解码出 40 × 132 动作块。真实 GR00T-N1.7-3B 权重，BEHAVIOR 示范帧上的真实激活。
+                    </div>
+                </div>
+            </div>
         </div>
     </div>;
 }

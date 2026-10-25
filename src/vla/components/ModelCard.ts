@@ -1,6 +1,6 @@
 import { cameraToMatrixView } from "../Camera";
 import { cellPosition, IVlaModelLayout } from "../VlaModelLayout";
-import { IProgramState } from "../Program";
+import { IProgramState, vlaLayout } from "../Program";
 import { drawText, IFontOpts, measureText, measureTextWidth, writeTextToBuffer } from "../render/fontRender";
 import { addLine2 as drawLine, drawLineSegs, ILineOpts, makeLineOpts } from "../render/lineRender";
 import { IRenderState } from "../render/modelRender";
@@ -237,7 +237,7 @@ function numberToCommaSep(a: number) {
 }
 
 function renderInputAtTop(state: IProgramState) {
-    let layout = state.layout;
+    let layout = vlaLayout(state);
     let render = state.render;
 
     let inputTokBlk = layout.idxObj;
@@ -298,7 +298,7 @@ function renderInputAtTop(state: IProgramState) {
 }
 
 function renderOutputAtBottom(state: IProgramState) {
-    let layout = state.layout;
+    let layout = vlaLayout(state);
 
     let softmax = layout.logitsSoftmax;
 

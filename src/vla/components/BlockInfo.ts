@@ -14,13 +14,12 @@ export function drawBlockInfo(state: IProgramState) {
 
         let scale = camScaleToScreen(state, blkTopMid);
 
-        scale = Math.min(scale, 1.45);
-        // have a max scale
+        scale = Math.min(scale, state.page.tagScaleMax ?? 1.45);
 
         let textColor = new Vec4(1, 1, 1, 1).mul(blk.opacity);
         let bgColor = new Vec4(0, 0, 0, 1).mul(blk.opacity);
 
-        if (blk.opacity === 0 || !blk.name) {
+        if (blk.opacity === 0 || !blk.name || blk.noTag) {
             continue;
         }
 

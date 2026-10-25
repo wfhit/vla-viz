@@ -42,18 +42,27 @@ export function recordArrowEdge(src: IBlkDef, dst: IBlkDef) {
     arrowEdges.push({ src, dst });
 }
 
-export function auditArrows(layout: IVlaModelLayout) {
+export function resetArrowEdges() {
+    arrowEdges = [];
+}
+
+// visible data blocks with no incoming / outgoing arrow, except the declared sources / sinks
+export function auditEdges(cubes: IBlkDef[], srcOk: Set<IBlkDef>, sinkOk: Set<IBlkDef>) {
     let hasIn = new Set<IBlkDef>(), hasOut = new Set<IBlkDef>();
     for (let e of arrowEdges) { hasOut.add(e.src); hasIn.add(e.dst); }
-    let visible = layout.cubes.filter(c => c.opacity > 0 && c.t === 'i');
+    let visible = cubes.filter(c => c.opacity > 0 && c.t === 'i');
+    let noIn = visible.filter(c => !hasIn.has(c) && !srcOk.has(c) && c.name);
+    let noOut = visible.filter(c => !hasOut.has(c) && !sinkOk.has(c) && c.name);
+    return { noIn: noIn.map(c => c.name), noOut: noOut.map(c => c.name), edges: arrowEdges.length };
+}
+
+export function auditArrows(layout: IVlaModelLayout) {
     // sources by construction: the token ids, the FM inputs, te's per-layer AdaNorm γβ, and
     // the bottom x1 which is the same tensor as the FM input x1 (a skip, not a new source)
     let srcOk = new Set<IBlkDef>([layout.idxObj, layout.fm.state75, layout.fm.x1, layout.fm.timeEmb,
         layout.actionX1, layout.strip[0], ...layout.expertLayers.flatMap(e => [e.ada, e.ada2])]);
     let sinkOk = new Set<IBlkDef>([layout.logitsSoftmax, layout.doneProbs, layout.actionChunk, layout.strip[layout.strip.length - 1]]);
-    let noIn = visible.filter(c => !hasIn.has(c) && !srcOk.has(c) && c.name);
-    let noOut = visible.filter(c => !hasOut.has(c) && !sinkOk.has(c) && c.name);
-    return { noIn: noIn.map(c => c.name), noOut: noOut.map(c => c.name), edges: arrowEdges.length };
+    return auditEdges(layout.cubes, srcOk, sinkOk);
 }
 
 // `isVisible` lets the caller skip a layer's detailed arrows when the layer is off-screen
@@ -95,7 +104,7 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
         if (!dry) drawArrow(st, start, end, width, normal, color, drawHead, drawCorner, endDir);
     }
 
-    arrowEdges = [];
+    resetArrowEdges();
     drawVertArrow(layout.idxObj, layout.residual0);
     drawHorizArrow(layout.tokEmbedObj, layout.residual0);
 
@@ -497,14 +506,14 @@ enum BlockPos {
     Bot,
 }
 
-enum CornerMode {
+export enum CornerMode {
     None,
     Left,
     Right,
 }
 
 let _bezierLineBuf = new Float32Array(4 * 3);
-function drawArrow(state: IRenderState, start: Vec3, end: Vec3, width: number, normal: Vec3, color: Vec4, drawHead: boolean = true, drawCorner: CornerMode = CornerMode.None, endDir?: Vec3) {
+export function drawArrow(state: IRenderState, start: Vec3, end: Vec3, width: number, normal: Vec3, color: Vec4, drawHead: boolean = true, drawCorner: CornerMode = CornerMode.None, endDir?: Vec3) {
 
     let dir = end.sub(start);
     dir.z = 0.0;

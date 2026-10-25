@@ -12,7 +12,7 @@ fabricated mappings. No toy data. No popups/overlays — in-scene walkthrough st
 |---|---|---|---|
 | `/vla` | k005b dual-head VLA | `outputs/k005b-task0-v3/checkpoints` (step_150000) | DONE + verified |
 | `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`; base ref: HF cache `lerobot/pi0_base`) | IN PROGRESS |
-| `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | IN PROGRESS |
+| `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | DONE (self-tested, awaiting Hermes acceptance) |
 
 Input frames for ALL pages: local BEHAVIOR dataset
 `~/workspace/behavior_challenge_data/dataset/{behavior-1k-knack, 2026-challenge-demos}`.
@@ -26,15 +26,17 @@ Input frames for ALL pages: local BEHAVIOR dataset
   ada_norm, interleave_self_attention=true, action_horizon 40, action dim 132, backbone
   embedding 2048 (Cosmos-Reason2-2B), Euler 4 steps (draw 4, not 10), embodiment
   sim_behavior_r1_pro id=23. 6 minor details listed in
-  `docs/design/` GR00T understanding doc §4 — verify from LOCAL sources only (config,
-  shapes, EXPLAINABILITY.md). NO downloading (weights OR source).
+  `docs/design/` GR00T understanding doc §4 — all 6 verified (local sources + shallow Isaac-GR00T
+  clone; cloning code is allowed, weights are never downloaded).
 - pi0: state and action dims are INDEPENDENT projections (61-dim state -> state token;
   23/32-dim action -> action tokens). Never ask "how do the dims map" — per-embodiment
   projection configs are the answer (precedent: official GR00T BEHAVIOR baseline).
 
 ## Remaining steps (in order)
 
-1. `/groot`: verify the 6 details from local sources -> exporter -> page -> self-test -> commit.
+1. ~~`/groot`: verify the 6 details -> exporter -> page -> self-test -> commit.~~ DONE:
+   `tools/export_groot.py` -> `public/groot-*.json`; `src/groot/*`; G0-G9 self-test: 0 console
+   errors, arrow audit empty (292 edges); `next build` OK; homepage card added.
 2. `/pi0`: exporter (pi05 weights, BEHAVIOR frames) -> page -> self-test -> commit.
 3. Hermes acceptance per page: value spot-check vs weights, step-through screenshots,
    no orphan arrows, no popups. Fail -> back to Opus.

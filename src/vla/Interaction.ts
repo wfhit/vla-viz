@@ -2,7 +2,7 @@ import { blockDimension, findSubBlocks, splitGrid, splitGridForHighlight } from 
 import { drawDataFlow, formatRealValue, getBlockRealInfo } from "./components/DataFlow";
 import { embedColForToken } from "./VlaModel";
 import { BlKDepSpecial, IBlkCellDep, IBlkDef } from "./VlaModelLayout";
-import { IProgramState } from "./Program";
+import { IProgramState, vlaLayout } from "./Program";
 import { clamp, isNotNil } from "@/src/utils/data";
 import { Dim, Vec3, Vec4 } from "@/src/utils/vector";
 
@@ -217,8 +217,8 @@ export function drawDependences(state: IProgramState, blk: IBlkDef, idx: Vec3) {
     function drawDep(dep: IBlkCellDep, destIdx: Vec3, dotLen?: number | null) {
         let { srcIdx, dotDim, otherDim, isDot } = getDepSrcIdx(dep, destIdx);
 
-        if (blk.deps?.special === BlKDepSpecial.InputEmbed && dep.src === state.layout.tokEmbedObj) {
-            let col = state.layout.model ? embedColForToken(state.layout.model, destIdx.x) : -1;
+        if (blk.deps?.special === BlKDepSpecial.InputEmbed && dep.src === vlaLayout(state).tokEmbedObj) {
+            let col = vlaLayout(state).model ? embedColForToken(vlaLayout(state).model!, destIdx.x) : -1;
             if (col < 0) {
                 return; // this token's embed row is outside the exported rows
             }

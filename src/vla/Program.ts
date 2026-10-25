@@ -1,17 +1,14 @@
 import { genModelViewMatrices, ICamera, ICameraPos, updateCamera } from "./Camera";
-import { auditArrows, drawAllArrows } from "./components/Arrow";
-import { defaultActionViz, drawActionViz, IActionVizState } from "./components/ActionViz";
-import { drawBlockLabels } from "./components/SectionLabels";
-import { drawModelCard } from "./components/ModelCard";
+import { defaultActionViz, IActionVizState } from "./components/ActionViz";
 import { IVlaModelLink, IModelShape } from "./VlaModel";
-import { genVlaModelLayout, IBlkDef, IVlaModelLayout } from "./VlaModelLayout";
+import { IBlkDef, ISceneLayout, IVlaModelLayout } from "./VlaModelLayout";
 import { drawText, IFontAtlasData, IFontOpts, measureText } from "./render/fontRender";
 import { initRender, IRenderState, IRenderView, renderModel, resetRenderBuffers } from "./render/modelRender";
 import { beginQueryAndGetPrevMs, endQuery } from "./render/queryManager";
 import { SavedState } from "./SavedState";
 import { isNotNil } from "@/src/utils/data";
 import { Vec3, Vec4 } from "@/src/utils/vector";
-import { initWalkthrough, runWalkthrough } from "./walkthrough/Walkthrough";
+import { initWalkthrough } from "./walkthrough/Walkthrough";
 import { IColorMix } from "./Annotations";
 import { Mat4f } from "@/src/utils/matrix";
 import { runMouseHitTesting } from "./Interaction";
@@ -21,20 +18,25 @@ import { IBlockRender } from "./render/blockRender";
 import { ILayout } from "../utils/layout";
 import { DimStyle } from "./walkthrough/WalkthroughTools";
 import { Subscriptions } from "../utils/hooks";
+import { IPageSpec } from "./PageSpec";
 
 export interface IProgramState {
+    page: IPageSpec;
     mouse: IMouseState;
     render: IRenderState;
     inWalkthrough: boolean;
     walkthrough: ReturnType<typeof initWalkthrough>;
     camera: ICamera;
     htmlSubs: Subscriptions;
-    layout: IVlaModelLayout;
+    // the current page's scene; the /vla page's chapters read it as IVlaModelLayout (vlaLayout)
+    layout: ISceneLayout;
     mainExample: IModelExample;
     examples: IModelExample[];
     currExampleId: number;
     shape: IModelShape;
     vlaModel: IVlaModelLink | null;
+    // per-page data that only that page's code reads (e.g. the /groot tensors)
+    pageData: any;
     display: IDisplayState;
     pageLayout: ILayout;
     markDirty: () => void;
@@ -74,15 +76,15 @@ interface IHoverTarget {
     mainIdx: Vec3;
 }
 
-export function initProgramState(canvasEl: HTMLCanvasElement, fontAtlasData: IFontAtlasData): IProgramState {
+export function initProgramState(canvasEl: HTMLCanvasElement, fontAtlasData: IFontAtlasData, page: IPageSpec): IProgramState {
 
     let render = initRender(canvasEl, fontAtlasData);
-    let walkthrough = initWalkthrough();
+    let walkthrough = initWalkthrough(page);
 
-    let prevState = SavedState.state;
+    let prevState = SavedState.state?.page === page.id ? SavedState.state : null;
     let camera: ICamera = {
-        angle: prevState?.camera.angle ?? new Vec3(296, 16, 13.5),
-        center: prevState?.camera.center ?? new Vec3(-8.4, 0, -481.5),
+        angle: prevState?.camera.angle ?? page.initialCamera.angle,
+        center: prevState?.camera.center ?? page.initialCamera.center,
         transition: {},
         modelMtx: new Mat4f(),
         viewMtx: new Mat4f(),
@@ -105,12 +107,13 @@ export function initProgramState(canvasEl: HTMLCanvasElement, fontAtlasData: IFo
     }
 
     return {
+        page,
         render: render!,
         inWalkthrough: true,
         walkthrough,
         camera,
         shape: shape,
-        layout: genVlaModelLayout(shape),
+        layout: { cell: 1.5, height: 0, margin: 0, cubes: [], labels: [] },
         currExampleId: -1,
         mainExample: {
             name: 'k005b',
@@ -123,6 +126,7 @@ export function initProgramState(canvasEl: HTMLCanvasElement, fontAtlasData: IFo
         },
         examples: [],
         vlaModel: null,
+        pageData: null,
         markDirty: () => { },
         htmlSubs: new Subscriptions(),
         mouse: {
@@ -161,18 +165,6 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     state.display.tokenIdxColors = null;
     state.display.actionViz = defaultActionViz();
 
-    // generate the base model, incorporating the gpu-side model if available
-    state.layout = genVlaModelLayout(state.shape, state.vlaModel);
-
-    // @TODO: handle different models in the same scene.
-    // Maybe need to copy a lot of different things like the entire render state per model?
-    for (let example of state.examples) {
-        if (example.enabled && !example.layout) {
-            let layout = genVlaModelLayout(example.shape, null, example.offset);
-            example.layout = layout;
-        }
-    }
-
     genModelViewMatrices(state);
 
     let queryRes = beginQueryAndGetPrevMs(state.render.queryManager, 'render');
@@ -182,34 +174,20 @@ export function runProgram(view: IRenderView, state: IProgramState) {
 
     state.render.renderTiming = false; // state.pageLayout.isDesktop;
 
-    // will modify layout; view; render a few things.
-    if (state.inWalkthrough) {
-        runWalkthrough(state, view);
-    }
+    // the page builds its scene (state.layout) and runs its walkthrough (moves the camera)
+    state.page.prepare(state, view);
 
     updateCamera(state, view);
 
     drawBlockInfo(state);
-    // these will get modified by the walkthrough (stored where?)
-    drawAllArrows(state.render, state.layout, cubes => cubesInView(state, cubes));
-    drawActionViz(state, cubes => cubesInView(state, cubes));
-    // self-check hook for the headless probes: visible data blocks without an in / out arrow
+    state.page.drawScene(state);
     if (typeof window !== 'undefined') {
-        (window as any).__arrowAudit = () => auditArrows(state.layout);
-        (window as any).__k005bState = state;
-    }
-
-    drawModelCard(state, state.layout, 'k005b VLA', new Vec3());
-
-    for (let example of state.examples) {
-        if (example.enabled && example.layout) {
-            drawModelCard(state, example.layout, example.name, example.offset.add(example.modelCardOffset));
-        }
+        (window as any).__vizState = state;
     }
 
     runMouseHitTesting(state);
     state.render.sharedRender.activePhase = RenderPhase.Opaque;
-    drawBlockLabels(state.render, state.layout);
+    state.page.drawLabels(state);
 
     let lineNo = 1;
     let tw = state.render.size.x;
@@ -231,8 +209,14 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     state.render.lastJsMs = performance.now() - timer0;
 }
 
+// the /vla page's scene (only valid while that page is shown)
+export function vlaLayout(state: IProgramState): IVlaModelLayout {
+    if (state.page.id !== 'vla') throw new Error(`vlaLayout() on page ${state.page.id}`);
+    return state.layout as IVlaModelLayout;
+}
+
 // conservative frustum test of the bounding box of `cubes` (layout space)
-function cubesInView(state: IProgramState, cubes: IBlkDef[]) {
+export function cubesInView(state: IProgramState, cubes: IBlkDef[]) {
     let mn = new Vec3(Infinity, Infinity, Infinity), mx = new Vec3(-Infinity, -Infinity, -Infinity);
     for (let c of cubes) {
         mn = new Vec3(Math.min(mn.x, c.x), Math.min(mn.y, c.y), Math.min(mn.z, c.z));

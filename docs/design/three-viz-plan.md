@@ -262,51 +262,40 @@ public/data/groot/*  public/data/pi0/*
 
 ## 6. /groot 场景与章组
 
-### 6.1 场景结构：串联、单总线交叉注意力
+### 6.1 场景结构（按 N1.7 实现，2026-10-25 定稿）
+
+> 早先按 N1.6 写的草图（SigLIP2/pixel-shuffle、50×128、槽 24、G0–G7）已作废，下面是落地版本；结构事实以 `groot-understanding.md` 为准。
 
 ```
- [图像] → SigLIP2 27 层 → pixel-shuffle → mlp1 ┐
- [文本] → Qwen3 嵌入 ─────────────────────────┴→ Qwen3 16 层（第 17..28 层画成"被截掉的虚影"）
-                                                     │ vlln (LayerNorm)
-                                                     ▼
-                                   ══ VL 特征总线 (图像段 | 文本段) ══════════════╗
-                                                                                  ║
- [state] → state_enc[emb=24] ┐                                                    ║
- [噪声 50×128] → action_enc[emb=24](a ‖ τ) + pos ┴→ sa 序列 (state + 50 action)   ║
-                                                     │                            ║
-   DiT 块 0  交叉 ← 读总线·文本段 ═══════════════════════════════════════════════╣
-   DiT 块 1  自注意力 (只在 sa 内部)                                               ║
-   DiT 块 2  交叉 ← 读总线·图像段 ═══════════════════════════════════════════════╣
-   DiT 块 3  自注意力                                                              ║
-   …… ×8 组（文/自/图/自）                                                        ║
-   final AdaLN → proj_out_2 → action_dec[emb=24] → v (50×128) → Euler(4 步，向上)
+ 3 相机 → 视觉塔 24 块 → merger → 192 图像 token ┐
+ 指令 → Qwen3 嵌入 → 24 文本 token ──────────────┴→ LM 16 层（S = 216）→ VL 头 (vlln + 4 层 vl_self_attention)
+                                                             │  按 image_mask 分成两根 K/V 竖条
+ state(61) → state_enc[slot 23] → 1 个状态 token ┐            │
+ x_t(40×132) → action_enc[slot 23](W1 a ‖ tau, W2, swish, W3) + pos_emb ┴→ sa 序列 41 token
+                                                             ▼
+   DiT D0 交叉(文本)  D1 自注意力  D2 交叉(图像)  D3 自注意力   …×8，共 32 块，右侧时间总线 temb → 每块 scale/shift
+   final AdaLN → proj_out_2 → action_dec[slot 23] → v(40×132) → Euler 轨迹带 x_t0 … x_t4（4 步，t: 0 → 1）
 ```
 
-- **主干和 DiT 是串联的，不是并排**：DiT 堆放在主干之后（场景纵向延伸）。
-- 主干只把最后（第 16 层）的输出铺成一条 **VL 特征总线**，与 DiT 堆平行。
-- 交叉块从总线**取 K/V**：
-  - 文本块的箭头连到总线文本段，图像块的连到图像段。
-  - 两种块用颜色区分，"每 4 块一轮"的节律可见。
-- 自注意力块没有外连箭头，只在 sa 序列内部。
-- 截断的 LLM 第 17..28 层画成**淡色虚影**，标 `pruned (select_layer=16)`，说明 GR00T 只用 Eagle 的中层特征。这是真事实，不是 toy。
-- **embodiment 槽**：
-  - 状态编码器、动作编码器、动作解码器画成 32 槽的抽屉。
-  - 高亮第 24 槽 `behavior_r1_pro`，其余槽淡显。
-  - 这是本页独有的看点，而且正好是我们的机器人。
-- **AdaLN**：每块侧面一个小 γβ（scale/shift）读数，来自 temb；4 步之间这些值随 t 变化。
+- 全部块按 llm-viz 惯例画成**竖墙**：token 沿 x，通道沿 y，z 一格厚；显示窗口 16（堆叠）/ 32（单板）/ 64（解剖）通道，标注于 G0。
+- 主干与 DiT **串联**；DiT 左侧两根 K/V 竖条（文本 24 / 图像 192），交叉块从对应竖条取 K/V（粉 = 文本、紫 = 图像），自注意力块无外连。
+- slot 23 = `sim_behavior_r1_pro`：编解码权重是**未训练的初始化值**，场景和文案标 toy；DiT/主干为真权重真激活。
+- 右侧两块解剖板：D0（交叉注意力）和 D1（自注意力），逐件画 AdaLN → 注意力 → 残差 → LN → GELU FF → 残差。
 
-### 6.2 章组
+### 6.2 章组（实现版）
 
 | 章 | 内容 | 真值 |
 |---|---|---|
-| G0 总览 | 串联拓扑、VL 总线、32 块节律、4 步回路 | 层数、宽度、截断位置 |
-| G1 System 2：Eagle 主干 | 图像 → SigLIP2 → pixel-shuffle → mlp1；文本嵌入；Qwen3 16 层逐层穿行；截断虚影；vlln | 真 patch 窗口、每层残差范数 |
-| G2 embodiment 抽屉 | 32 槽编码器和解码器，选中 24 = behavior_r1_pro；state 编码 | 真 W 槽切片 |
-| G3 动作 token | W1(a) ‖ sincos(τ) → W2 → swish → W3 → +pos | 真 τ 编码向量 |
-| G4 DiT 块解剖（交叉块） | AdaLN（temb → scale/shift，作用于 LN 后）→ 交叉注意力（Q 来自 sa，K/V 来自总线）→ 残差 → AdaLN/LN → GELU FF → 残差 | 块 0 真激活、真 scale/shift |
-| G5 自注意力块与交替节律 | 块 1 自注意力；块 0/2/4… 文本/图像交替；32 块逐块穿行 | 每块注意力在文本段与图像段上的质量 |
-| G6 4 步流匹配 | 噪声 → 4 次 DiT 穿行（t_disc = 0, 250, 500, 750）→ `a += ¼·v` → 动作块；**标出时间方向与 π0/k005b 相反** | 每步真 x_t、v |
-| G7 对照 | §7 | — |
+| G0 全貌 | 墙的约定、显示窗口、串联拓扑 | 层数、宽度 |
+| G1 三路相机 + 指令 = 216 token | 视觉塔 → merger；文本嵌入 | 真 patch / token 激活 |
+| G2 16 层 LM 与 VL 头 | LM 逐层穿行，L0/L15 头均值注意力图；VL 头 | 每层激活、注意力 |
+| G3 本体适配器（slot 23） | state 61 → 隐层 → 状态 token（toy 标注） | 真槽切片 |
+| G4 动作 token 与时间嵌入 | W1(a) ‖ tau → W2 → swish → W3 → +pos；Timesteps(256) → temb | temb 范数 |
+| G5 D0 解剖：交叉注意力 | AdaLN → cross-attn（K/V = 文本）→ FF | scale/shift 真值 |
+| G6 D1 解剖：自注意力 | 41 token 内部自注意力 | 真激活 |
+| G7 32 块交替堆叠 | 文/自/图/自 ×8；图像块在三相机上的注意力份额 | 份额、平均 token 范数 |
+| G8 4 步 Euler 去噪 | 4 次 DiT 穿行，轨迹带逐格出现；时间方向与 π0/k005b 相反 | 每步 x_t、v、|v| |
+| G9 三个模型对照 | §7 | — |
 
 ### 6.3 数据：`tools/export_groot.py`
 

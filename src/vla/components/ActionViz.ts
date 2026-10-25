@@ -3,7 +3,7 @@
 //    block, brightness = the real share of suffix attention that lands on the prefix
 //  - the 16 × 23 action chunk as a bar field (bar height = real normalized value), with
 //    the one-step Euler decode animated: x(τ) = x1 − τ·v, τ: 0 → 1 (t = 1 → 0)
-import { IProgramState } from "../Program";
+import { IProgramState, vlaLayout } from "../Program";
 import { IVlaModelLayout } from "../VlaModelLayout";
 import { IVlaModelLink } from "../VlaModel";
 import { addLine } from "../render/lineRender";
@@ -63,7 +63,7 @@ function groupColorOf(d: number) {
 }
 
 export function drawActionViz(state: IProgramState, isVisible?: (cubes: IBlkDef[]) => boolean) {
-    let layout = state.layout;
+    let layout = vlaLayout(state);
     let m = state.vlaModel;
     if (!layout || !m || !state.render) return;
     let viz = state.display.actionViz ?? defaultActionViz();

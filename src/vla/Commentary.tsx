@@ -40,11 +40,21 @@ export function jumpPhase(wt: IWalkthrough, phaseDelta: number) {
         wt.phase = group.phases[newPhaseGroupIdx].id;
     }
 
-    console.log(`new phase is ${Phase[wt.phase]}`);
-
     wt.time = 0;
     wt.running = false;
 }
+
+// chapter directory for pages without a hand-drawn TocDiagram: one row per group, one link per phase
+const PhaseListToc: React.FC<{ wt: IWalkthrough }> = ({ wt }) => {
+    return <div className="px-4 py-2 text-sm leading-6">
+        {wt.phaseList.map(g => <div key={g.groupId} className="flex flex-wrap items-baseline gap-x-3">
+            <span className="text-slate-400 mr-1">{g.title}</span>
+            {g.phases.map(p => <span key={p.id}
+                className={clsx("cursor-pointer hover:underline", p.id === wt.phase ? "text-sky-300 font-semibold" : "text-slate-200")}
+                onClick={() => jumpToPhase(wt, p.id)}>{p.title}</span>)}
+        </div>)}
+    </div>;
+};
 
 export const Commentary: React.FC = () => {
     let progState = useProgramState();
@@ -264,10 +274,17 @@ export const Commentary: React.FC = () => {
         </div>
         <div className={s.walkthroughViewport}>
             <div className={s.walkthroughText} tabIndex={0} onKeyDownCapture={handleKeyDown}>
-                <div className={s.tocBackground}>
-                    <TocDiagram activePhase={phase.id} />
-                </div>
-                <div className={s.divider} />
+                {/* the diagram's entries are the /vla chapters */}
+                {progState.page.id === 'vla' && <>
+                    <div className={s.tocBackground}>
+                        <TocDiagram activePhase={phase.id} />
+                    </div>
+                    <div className={s.divider} />
+                </>}
+                {progState.page.id !== 'vla' && <>
+                    <PhaseListToc wt={wt} />
+                    <div className={s.divider} />
+                </>}
                 <div className={s.walkthroughParas} ref={setParasEl}>
                     {walkthroughToParagraphs(wt, nodes)}
                     <SectionHighlight key={nextBreak} top={rangeInfo.start} height={rangeInfo.end - rangeInfo.start} width={rangeInfo.width} />

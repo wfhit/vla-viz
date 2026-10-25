@@ -8,6 +8,7 @@ import { DimStyle } from "./walkthrough/WalkthroughTools";
 
 export interface IBlkDef {
     idx: number; // index in the layout.cubes array
+    noTag?: boolean; // no name tag above the block (the page labels it another way)
     t: 'w' | 'i' | 'a', // weights; intermediate value; aggregate (just LN & softmax)
     x: number;
     y: number;
@@ -134,7 +135,7 @@ export interface IBlkAccess {
     disable?: boolean;
 }
 
-interface IBlkAccessDefArgs {
+export interface IBlkAccessDefArgs {
     src?: IBufferTex;
     channel?: 'r' | 'g' | 'b';
     scale?: number;
@@ -145,7 +146,7 @@ interface IBlkAccessDefArgs {
     y: number[];
 }
 
-interface IBlkDefArgs {
+export interface IBlkDefArgs {
     t: 'w' | 'i' | 'a', // weights; intermediate value
     xL?: number; // pos of Left edge
     xR?: number; // Right
@@ -168,7 +169,7 @@ interface IBlkDefArgs {
     transpose?: boolean;
 }
 
-interface IBlkLabel {
+export interface IBlkLabel {
     visible: number;
     cubes: IBlkDef[];
 }
@@ -178,6 +179,11 @@ export interface IModelLayout {
     height: number;
     margin: number;
     cubes: IBlkDef[];
+}
+
+// what the page-independent code (render, hover, labels) needs from any page's scene layout
+export interface ISceneLayout extends IModelLayout {
+    labels: IBlkLabel[];
 }
 
 export function cellPosition(layout: IModelLayout, blk: IBlkDef, dim: Dim, index: number) {
@@ -192,6 +198,51 @@ export function cellPosition(layout: IModelLayout, blk: IBlkDef, dim: Dim, index
         }
     }
     return base;
+}
+
+export function makeBlk(args: IBlkDefArgs, cell: number, offset: Vec3 = new Vec3()): IBlkDef {
+    let xDef = [args.xL, args.xR, args.xM].map(a => +!isNil(a)).reduce((a, b) => a + b, 0);
+    let yDef = [args.zF, args.zB, args.zM].map(a => +!isNil(a)).reduce((a, b) => a + b, 0);
+    if (xDef !== 1 || yDef !== 1) {
+        throw new Error(`Must supply exactly 1 x arg & 1 y arg: ${JSON.stringify(args)}`);
+    }
+    let dx = args.cx * cell;
+    let dy = args.cz * cell;
+    let x = !isNil(args.xL) ? args.xL : !isNil(args.xR) ? args.xR - dx : args.xM! - dx / 2;
+    let z = !isNil(args.zB) ? args.zB : !isNil(args.zF) ? args.zF - dy : args.zM! - dy / 2;
+
+    function ensure4(a: number[]) {
+        return a.length >= 4 ? a.slice(0, 4) : [...a, 0, 0, 0, 0].slice(0, 4);
+    }
+
+    return {
+        dx: args.cx * cell,
+        dy: args.cy * cell,
+        dz: args.cz * cell,
+        t: args.t,
+        x: x + offset.x,
+        y: args.y + offset.y,
+        z: z + offset.z,
+        cx: args.cx,
+        cy: args.cy,
+        cz: args.cz,
+        dimX: args.dimX,
+        dimY: args.dimY,
+        name: args.name ?? "<unknown>",
+        access: args.access?.src ? {
+            channel: args.access.channel ?? 'r',
+            src: args.access.src,
+            scale: args.access.scale ?? 1.0,
+            mat: Mat4f.fromColMajor([...ensure4(args.access.x), ...ensure4(args.access.y), 0, 0, 0, 0, 0, 0, 0, 0]),
+        } : undefined,
+        deps: args.deps ? depArgsToDeps(args.deps) : undefined,
+        opacity: args.hidden ? 0.0 : 1.0,
+        highlight: 0.0,
+        small: args.small ?? false,
+        special: args.special ?? BlkSpecial.None,
+        transpose: args.transpose,
+        idx: -1,
+    };
 }
 
 export type IVlaModelLayout = ReturnType<typeof genVlaModelLayout>;
@@ -218,48 +269,7 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
     }
 
     function mk(args: IBlkDefArgs): IBlkDef {
-        let xDef = [args.xL, args.xR, args.xM].map(a => +!isNil(a)).reduce((a, b) => a + b, 0);
-        let yDef = [args.zF, args.zB, args.zM].map(a => +!isNil(a)).reduce((a, b) => a + b, 0);
-        if (xDef !== 1 || yDef !== 1) {
-            throw new Error(`Must supply exactly 1 x arg & 1 y arg: ${JSON.stringify(args)}`);
-        }
-        let dx = args.cx * cell;
-        let dy = args.cz * cell;
-        let x = !isNil(args.xL) ? args.xL : !isNil(args.xR) ? args.xR - dx : args.xM! - dx / 2;
-        let z = !isNil(args.zB) ? args.zB : !isNil(args.zF) ? args.zF - dy : args.zM! - dy / 2;
-
-        function ensure4(a: number[]) {
-            return a.length >= 4 ? a.slice(0, 4) : [...a, 0, 0, 0, 0].slice(0, 4);
-        }
-
-        return {
-            dx: args.cx * cell,
-            dy: args.cy * cell,
-            dz: args.cz * cell,
-            t: args.t,
-            x: x + offset.x,
-            y: args.y + offset.y,
-            z: z + offset.z,
-            cx: args.cx,
-            cy: args.cy,
-            cz: args.cz,
-            dimX: args.dimX,
-            dimY: args.dimY,
-            name: args.name ?? "<unknown>",
-            access: args.access?.src ? {
-                channel: args.access.channel ?? 'r',
-                src: args.access.src,
-                scale: args.access.scale ?? 1.0,
-                mat: Mat4f.fromColMajor([...ensure4(args.access.x), ...ensure4(args.access.y), 0, 0, 0, 0, 0, 0, 0, 0]),
-            } : undefined,
-            deps: args.deps ? depArgsToDeps(args.deps) : undefined,
-            opacity: args.hidden ? 0.0 : 1.0,
-            highlight: 0.0,
-            small: args.small ?? false,
-            special: args.special ?? BlkSpecial.None,
-            transpose: args.transpose,
-            idx: -1,
-        };
+        return makeBlk(args, cell, offset);
     }
 
     function mkLabel(cubes?: IBlkDef[]): IBlkLabel {

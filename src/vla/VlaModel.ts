@@ -263,7 +263,7 @@ export interface IK005bData {
     acts: Record<string, ITensorEntry>;
 }
 
-async function fetchTensorFile(url: string) {
+export async function fetchTensorFile<C = IK005bConfig>(url: string) {
     let resp = await fetch(url);
     if (!resp.ok) {
         throw new Error(`failed to fetch ${url}: ${resp.status}`);
@@ -288,7 +288,7 @@ async function fetchTensorFile(url: string) {
             desc: e.desc,
         };
     }
-    return { config: json.config as IK005bConfig, tensors: out };
+    return { config: json.config as C, tensors: out };
 }
 
 function halfToFloat(h: number) {
@@ -298,7 +298,7 @@ function halfToFloat(h: number) {
     return s * Math.pow(2, e - 15) * (1 + f / 1024);
 }
 
-function decodeF16(b64: string) {
+export function decodeF16(b64: string) {
     let u16 = new Uint16Array(base64ToArrayBuffer(b64));
     let out = new Float32Array(u16.length);
     for (let i = 0; i < u16.length; i++) out[i] = halfToFloat(u16[i]);
@@ -306,6 +306,16 @@ function decodeF16(b64: string) {
 }
 
 // the per-Euler-step capture (tools/export_k005b.py export_flow_matching), whole small tensors
+// one float16 whole-tensor entry of a per-step capture (`ent16` in the exporters) → texture.
+// `full_shape` / `offset` are present when the entry is a window of a larger tensor.
+export function texFromF16Entry(gl: WebGL2RenderingContext, name: string, e: any): IRealTex {
+    if (e.dtype !== 'torch.float16') throw new Error(`${name}: unsupported dtype ${e.dtype}`);
+    return makeTex(gl, {
+        name, shape: e.shape, data: decodeF16(e.data),
+        fullShape: e.full_shape ?? e.shape, offset: e.offset ?? e.shape.map(() => 0), stats: e.stats, desc: e.desc,
+    });
+}
+
 export async function fetchK005bFm(gl: WebGL2RenderingContext): Promise<IFmStepsLink> {
     let resp = await fetch('k005b-fm.json');
     if (!resp.ok) throw new Error(`failed to fetch k005b-fm.json: ${resp.status}`);
@@ -313,14 +323,7 @@ export async function fetchK005bFm(gl: WebGL2RenderingContext): Promise<IFmSteps
     let steps: IFmStep[] = [];
     for (let st of json.steps) {
         let tex: Record<string, IRealTex> = {};
-        for (let k in st.tensors) {
-            let e = st.tensors[k];
-            if (e.dtype !== 'torch.float16') throw new Error(`fm ${k}: unsupported dtype ${e.dtype}`);
-            tex[k] = makeTex(gl, {
-                name: `${k} @t=${(+st.t).toFixed(1)}`, shape: e.shape, data: decodeF16(e.data),
-                fullShape: e.shape, offset: e.shape.map(() => 0), stats: e.stats, desc: e.desc,
-            });
-        }
+        for (let k in st.tensors) tex[k] = texFromF16Entry(gl, `${k} @t=${(+st.t).toFixed(1)}`, st.tensors[k]);
         steps.push({ t: st.t, tex });
     }
     return { K: json.K, checkpointStep: json.checkpoint_step, inDistribution: !!json.in_distribution, steps };
@@ -364,7 +367,7 @@ function windowAbsScale(data: Float32Array) {
     return p95 > 0 ? 1 / p95 : 1;
 }
 
-function makeTex(gl: WebGL2RenderingContext, e: ITensorEntry, sub?: number): IRealTex {
+export function makeTex(gl: WebGL2RenderingContext, e: ITensorEntry, sub?: number): IRealTex {
     // ND window → 2D texture. A leading [head] axis is split off via `sub`.
     let shape = e.shape;
     let off = e.offset;

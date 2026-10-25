@@ -1,7 +1,6 @@
 'use client';
 
 import { useContext, useEffect, useLayoutEffect, useState } from 'react';
-import { createK005bGpuModel, fetchK005bData, fetchK005bFm, IK005bData, shapeFromConfig } from './VlaModel';
 import s from './LayerView.module.scss';
 import { IRenderState, IRenderView } from './render/modelRender';
 import { fetchFontAtlasData, IFontAtlasData } from './render/fontRender';
@@ -16,10 +15,11 @@ import { Resizer } from '../utils/Resizer';
 import { ModelSelectorToolbar } from './components/ModelSelectorToolbar';
 import { PlayBar } from './components/PlayBar';
 import { HeadsOverlay } from './components/HeadsOverlay';
+import { IPageSpec, PageId } from './PageSpec';
+import { getPageSpec } from './pages';
 
-export function LayerView() {
+export function LayerView({ pageId = 'vla' }: { pageId?: PageId }) {
     let [canvasEl, setCanvasEl] = useState<HTMLCanvasElement | null>(null);
-    let [dataAndModel, setDataAndModel] = useState<IK005bData | null>(null);
     let [canvasRender, setCanvasRender] = useState<CanvasRender | null>(null);
     let [fontAtlasData, setFontAtlasData] = useState<IFontAtlasData | null>(null);
     let layout = useScreenLayout();
@@ -60,19 +60,6 @@ export function LayerView() {
     useEffect(() => {
         let stale = false;
         async function getData() {
-            let data = await fetchK005bData();
-            if (stale) return;
-            setDataAndModel(data);
-        }
-
-        getData();
-
-        return () => { stale = true; };
-    }, []);
-
-    useEffect(() => {
-        let stale = false;
-        async function getData() {
             let data = await fetchFontAtlasData();
             if (stale) return;
             setFontAtlasData(data);
@@ -85,7 +72,7 @@ export function LayerView() {
 
     useEffect(() => {
         if (canvasEl && fontAtlasData) {
-            let canvasRenderLocal = new CanvasRender(canvasEl, null!, fontAtlasData);
+            let canvasRenderLocal = new CanvasRender(canvasEl, fontAtlasData, getPageSpec(pageId));
             let resizeObserver = new ResizeObserver(() => {
                 canvasRenderLocal.canvasSizeDirty = true;
                 canvasRenderLocal.markDirty();
@@ -102,11 +89,7 @@ export function LayerView() {
         } else {
             setCanvasRender(null);
         }
-    }, [canvasEl, fontAtlasData]);
-
-    useEffect(() => {
-        canvasRender?.setData({ dataAndModel });
-    }, [canvasRender, dataAndModel]);
+    }, [canvasEl, fontAtlasData, pageId]);
 
     useLayoutEffect(() => {
         if (canvasRender) {
@@ -132,8 +115,8 @@ export function LayerView() {
         </div>}
         {canvasRender && <ProgramStateContext.Provider value={canvasRender.progState}>
             <CanvasEventSurface />
-            <ModelSelectorToolbar />
-            <HeadsOverlay />
+            {pageId === 'vla' && <ModelSelectorToolbar />}
+            {pageId === 'vla' && <HeadsOverlay />}
             <PlayBar />
         </ProgramStateContext.Provider>}
     </div>;
@@ -147,43 +130,27 @@ export function LayerView() {
     </div>;
 }
 
-interface ICanvasData {
-    dataAndModel: IK005bData | null;
-}
-
 class CanvasRender {
     renderState: IRenderState;
     progState: IProgramState;
     stopped = false;
     canvasSizeDirty = true;
 
-    constructor(canvasEl: HTMLCanvasElement, private canvasData: ICanvasData, fontAtlasData: IFontAtlasData) {
-        this.progState = initProgramState(canvasEl, fontAtlasData);
+    constructor(canvasEl: HTMLCanvasElement, fontAtlasData: IFontAtlasData, page: IPageSpec) {
+        this.progState = initProgramState(canvasEl, fontAtlasData, page);
         this.progState.markDirty = this.markDirty;
         this.progState.walkthrough.markDirty = this.markDirty;
         this.renderState = this.progState.render;
+        if (this.progState.render) {
+            page.loadData(this.progState)
+                .catch(e => console.error(`${page.id} data`, e))
+                .finally(() => this.markDirty());
+        }
+        this.markDirty();
     }
 
     destroy() {
         this.stopped = true;
-    }
-
-    setData(data: ICanvasData) {
-        this.canvasData = data;
-
-        if (data.dataAndModel && !this.progState.vlaModel && this.progState.render) {
-            let model = createK005bGpuModel(this.renderState.gl, data.dataAndModel);
-            this.progState.vlaModel = model;
-            this.progState.shape = shapeFromConfig(model.config);
-            this.progState.mainExample.shape = this.progState.shape;
-            (window as any).__k005b = model;
-            // the per-Euler-step capture is only needed by the DiT decode chapter: load it after
-            fetchK005bFm(this.renderState.gl).then(fs => {
-                model.fmSteps = fs;
-                this.markDirty();
-            }).catch(e => console.error('k005b-fm.json', e));
-        }
-        this.markDirty();
     }
 
     prevTime: number = performance.now();
@@ -192,7 +159,7 @@ class CanvasRender {
     isWaitingForSync = false;
 
     markDirty = () => {
-        if (!this.canvasData || this.stopped) {
+        if (this.stopped) {
             return;
         }
 

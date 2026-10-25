@@ -1,5 +1,6 @@
 import React from 'react';
 import { useProgramState } from '../Sidebar';
+import { vlaLayout } from '../Program';
 import clsx from 'clsx';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faExpand, faMagnifyingGlass } from '@fortawesome/free-solid-svg-icons';
@@ -39,7 +40,7 @@ export const ModelSelectorToolbar: React.FC<{
 
     function onMagnifyClick() {
         let example = progState.examples[progState.currExampleId] ?? progState.mainExample;
-        let layout = example.layout ?? progState.layout;
+        let layout = example.layout ?? vlaLayout(progState);
 
         // new Vec3(3.347, 48.000, -2.634), new Vec3(270.000, 4.500, 1.199)
 

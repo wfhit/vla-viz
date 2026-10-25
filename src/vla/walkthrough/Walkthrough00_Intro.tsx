@@ -8,7 +8,7 @@ import { useProgramState } from "../Sidebar";
 import { dimProps, findSubBlocks, splitGrid } from "../Annotations";
 import { useGlobalDrag } from "@/src/utils/pointer";
 import { IBlkDef } from "../VlaModelLayout";
-import { IProgramState } from "../Program";
+import { IProgramState, vlaLayout } from "../Program";
 import { lerp } from "@/src/utils/math";
 import { drawDependences } from "../Interaction";
 import { drawDataFlow } from "../components/DataFlow";
@@ -282,7 +282,7 @@ export function processUpTo(state: IProgramState, timer: ITimeInfo, block: IBlkD
     let blockPos = new Vec3().withSetAt(dim0, horizIdx).withSetAt(dim1, vertIdx); // new Vec3(horizIdx, vertIdx, 0);
     let pinPos = new Vec3(Math.floor(cx / 2), 0, 0);
 
-    if (blk === state.layout.residual0) {
+    if (blk === vlaLayout(state).residual0) {
         pinPos = new Vec3(cx * 2, -2, 0);
     }
 

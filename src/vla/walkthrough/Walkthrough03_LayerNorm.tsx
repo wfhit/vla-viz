@@ -23,7 +23,7 @@ export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
 
     commentary(wt, null, 0)`
 
-上一节得到的${c_blockRef('_输入嵌入_', state.layout.residual0)}矩阵是 Qwen3-VL 第一个 transformer 层（L0）的输入（共 28 层，这里展开其中一层）。
+上一节得到的${c_blockRef('_输入嵌入_', layout.residual0)}矩阵是 Qwen3-VL 第一个 transformer 层（L0）的输入（共 28 层，这里展开其中一层）。
 
 层内第一步是 _RMSNorm_：对矩阵的每一列分别做归一化。图中数值均为 L0 input_layernorm 的真实值。`;
     breakAfter();

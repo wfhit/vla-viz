@@ -298,13 +298,13 @@ export const Colors = {
 }
 
 export interface IPhaseGroup {
-    groupId: PhaseGroup;
+    groupId: number;
     title: string;
     phases: IPhaseDef[];
 }
 
 export interface IPhaseDef {
-    id: Phase;
+    id: number;
     title: string;
 }
 

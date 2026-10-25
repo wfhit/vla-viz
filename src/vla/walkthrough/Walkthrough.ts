@@ -1,6 +1,7 @@
 import { ICameraPos } from "../Camera";
 import { IBlkDef } from "../VlaModelLayout";
-import { IProgramState } from "../Program";
+import { IProgramState, vlaLayout } from "../Program";
+import { IPageSpec } from "../PageSpec";
 import { IRenderView } from "../render/modelRender";
 import { SavedState } from "../SavedState";
 import { ICommentary, IPhaseGroup, ITimeInfo, IWalkthroughArgs, phaseTools } from "./WalkthroughTools";
@@ -62,14 +63,16 @@ Thoughts about the walkthrough:
 
 export type IWalkthrough = ReturnType<typeof initWalkthrough>;
 
-export function initWalkthrough() {
+export function initWalkthrough(page: IPageSpec) {
+    let saved = SavedState.state?.page === page.id ? SavedState.state : null;
+    let known = page.phaseList.some(g => g.phases.some(p => p.id === saved?.phase));
     return {
-        phase: SavedState.state?.phase ?? Phase.Intro_Intro,
-        time: SavedState.state?.phaseTime ?? 0,
+        phase: known ? saved!.phase : page.firstPhase,
+        time: known ? saved!.phaseTime : 0,
         viewDt: 0,
         dt: 0,
         prevTime: 0,
-        prevPhase: Phase.None,
+        prevPhase: Phase.None as number,
         running: false,
         speed: 1,
         cameraInitial: null as ICameraPos | null,
@@ -77,50 +80,9 @@ export function initWalkthrough() {
         phaseLength: 0,
         dimHighlightBlocks: null as IBlkDef[] | null,
         markDirty: () => { }, // bit of a hack to get it to WalkthroughSidebar
-        phaseData: new Map<Phase, any>(),
+        phaseData: new Map<number, any>(),
         phaseTransitiveData: null as any,
-        phaseList: [{
-            groupId: PhaseGroup.Intro,
-            title: '概览',
-            phases: [
-                { id: Phase.Intro_Intro, title: '总览' },
-                { id: Phase.Intro_Prelim, title: '预备知识' },
-            ],
-        }, {
-            groupId: PhaseGroup.Detailed_Input,
-            title: '主干：一层展开',
-            phases: [
-                { id: Phase.Input_Detail_Embedding, title: '输入嵌入' },
-                { id: Phase.Input_Detail_LayerNorm, title: 'RMSNorm' },
-                { id: Phase.Input_Detail_SelfAttention, title: 'GQA 联合注意力' },
-                { id: Phase.Input_Detail_Softmax, title: '前缀 Softmax' },
-                { id: Phase.Input_Detail_Projection, title: '输出投影与残差' },
-                { id: Phase.Input_Detail_Mlp, title: 'MLP (SwiGLU)' },
-                { id: Phase.Input_Detail_Transformer, title: '28 层主干堆叠' },
-                { id: Phase.Input_Detail_Output, title: 'h* 答案边界读出' },
-            ],
-        }, {
-            groupId: PhaseGroup.Heads,
-            title: '输出头',
-            phases: [
-                { id: Phase.Head_Knack, title: 'knack 分类头' },
-                { id: Phase.Head_Done, title: 'done 头' },
-                { id: Phase.Harness_Law, title: 'Harness 法则' },
-            ],
-        }, {
-            groupId: PhaseGroup.FlowMatching,
-            title: 'DiT 动作专家与流匹配',
-            phases: [
-                { id: Phase.D0_TwoTransformers, title: 'D0 两个 Transformer' },
-                { id: Phase.D1_DitBlock, title: 'D1 DiT 块解剖' },
-                { id: Phase.D2_Concat, title: 'D2 拼接成一条序列' },
-                { id: Phase.D3_JointAttn, title: 'D3 联合注意力 = 耦合' },
-                { id: Phase.D4_Forward, title: 'D4 一次前向穿过 28 层' },
-                { id: Phase.D5_PrefixCache, title: 'D5 前缀只算一次' },
-                { id: Phase.D6_Decode, title: 'D6 10 次 DiT 穿行' },
-                { id: Phase.D7_ActionChunk, title: 'D7 动作块' },
-            ],
-        }] as IPhaseGroup[],
+        phaseList: page.phaseList,
     };
 }
 
@@ -157,12 +119,58 @@ export enum Phase {
     D7_ActionChunk,
 }
 
+export const vlaPhaseList: IPhaseGroup[] = [{
+    groupId: PhaseGroup.Intro,
+    title: '概览',
+    phases: [
+        { id: Phase.Intro_Intro, title: '总览' },
+        { id: Phase.Intro_Prelim, title: '预备知识' },
+    ],
+}, {
+    groupId: PhaseGroup.Detailed_Input,
+    title: '主干：一层展开',
+    phases: [
+        { id: Phase.Input_Detail_Embedding, title: '输入嵌入' },
+        { id: Phase.Input_Detail_LayerNorm, title: 'RMSNorm' },
+        { id: Phase.Input_Detail_SelfAttention, title: 'GQA 联合注意力' },
+        { id: Phase.Input_Detail_Softmax, title: '前缀 Softmax' },
+        { id: Phase.Input_Detail_Projection, title: '输出投影与残差' },
+        { id: Phase.Input_Detail_Mlp, title: 'MLP (SwiGLU)' },
+        { id: Phase.Input_Detail_Transformer, title: '28 层主干堆叠' },
+        { id: Phase.Input_Detail_Output, title: 'h* 答案边界读出' },
+    ],
+}, {
+    groupId: PhaseGroup.Heads,
+    title: '输出头',
+    phases: [
+        { id: Phase.Head_Knack, title: 'knack 分类头' },
+        { id: Phase.Head_Done, title: 'done 头' },
+        { id: Phase.Harness_Law, title: 'Harness 法则' },
+    ],
+}, {
+    groupId: PhaseGroup.FlowMatching,
+    title: 'DiT 动作专家与流匹配',
+    phases: [
+        { id: Phase.D0_TwoTransformers, title: 'D0 两个 Transformer' },
+        { id: Phase.D1_DitBlock, title: 'D1 DiT 块解剖' },
+        { id: Phase.D2_Concat, title: 'D2 拼接成一条序列' },
+        { id: Phase.D3_JointAttn, title: 'D3 联合注意力 = 耦合' },
+        { id: Phase.D4_Forward, title: 'D4 一次前向穿过 28 层' },
+        { id: Phase.D5_PrefixCache, title: 'D5 前缀只算一次' },
+        { id: Phase.D6_Decode, title: 'D6 10 次 DiT 穿行' },
+        { id: Phase.D7_ActionChunk, title: 'D7 动作块' },
+    ],
+}];
+
+
 export function phaseToGroup(wt: IWalkthrough) {
     return wt.phaseList.find(g => g.phases.find(p => p.id === wt.phase))!;
 }
 
 
-export function runWalkthrough(state: IProgramState, view: IRenderView) {
+// the page-independent part of a walkthrough frame: advance the clock, persist the position,
+// reset the per-frame event list
+export function stepWalkthrough(state: IProgramState, view: IRenderView) {
     let wt = state.walkthrough;
     wt.viewDt = view.dt;
 
@@ -179,7 +187,7 @@ export function runWalkthrough(state: IProgramState, view: IRenderView) {
         view.markDirty();
     }
 
-    SavedState.state = { phase: wt.phase, phaseTime: wt.time, camera: state.camera };
+    SavedState.state = { page: state.page.id, phase: wt.phase, phaseTime: wt.time, camera: state.camera };
 
     if (wt.prevPhase !== wt.phase) {
         wt.phaseTransitiveData = null;
@@ -189,13 +197,24 @@ export function runWalkthrough(state: IProgramState, view: IRenderView) {
     wt.times = [];
     wt.phaseLength = 0;
     wt.dimHighlightBlocks = null;
+}
 
-    let wtArgs: IWalkthroughArgs = { state, layout: state.layout, tools: phaseTools(state), walkthrough: wt };
+export function endWalkthroughFrame(wt: IWalkthrough) {
+    wt.prevPhase = wt.phase;
+    wt.prevTime = wt.time;
+}
+
+export function runWalkthrough(state: IProgramState, view: IRenderView) {
+    let wt = state.walkthrough;
+    stepWalkthrough(state, view);
+    let layout = vlaLayout(state);
+
+    let wtArgs: IWalkthroughArgs = { state, layout, tools: phaseTools(state), walkthrough: wt };
 
     let groupId = phaseToGroup(wt).groupId;
     // the single-layer trunk chapters explain one mechanism: the DiT tails appear from D0 on
-    if (groupId === PhaseGroup.Detailed_Input && state.layout) {
-        for (let c of state.layout.ditCubes) c.opacity = 0;
+    if (groupId === PhaseGroup.Detailed_Input) {
+        for (let c of layout.ditCubes) c.opacity = 0;
     }
     if (groupId === PhaseGroup.Intro) {
         walkthroughIntro(wtArgs);
@@ -215,6 +234,5 @@ export function runWalkthrough(state: IProgramState, view: IRenderView) {
         walkthrough11_FlowMatching(wtArgs);
     }
 
-    wt.prevPhase = wt.phase;
-    wt.prevTime = wt.time;
+    endWalkthroughFrame(wt);
 }

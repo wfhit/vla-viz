@@ -2,7 +2,7 @@ import { dimProps, TextAlignHoriz } from "../Annotations";
 import { BlKDepSpecial, cellPosition, IBlkCellDep, IBlkDef } from "../VlaModelLayout";
 import { getDepDotLen, getDepSrcIdx } from "../Interaction";
 import { embedColForToken, IRealTex, texelToRealIndex } from "../VlaModel";
-import { IProgramState } from "../Program";
+import { IProgramState, vlaLayout } from "../Program";
 import { drawText, IFontOpts, measureText } from "../render/fontRender";
 import { addLine2, drawLineSegs, makeLineOpts } from "../render/lineRender";
 import { IRenderState } from "../render/modelRender";
@@ -209,10 +209,10 @@ export function formatRealValue(v: number) {
 
 function drawOLIndexLookup(args: IDataFlowArgs, offset: Vec3) {
     let { state, destIdx, mtx } = args;
-    let model = state.layout.model;
+    let model = vlaLayout(state).model;
     let col = model ? embedColForToken(model, destIdx.x) : -1;
-    let tokenPct = col >= 0 ? col / (state.layout.tokEmbedObj.cx - 1) : 0.5;
-    let heightPct = destIdx.y / (state.layout.residual0.cy - 1);
+    let tokenPct = col >= 0 ? col / (vlaLayout(state).tokEmbedObj.cx - 1) : 0.5;
+    let heightPct = destIdx.y / (vlaLayout(state).residual0.cy - 1);
 
     let color = Colors.Weights;
 
@@ -711,8 +711,8 @@ function drawDepArrows(args: IDataFlowArgs, bb: BoundingBox3d) {
             srcIdx.setAt(otherDim, (dotLen ?? cx) / 2);
         }
 
-        if (blk.deps?.special === BlKDepSpecial.InputEmbed && dep.src === args.state.layout.tokEmbedObj) {
-            let tokenIdx = getBlockValueAtIdx(state.layout.idxObj, new Vec3(destIdx.x, 0, destIdx.z));
+        if (blk.deps?.special === BlKDepSpecial.InputEmbed && dep.src === vlaLayout(args.state).tokEmbedObj) {
+            let tokenIdx = getBlockValueAtIdx(vlaLayout(state).idxObj, new Vec3(destIdx.x, 0, destIdx.z));
             srcIdx.setAt(Dim.X, tokenIdx ?? 0);
         }
 
