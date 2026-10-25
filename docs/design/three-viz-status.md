@@ -11,8 +11,8 @@ fabricated mappings. No toy data. No popups/overlays — in-scene walkthrough st
 | Page | Model | Weights (local) | Status |
 |---|---|---|---|
 | `/vla` | k005b dual-head VLA | `outputs/k005b-task0-v3/checkpoints` (step_150000) | DONE + verified |
-| `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`) | DONE (self-tested, awaiting Hermes acceptance) |
-| `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | DONE (self-tested, awaiting Hermes acceptance) |
+| `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`) | DONE (self-tested; `window.__arrowAudit` (same `auditEdges` as /groot): 261 edges, noIn/noOut empty on P0-P8; awaiting Hermes acceptance) |
+| `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | DONE + ACCEPTED (Hermes, 2026-10-25) |
 
 Input frames for ALL pages: local BEHAVIOR dataset
 `~/workspace/behavior_challenge_data/dataset/{behavior-1k-knack, 2026-challenge-demos}`.
@@ -46,9 +46,24 @@ Input frames for ALL pages: local BEHAVIOR dataset
 3. Hermes acceptance per page: value spot-check vs weights, step-through screenshots,
    no orphan arrows, no popups. Fail -> back to Opus.
 4. Homepage: three cards -> `/vla` `/pi0` `/groot`. Final report to Frank.
-5. SEPARATE TRACK (awaits Frank's go): restart k005b 10-step training from step_158500
-   (`--flow-steps 1 --fresh-optimizer`); when step_160000 stamps, re-export `/vla`
-   activations so its Euler animation shows REAL 10-step values.
+5. SEPARATE TRACK (training): 10-step flow restart RAN overnight from step_150000
+   (--flow-steps 1 regression mode, fresh optimizer), reached step 158500 healthy
+   (action 0.539); **Frank PAUSED it at 10:25 Oct 25** — do not relaunch without his go.
+   Resume point when he does: checkpoint step_150000 (158500 was not a save point).
+   When step_160000 stamps, re-export `/vla` activations so its Euler animation shows
+   REAL 10-step values.
+
+## Current reasoning (rewritten each sentinel run)
+
+2026-10-25 19:00 — The only important thing now is FINISHING: `/pi0` is the last page
+(Opus mid-polish: panel framing/label fixes, re-shooting chapters), then acceptance,
+homepage, report. Two deviations found and fixed this run: (1) this doc's step 5 still
+said "awaits Frank's go" while training had actually run and been paused by Frank —
+rewritten above; (2) `/groot` acceptance was sitting idle even though it is the
+checker's (Hermes) job and independent of Opus — running it this run. cc10step tmux
+session is idle-but-done (its bug fix 20b39c2 is merged; training now paused by Frank
+anyway) — left in place, no live task. Working set rule: keep Opus on /pi0 until
+self-test clean, do NOT interleave new asks.
 
 ## Standing rules (Frank)
 
