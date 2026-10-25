@@ -1,6 +1,12 @@
 # 三套 VLA 可视化总体方案：/groot · /pi0 · /vla
 
-> 状态：**待 Frank 审**。本文件只做设计；未下载任何权重（只用 HTTP Range 读了 safetensors 头和 config），未改任何代码。
+> 状态：**第二版，待 Frank 审**。本文件只做设计；未下载任何权重（只用 HTTP Range 读了 safetensors 头和 config），未改任何代码。
+>
+> **已裁决（2026-10-25）**
+> 1. 顺序：**π0 先做，GR00T 后做**。
+> 2. 输入：π0 用 **BEHAVIOR challenge 原始数据集（`behavior-1k-knack` 索引 → `2026-challenge-demos`）的真实 demo 帧**喂真权重做激活捕获，**不用** π0 自己的训练数据。
+> 3. 许可证：**纯内部使用，不公开部署**，不再作为阻塞项。
+> 4. 改名：**可见层（路由、标题、章节名、导航）现在改；内部类名和目录最后统一清**。
 > 数据规则沿用 k005b 标准：真权重 + 真激活 + 窗口化；实在拿不到的部件才允许示意，并在 3D 里标 `toy`。
 
 ---
@@ -122,23 +128,35 @@
 
 ## 2. LLM → VLA 改名（Frank 补充裁决）
 
-**原则**：路由和 UI 先行；内部命名一并清理；`tsc` 兜底。
+**原则（已裁决）**：分两批。
+- **第 1 批（阶段 1，现在做）**：可见层，即路由、标题、章节名、导航、alt、截图资源。
+- **第 2 批（阶段 7，最后统一清）**：内部目录和类名。
 
-| 层 | 改动 | 现状定位 |
-|---|---|---|
-| 路由 | `src/app/llm/` → `src/app/vla/` | `src/app/llm/page.tsx` |
-| 旧链接 | 保留 `src/app/llm/page.tsx` 作为**跳转桩**（客户端 `router.replace('/vla')`），因为 `output:'export'` 静态导出不能用服务端 redirect | next.config |
-| UI 文案 | "LLM Visualization" → "VLA Visualization"；alt "LLM diagram" → "VLA diagram"；首页描述改为 k005b VLA；导航 `/llm` → `/vla` | `HomePage.tsx:70,73,78,80,84`；`WelcomePopup.tsx:60` |
-| 资源 | `public/images/llm-viz-screenshot2.png` → `vla-viz-screenshot.png`，并重截一张 k005b 场景图 | public/ |
-| 内部目录 | `git mv src/llm src/vla`（65 个文件），修 5 处外部 import（`utils/shader.ts`、`codec/DeflateRender.ts`、`codec/renderOutputArray.ts` 等） | src/llm |
-| 内部标识 | 只改 `llm` 字样的模块路径和组件名（如 `LLMVisualization` 一类）；`GptModel*`、`Walkthrough*` 这类 bbycroft 遗留名**本轮不动**，因改动面大、收益小 | — |
+`tsc` 兜底。
+
+| 批 | 层 | 改动 | 现状定位 |
+|---|---|---|---|
+| 1 | 路由 | `src/app/llm/` → `src/app/vla/`（只移 page 文件，组件仍从 `src/llm` 引入） | `src/app/llm/page.tsx` |
+| 1 | 旧链接 | 保留 `src/app/llm/page.tsx` 作为**跳转桩**（客户端 `router.replace('/vla')`），因为 `output:'export'` 静态导出不能用服务端 redirect | next.config |
+| 1 | UI 文案 | "LLM Visualization" → "VLA Visualization"；alt "LLM diagram" → "VLA diagram"；首页描述改为 k005b VLA；导航 `/llm` → `/vla`；页面 title；所有章节名和解说文案里的 "LLM" | `HomePage.tsx:70,73,78,80,84`；`WelcomePopup.tsx:60`；walkthrough 文案 |
+| 1 | 资源 | `public/images/llm-viz-screenshot2.png` → `vla-viz-screenshot.png`，并重截一张 k005b 场景图 | public/ |
+| 2 | 内部目录 | `git mv src/llm src/vla`（65 个文件），修 5 处外部 import（`utils/shader.ts`、`codec/DeflateRender.ts`、`codec/renderOutputArray.ts` 等） | src/llm |
+| 2 | 内部类名 | `llm` 字样的模块路径和组件名，以及 `GptModel*`、`GptModelLayout` 等 bbycroft 遗留名，统一改成 VLA 语义命名 | — |
+
+第 2 批放到最后，有两个原因：
+- /pi0 和 /groot 开发期间，`vizcore` 的抽取会频繁移动文件。
+- 内部重命名与抽取同时做会互相制造冲突；等三页结构稳定后一次清完，冲突最少。
 
 **验收**
-- `tsc` 零错误，`next build` 通过。
-- `grep -ri "llm"` 在 `src/` 和 `public/` 只剩跳转桩和注释。
-- /vla 截图与改名前逐像素一致，FOV 不变。
+- 第 1 批：
+  - `tsc` 零错误，`next build` 通过。
+  - 浏览器可见的文字（DOM、title、3D 标签）中 `grep -i llm` 为零，跳转桩除外。
+  - /vla 截图与改名前的 /llm 逐像素一致（FOV 不变）。
+- 第 2 批：
+  - `src/`、`public/` 里 `grep -ri "llm\|gptmodel"` 只剩跳转桩和注释。
+  - 三页截图不变。
 
-**工作量**：0.5 天。放在第一阶段，后面两页直接建在新目录结构上。
+**工作量**：第 1 批 0.3 天；第 2 批 0.5–1 天。
 
 ---
 
@@ -149,10 +167,10 @@
 建议**不做"通用 VLA 布局引擎"**。三种耦合拓扑差异太大，抽象过早会把三页都拖坏。
 
 ```
-src/vla/        k005b（改名后，原样）
+src/llm/        k005b（阶段 7 前目录名保持 src/llm，路由已是 /vla；阶段 7 改为 src/vla）
 src/groot/      GrootLayout.ts  GrootModel.ts  walkthrough/G*.tsx
 src/pi0/        Pi0Layout.ts    Pi0Model.ts    walkthrough/P*.tsx
-src/vizcore/    从 src/vla 抽出的纯渲染件：块/箭头/文字绘制、相机、播放条、
+src/vizcore/    从 src/llm 抽出的纯渲染件：块/箭头/文字绘制、相机、播放条、
                 窗口化 tensor 纹理、审计(audit) 钩子 —— 只抽"已被两页复用"的东西
 tools/export_groot.py  tools/export_pi0.py   （以 export_k005b.py 为模板）
 public/data/groot/*  public/data/pi0/*
@@ -214,9 +232,26 @@ public/data/groot/*  public/data/pi0/*
 ### 5.3 数据：`tools/export_pi0.py`
 
 - **权重**：`lerobot/pi0_base`，14 GB fp32。导出时用 bf16 跑前向，约 7 GB 显存，5090 足够；窗口切片保留 fp32 原值。
-- **输入样本**：用 k005b 已导出的**同一帧 BEHAVIOR 观测**。R1Pro 正好有 head + 左腕 + 右腕三路相机，可一一映射到 base/left_wrist/right_wrist；state 按 32 维 padding。
-- **真值标注**：pi0_base 是预训练底模，没在 BEHAVIOR 上微调。激活和权重是真的，但输出动作对 R1Pro **无语义保证**。场景里标一行 `pi0_base zero-shot: activations real, actions not calibrated for R1Pro`。
-  - 备选（见决策点 D2）：改用 openpi/lerobot 示例数据集里的一帧（如 ALOHA 或 DROID），使动作有语义。
+- **输入样本（已裁决）**：BEHAVIOR challenge 原始 demo 帧，不用 π0 自己的训练数据。
+  - **数据位置**：
+    - 索引：`/home/frank/workspace/behavior_challenge_data/dataset/behavior-1k-knack/index`（schema.yaml、episodes.parquet、tasks.parquet、stats.json）。
+    - 原始数据：`bytes_pointer.json` 指向容器路径 `/workspace/dataset/2026-challenge-demos/{data,videos}`，宿主机对应 `.../behavior_challenge_data/dataset/2026-challenge-demos/`。
+    - 数据为 R1Pro，30 fps，20000 条 episode；state 61 维，action 23 维；相机为 HEVC 视频。
+  - **选帧**：默认与 k005b 导出**同一 episode、同一 frame**。`export_k005b.py` 已记录 row、episode、frame，三页可同帧对照。帧直接从 demos 的 parquet 和 hevc 视频解码，不走 k005b 的训练样本表。
+  - **相机映射**（3 路 RGB → π0 的 3 个输入槽，各 resize/pad 到 224²）：
+    - `observation.rgb.zed_link_camera_0`（头部）→ `base_0_rgb`
+    - `observation.rgb.left_realsense_link_camera_0` → `left_wrist_0_rgb`
+    - `observation.rgb.right_realsense_link_camera_0` → `right_wrist_0_rgb`
+    - 深度通道不用。
+  - **语言**：该 episode 的任务描述来自 `tasks.parquet`，经 PaliGemma tokenizer 编码。
+  - **state 61 → 32（新问题）**：π0 的 `max_state_dim=32`，装不下 61 维。
+    - 方案：按 R1Pro 的 state schema 抽出**与 23 维动作同序的关节量**（底盘 3 + 躯干 4 + 左臂 7 + 左夹爪 1 + 右臂 7 + 右夹爪 1 = 23），其余补零到 32。
+    - 精确切片在实现时由 `behavior_challenge/src/data/schema.py` 确认，导出 JSON 里记录切片表。
+    - 3D 里标一行 `state: 23 of 61 dims mapped, zero-padded to 32`。
+  - **归一化**：pi0_base 没有 R1Pro 统计量。state 用 `index/stats.json` 做 mean/std 归一化，并在导出 JSON 中记录所用统计量。
+- **真值标注**：pi0_base 是预训练底模，没在 BEHAVIOR 上微调。激活和权重是真的，但输出动作对 R1Pro **无语义保证**。
+  - 场景里标一行 `pi0_base zero-shot on BEHAVIOR frame: activations real, actions not calibrated for R1Pro`。
+  - 50×32 的动作块只取前 23 维，按 R1Pro 名称标注，并注明这是"未校准映射"。
 - **hook**：
   - 每层两侧 RMSNorm 输入输出、Q/K/V、注意力权重（窗口化）、MLP。
   - 10 步循环里的 x_t、v、t。
@@ -304,7 +339,7 @@ public/data/groot/*  public/data/pi0/*
 不另建 /compare 页。做法如下：
 1. **首页**：三张卡片并列（/groot、/pi0、/vla），各配一张场景截图和一句耦合拓扑描述。
 2. **每页末章（G7/P7/V-对照）**：同一张差异表（即 §0 的表），当前模型那列高亮。每一行可点击，跳到另一页对应的章，例如"耦合"跳到对方的 G5/P4/D 组。
-3. **同帧同机器人**：三页（若 D2/D3 采用 BEHAVIOR 帧）用同一张 R1Pro 观测，最后一章并列画三个动作块。注明：π0 是 zero-shot，GR00T 和 k005b 针对 R1Pro。
+3. **同帧同机器人**：/pi0 和 /vla 已确定用同一帧 BEHAVIOR demo；/groot 视 D3 而定。最后一章并列画动作块，注明 π0 是 zero-shot，k005b（以及 GR00T 若用 embodiment 24）针对 R1Pro。
 
 ---
 
@@ -312,13 +347,14 @@ public/data/groot/*  public/data/pi0/*
 
 | 阶段 | 内容 | 估计 |
 |---|---|---|
-| 1 | LLM → VLA 改名 + 首页三卡占位 | 0.5 天 |
-| 2 | export_pi0.py（下载 14 GB、hook、自检） | 1 天 |
+| 1 | LLM → VLA 改名**第 1 批**（可见层）+ 首页三卡占位 | 0.3 天 |
+| 2 | export_pi0.py（下载 14 GB；BEHAVIOR demo 帧解码与相机映射；state 61→32 切片；hook；自检） | 1–1.5 天 |
 | 3 | /pi0 布局 + 模型连接 + P0–P7（按需抽 vizcore） | 3–4 天 |
 | 4 | export_groot.py（clone n1.6-release、R1Pro 配置、hook、自检） | 1–1.5 天 |
 | 5 | /groot 布局（串联 + 总线 + 抽屉）+ G0–G7 | 4–5 天 |
 | 6 | 对照章、首页定稿、三页审计和截图验收 | 1 天 |
-| **合计** | | **约 11–13 个工作日** |
+| 7 | LLM → VLA 改名**第 2 批**（`src/llm→src/vla`、`GptModel*` 等内部类名统一清） | 0.5–1 天 |
+| **合计** | | **约 12–14 个工作日** |
 
 **顺序理由**
 - π0 和 k005b 拓扑最近（并排、逐层、10 步向下），可以复用最多，也最先逼出 vizcore 的边界。
@@ -331,19 +367,24 @@ public/data/groot/*  public/data/pi0/*
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
-| 许可证：GR00T 为 NVIDIA OneWay **Noncommercial** License；π0 权重受 Gemma 条款约束（openpi 代码为 Apache-2.0） | 公开部署 /groot、/pi0 时，导出的窗口化权重切片算再分发 | **决策点 D4**：只内部用，或公开前确认条款；页面注明来源和许可证 |
-| GR00T 的 R1Pro modality 配置不在公开仓 | 不能用 BEHAVIOR 帧做出有语义的动作 | 退回仓库示例本体 |
-| pi0_base 对 R1Pro 是 zero-shot | 动作无语义 | 明确标注，或用示例数据集帧 |
+| 许可证：GR00T 为 NVIDIA OneWay Noncommercial；π0 权重受 Gemma 条款约束 | **已裁决：纯内部使用，不公开部署**，非阻塞 | 页面角落注明来源和许可证名称即可 |
+| GR00T 的 R1Pro modality 配置不在公开仓 | 不能用 BEHAVIOR 帧做出有语义的动作 | 退回仓库示例本体（D3） |
+| pi0_base 对 R1Pro 是 zero-shot | 动作无语义 | 已裁决仍用 BEHAVIOR 帧；3D 内明确标注 |
+| BEHAVIOR state 61 维 > π0 的 32 维 | 必须做有损映射 | 按动作同序抽 23 维、补零，记录切片表并标注（§5.3） |
+| demo 视频为 HEVC | 导出器需要能解码 HEVC 的环境 | 复用 behavior_challenge 现有数据加载代码；不行就用 ffmpeg 抽单帧 |
 | 显存/内存 | 14 GB fp32 加载需要约 28 GB 内存峰值（60 GB 够） | bf16 前向；按需 mmap 读取窗口 |
 | 导出数据体积 | 三页 public/data 膨胀 | 只存窗口；单页目标 < 30 MB（与 k005b 同量级） |
 | GR00T 主分支已是 N1.7 | 代码与 N1.6 权重不匹配 | 固定 `n1.6-release` 的 commit hash |
 
 ---
 
-## 10. 待 Frank 裁决
+## 10. 裁决记录与剩余问题
 
-- **D1 页面顺序**：先 /pi0 后 /groot（推荐，理由见 §8），还是反过来？
-- **D2 π0 输入帧**：BEHAVIOR 同帧（同机器人可并列，但 zero-shot 无语义，推荐），还是示例数据集帧（动作有语义，但不能同帧对比）？
-- **D3 GR00T 输入帧**：BEHAVIOR 同帧 + embodiment 24（推荐，前提是 R1Pro 配置可得），否则用仓库示例本体。
-- **D4 许可证**：/groot 和 /pi0 只内部用，还是公开部署（需先确认条款）？
-- **D5 改名范围**：路由 + UI + `src/llm→src/vla` 目录本轮做完；`GptModel*` 等 bbycroft 遗留类名暂不动。是否同意？
+| # | 问题 | 结论 |
+|---|---|---|
+| D1 | 页面顺序 | ✅ π0 先，GR00T 后 |
+| D2 | π0 输入帧 | ✅ BEHAVIOR 原始 demo 真实帧（`behavior-1k-knack` → `2026-challenge-demos`），不用 π0 训练数据 |
+| D3 | GR00T 输入帧 | ⏳ 待定，GR00T 阶段再议。推荐 BEHAVIOR 同帧 + embodiment 24，R1Pro 配置拿不到时退回示例本体 |
+| D4 | 许可证 | ✅ 纯内部使用，不公开部署 |
+| D5 | 改名范围 | ✅ 可见层现在改（阶段 1），内部目录和类名最后统一清（阶段 7） |
+| D6 | π0 的 state 61→32 映射 | ❓ **新问题，请确认**：按动作同序抽 23 维、补零到 32（推荐），还是另选 32 维子集？ |
