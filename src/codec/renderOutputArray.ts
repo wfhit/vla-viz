@@ -1,4 +1,4 @@
-import { inverseLerp } from "../llm/walkthrough/Walkthrough04_SelfAttention";
+import { inverseLerp } from "../vla/walkthrough/Walkthrough04_SelfAttention";
 import { Vec2 } from "../utils/vector";
 import { IDeflateBlock, IDeflateData, IDeflateRenderState } from "./DeflateRenderModel";
 

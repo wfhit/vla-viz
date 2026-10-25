@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useReducer, useRef } from "react";
 
 export function useFunctionRef<T extends ((...args: any[]) => any) | undefined>(fn: T): React.MutableRefObject<T> {
     let ref = useRef<T>(fn);
@@ -34,7 +34,7 @@ export function useRequestAnimationFrame(active: boolean, cb: (dtSeconds: number
     }, [active, cbRef]);
 }
 
-export interface IIntervalOptions {
+interface IIntervalOptions {
     // run the callback immediately on mount
     runImmediately?: boolean;
 }
@@ -51,38 +51,6 @@ export function useInterval(active: boolean, delay: number, cb: () => void, opts
             return () => clearInterval(handle);
         }
     }, [active, delay, cbRef, runImmediately]);
-}
-
-export function logChangesFn(name: string) {
-    let prevValue: any = null;
-    return (currValue: any) => {
-        let changes = getChanges(prevValue, currValue);
-        prevValue = currValue;
-        changes && console.log(`${name} changed to`, changes);
-        return !!changes;
-    };
-
-    function getChanges(a: any, b: any) {
-        a = a || {};
-        b = b || {};
-        let keys = new Set<string>();
-        for (let k of [...Object.keys(a), ...Object.keys(b)]) {
-            a[k] !== b[k] && keys.add(k);
-        }
-        if (keys.size === 0) {
-            return null;
-        }
-        let changed: any = {};
-        for (let k of [...keys]) {
-            changed[k] = b[k];
-        }
-        return changed;
-    }
-}
-
-export function useLogChanges(name: string, values: any) {
-    let [changesFn] = useState(() => logChangesFn(name));
-    return changesFn(values);
 }
 
 

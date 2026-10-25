@@ -17,7 +17,7 @@ export function iterLocalStorageEntries(cb: (key: string, value: string | null) 
     }
 }
 
-export function readFromLocalStorage<T>(key: string): T | undefined {
+function readFromLocalStorage<T>(key: string): T | undefined {
     let ls = typeof window !== 'undefined' ? window.localStorage : undefined;
     let value = ls?.getItem(key);
     if (value) {
@@ -30,7 +30,7 @@ export function readFromLocalStorage<T>(key: string): T | undefined {
     return undefined;
 }
 
-export function writeToLocalStorage<T>(key: string, value: T) {
+function writeToLocalStorage<T>(key: string, value: T) {
     let ls = typeof window !== 'undefined' ? window.localStorage : undefined;
     if (value) {
         ls?.setItem(key, JSON.stringify(value));
@@ -66,7 +66,7 @@ export function writeToLocalStorageWithNotifyOnChange<T>(key: string, value: T) 
     }
 }
 
-export interface BindLocalStorageOpts {
+interface BindLocalStorageOpts {
      updateOnNotify?: boolean; // defaults to true
 }
 

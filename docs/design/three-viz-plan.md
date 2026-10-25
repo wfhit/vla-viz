@@ -1,12 +1,13 @@
 # 三套 VLA 可视化总体方案：/groot · /pi0 · /vla
 
-> 状态：**第二版，待 Frank 审**。本文件只做设计；未下载任何权重（只用 HTTP Range 读了 safetensors 头和 config），未改任何代码。
+> 状态：**第三版，待 Frank 审**。§3 起仍是设计，未下载任何权重（只用 HTTP Range 读了 safetensors 头和 config）；§2 的改名与遗留清理已按法则 5 实施完毕。
 >
 > **已裁决（2026-10-25）**
 > 1. 顺序：**π0 先做，GR00T 后做**。
 > 2. 输入：π0 用 **BEHAVIOR challenge 原始数据集（`behavior-1k-knack` 索引 → `2026-challenge-demos`）的真实 demo 帧**喂真权重做激活捕获，**不用** π0 自己的训练数据。
 > 3. 许可证：**纯内部使用，不公开部署**，不再作为阻塞项。
-> 4. 改名：**可见层（路由、标题、章节名、导航）现在改；内部类名和目录最后统一清**。
+> 4. 改名：~~可见层现在改、内部类名最后统一清~~ → **被法则 5 取代**，可见层与内部一次清完（§2，已完成）。
+> 5. **不拖延法则（Frank）**：问题不往后拖——能删就删、能改就改，再小也改；判定有问题就立即改，不留到"最后统一"。前提是不破坏三套页面渲染，改完跑页面自测。本方案所有阶段都按此执行：发现的遗留命名、死代码、注释掉的代码、无效功能，当场处理，不进待办。
 > 数据规则沿用 k005b 标准：真权重 + 真激活 + 窗口化；实在拿不到的部件才允许示意，并在 3D 里标 `toy`。
 
 ---
@@ -126,51 +127,38 @@
 
 ---
 
-## 2. LLM → VLA 改名（Frank 补充裁决）
+## 2. LLM → VLA 改名与遗留清理（✅ 已完成，按法则 5 一次清完）
 
-**原则（已裁决）**：分两批。
-- **第 1 批（阶段 1，现在做）**：可见层，即路由、标题、章节名、导航、alt、截图资源。
-- **第 2 批（阶段 7，最后统一清）**：内部目录和类名。
+原计划分两批（可见层阶段 1、内部阶段 7），Frank 否决了"内部最后清"，改为立即全清。已做：
 
-`tsc` 兜底。
+| 层 | 改动 |
+|---|---|
+| 路由 | `src/app/llm/` → `src/app/vla/`；**不留 /llm 跳转桩**（纯内部使用，无外链需要兼容） |
+| 目录 | `git mv src/llm src/vla`；外部 import（`utils/shader.ts`、`codec/*`、`cpu/comps/Alu.tsx`）全部修正 |
+| 类名/文件 | `GptModel.ts`→`VlaModel.ts`，`GptModelLayout.ts`→`VlaModelLayout.ts`，`IGptModelLayout`/`genGptModelLayout`/`IGptModelLink`/`IGptLayerNormLayout`→`IVlaModelLayout`/`genVlaModelLayout`/`IVlaModelLink`/`IVlaNormLayout`；`jsGptModel`→`vlaModel`，`gptGpuModel`→`vlaGpuModel`；`renderPhases.ts`→`bufferTex.ts`（只剩 buffer 纹理工具） |
+| UI 文案 | 首页卡 "VLA Visualization"、k005b 描述、`/vla` 链接、新截图 `vla-viz-screenshot.jpg`；页头 "k005b VLA 可视化"；`package.json` 名 `vla-viz` |
+| 删除的死代码 | 弹窗残留 `WelcomePopup`+`InfoButton`（弹窗早已注释，按钮是空操作）；GPT 示意图 `intro-image*.svg`、旧截图；`utils/tensor.ts`（`IGptModelConfig`）、`utils/basic.ts`；**整套键盘导航 `MovementControls`**（`manageMovement` 早被注释，WASD/QE/R/F 按键无任何效果）；bbycroft 英文旧解说 `walkthroughDetailed` 及其 4 个不在任何章节里的 Phase、画布文字解说通道 `writeCommentary`；约 70 个无引用函数/类型/导出、约 90 个无用 import、~30 个无用参数、~80 行注释掉的代码、`.idea/` 出库 |
 
-| 批 | 层 | 改动 | 现状定位 |
-|---|---|---|---|
-| 1 | 路由 | `src/app/llm/` → `src/app/vla/`（只移 page 文件，组件仍从 `src/llm` 引入） | `src/app/llm/page.tsx` |
-| 1 | 旧链接 | 保留 `src/app/llm/page.tsx` 作为**跳转桩**（客户端 `router.replace('/vla')`），因为 `output:'export'` 静态导出不能用服务端 redirect | next.config |
-| 1 | UI 文案 | "LLM Visualization" → "VLA Visualization"；alt "LLM diagram" → "VLA diagram"；首页描述改为 k005b VLA；导航 `/llm` → `/vla`；页面 title；所有章节名和解说文案里的 "LLM" | `HomePage.tsx:70,73,78,80,84`；`WelcomePopup.tsx:60`；walkthrough 文案 |
-| 1 | 资源 | `public/images/llm-viz-screenshot2.png` → `vla-viz-screenshot.png`，并重截一张 k005b 场景图 | public/ |
-| 2 | 内部目录 | `git mv src/llm src/vla`（65 个文件），修 5 处外部 import（`utils/shader.ts`、`codec/DeflateRender.ts`、`codec/renderOutputArray.ts` 等） | src/llm |
-| 2 | 内部类名 | `llm` 字样的模块路径和组件名，以及 `GptModel*`、`GptModelLayout` 等 bbycroft 遗留名，统一改成 VLA 语义命名 | — |
+**验收（已过）**
+- `tsc` 零错误；`noUnusedLocals+noUnusedParameters` 下 `src/vla`、`src/utils` 零告警（`_exhaustCheck` 类型穷尽惯用法除外）；knip 在 `src/vla`/`src/utils` 无未用文件/导出（仅剩 2 个被 `src/cpu` 使用的）。
+- `src/`、`public/`、`tools/` 里 `grep -ri "llm\|gpt"` 除第三方/base64 误报外为零。
+- `next build` 通过；/vla 截图与改名前 /llm 对比：3D 场景一致，仅页头少了已失效的 "?" 按钮。
 
-第 2 批放到最后，有两个原因：
-- /pi0 和 /groot 开发期间，`vizcore` 的抽取会频繁移动文件。
-- 内部重命名与抽取同时做会互相制造冲突；等三页结构稳定后一次清完，冲突最少。
-
-**验收**
-- 第 1 批：
-  - `tsc` 零错误，`next build` 通过。
-  - 浏览器可见的文字（DOM、title、3D 标签）中 `grep -i llm` 为零，跳转桩除外。
-  - /vla 截图与改名前的 /llm 逐像素一致（FOV 不变）。
-- 第 2 批：
-  - `src/`、`public/` 里 `grep -ri "llm\|gptmodel"` 只剩跳转桩和注释。
-  - 三页截图不变。
-
-**工作量**：第 1 批 0.3 天；第 2 批 0.5–1 天。
+**未动、待 Frank 定**：仓库里 bbycroft 的其他应用（`src/cpu`、`src/codec`、`src/fluidsim` 及路由，生产环境本就 404）和首页的个人简介/捐助链接/`public/me.jpeg`——按法则 5 应删，但属于范围判断，请确认（§10 D7）。
 
 ---
 
 ## 3. 代码架构：共享渲染器，模型各自独立
 
-现状：k005b 专用代码约 5.4k 行（`export_k005b.py` + `GptModelLayout.ts` + `GptModel.ts` + walkthrough），布局和模型强耦合。
+现状：k005b 专用代码约 5.4k 行（`export_k005b.py` + `VlaModelLayout.ts` + `VlaModel.ts` + walkthrough），布局和模型强耦合。
 
 建议**不做"通用 VLA 布局引擎"**。三种耦合拓扑差异太大，抽象过早会把三页都拖坏。
 
 ```
-src/llm/        k005b（阶段 7 前目录名保持 src/llm，路由已是 /vla；阶段 7 改为 src/vla）
+src/vla/        k005b（路由 /vla）
 src/groot/      GrootLayout.ts  GrootModel.ts  walkthrough/G*.tsx
 src/pi0/        Pi0Layout.ts    Pi0Model.ts    walkthrough/P*.tsx
-src/vizcore/    从 src/llm 抽出的纯渲染件：块/箭头/文字绘制、相机、播放条、
+src/vizcore/    从 src/vla 抽出的纯渲染件：块/箭头/文字绘制、相机、播放条、
                 窗口化 tensor 纹理、审计(audit) 钩子 —— 只抽"已被两页复用"的东西
 tools/export_groot.py  tools/export_pi0.py   （以 export_k005b.py 为模板）
 public/data/groot/*  public/data/pi0/*
@@ -347,14 +335,13 @@ public/data/groot/*  public/data/pi0/*
 
 | 阶段 | 内容 | 估计 |
 |---|---|---|
-| 1 | LLM → VLA 改名**第 1 批**（可见层）+ 首页三卡占位 | 0.3 天 |
+| 1 | ✅ LLM → VLA 改名与遗留清理（全部，§2）；首页三卡占位 | 已完成（卡位随 2/4 阶段补） |
 | 2 | export_pi0.py（下载 14 GB；BEHAVIOR demo 帧解码与相机映射；state 61→32 切片；hook；自检） | 1–1.5 天 |
 | 3 | /pi0 布局 + 模型连接 + P0–P7（按需抽 vizcore） | 3–4 天 |
 | 4 | export_groot.py（clone n1.6-release、R1Pro 配置、hook、自检） | 1–1.5 天 |
 | 5 | /groot 布局（串联 + 总线 + 抽屉）+ G0–G7 | 4–5 天 |
 | 6 | 对照章、首页定稿、三页审计和截图验收 | 1 天 |
-| 7 | LLM → VLA 改名**第 2 批**（`src/llm→src/vla`、`GptModel*` 等内部类名统一清） | 0.5–1 天 |
-| **合计** | | **约 12–14 个工作日** |
+| **合计** | | **约 11–13 个工作日**（剩余） |
 
 **顺序理由**
 - π0 和 k005b 拓扑最近（并排、逐层、10 步向下），可以复用最多，也最先逼出 vizcore 的边界。
@@ -386,5 +373,6 @@ public/data/groot/*  public/data/pi0/*
 | D2 | π0 输入帧 | ✅ BEHAVIOR 原始 demo 真实帧（`behavior-1k-knack` → `2026-challenge-demos`），不用 π0 训练数据 |
 | D3 | GR00T 输入帧 | ⏳ 待定，GR00T 阶段再议。推荐 BEHAVIOR 同帧 + embodiment 24，R1Pro 配置拿不到时退回示例本体 |
 | D4 | 许可证 | ✅ 纯内部使用，不公开部署 |
-| D5 | 改名范围 | ✅ 可见层现在改（阶段 1），内部目录和类名最后统一清（阶段 7） |
+| D5 | 改名范围 | ✅ 法则 5：可见层与内部一次清完，已完成（§2） |
 | D6 | π0 的 state 61→32 映射 | ❓ **新问题，请确认**：按动作同序抽 23 维、补零到 32（推荐），还是另选 32 维子集？ |
+| D7 | bbycroft 其他应用（cpu/codec/fluidsim）与首页个人信息 | ❓ **请确认**：按法则 5 建议整体删除，首页只留三张 VLA 卡 |

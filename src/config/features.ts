@@ -8,13 +8,11 @@
  * To ship or preview a static export that includes WIP:
  *   NEXT_PUBLIC_SHOW_WIP=true yarn build
  */
-export const showWip =
+const showWip =
     process.env.NODE_ENV === 'development' ||
     process.env.NEXT_PUBLIC_SHOW_WIP === 'true';
 
 export const features = {
-    /** Live public project */
-    llm: true,
     /** In-progress CPU schematic / guide */
     cpu: showWip,
     /** In-progress deflate / codec viz */

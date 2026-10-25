@@ -28,20 +28,3 @@
     bottom: 0;
     right: 0;
 }
-
-.modalWindowBackdrop {
-    pointer-events: auto;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    background-color: rgba(black, 0.3);
-}
-
-.modalWindow {
-    pointer-events: auto;
-    max-width: 80%;
-    max-height: 80%;
-    background-color: white;
-    box-shadow: 0 0 6px 0 rgba(black, 0.3);
-    border-radius: 5px;
-}

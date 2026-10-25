@@ -67,22 +67,22 @@ export const HomePage: React.FC = () => {
 
         <div className={s.projectsSection}>
             <div className={s.sectionTitle}>Projects</div>
-            <div className={s.projectCard} onClick={() => router.push('/llm')}>
+            <div className={s.projectCard} onClick={() => router.push('/vla')}>
                 <div className={s.cardImageWrapper}>
                     <div className={s.cardImage}>
-                        <img src="/images/llm-viz-screenshot2.png" alt="LLM Visualization Screenshot" />
+                        <img src="/images/vla-viz-screenshot.jpg" alt="VLA Visualization Screenshot" />
                     </div>
                 </div>
                 <div className={s.cardContent}>
                     <div className={s.cardTitle}>
-                        <Link href={"/llm"}>
+                        <Link href={"/vla"}>
                         {/* rel="noopener noreferrer" target="_blank"> */}
-                            LLM Visualization
+                            VLA Visualization
                         </Link>
                     </div>
                     <div className={s.cardText}>
-                        A visualization and walkthrough of the LLM algorithm that backs OpenAI's ChatGPT.
-                        Explore the algorithm down to every add & multiply, seeing the whole process in action.
+                        A 3D walkthrough of the k005b VLA: Qwen3-VL trunk, knack/done heads and the DiT action expert
+                        with 10-step flow matching, drawn from real weights and real activations.
                     </div>
                 </div>
             </div>

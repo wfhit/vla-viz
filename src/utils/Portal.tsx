@@ -1,7 +1,7 @@
 'use client';
 
 import clsx from "clsx";
-import React, { forwardRef, useLayoutEffect, useState } from "react";
+import React, { useLayoutEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { assignImm } from "./data";
 import s from './Portal.module.scss';
@@ -34,20 +34,6 @@ export const FullscreenOverlay: React.FC<{
             {children}
         </div>
     </Portal>;
-}
-
-export const ModalWindow: React.FC<{
-    className?: string,
-    backdropClassName?: string,
-    onBackdropClick?: React.MouseEventHandler,
-    children: React.ReactNode,
-}> = ({ className, backdropClassName, onBackdropClick, children }) => {
-
-    return <FullscreenOverlay className={clsx(s.modalWindowBackdrop, backdropClassName)} onClick={onBackdropClick}>
-        <div className={clsx(s.modalWindow, className)}>
-            {children}
-        </div>
-    </FullscreenOverlay>;
 }
 
 
@@ -128,7 +114,7 @@ function computeTransform(targetBcr: DOMRect | null, popupBcr: DOMRect | null, p
     return { x, y };
 }
 
-export function useWatchElementRect(el: HTMLElement | null, includePosition = false) {
+function useWatchElementRect(el: HTMLElement | null, includePosition = false) {
     let [bcr, setBcr] = useState<DOMRect | null>(null);
 
     useLayoutEffect(() => {

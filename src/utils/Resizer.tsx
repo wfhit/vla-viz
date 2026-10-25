@@ -11,7 +11,7 @@ export const Resizer: React.FC<{
     fixedWidthLeft?: boolean;
     fixedWidthRight?: boolean;
     children: React.ReactNode[];
-}> = ({ id, className, children, vertical, defaultAmt, fixedWidthLeft, fixedWidthRight }) => {
+}> = ({ className, children, vertical, defaultAmt, fixedWidthLeft, fixedWidthRight }) => {
 
     let [parentEl, setParentEl] = useState<HTMLElement | null>(null);
     let [sliderHitEl, setSliderHitEl] = useState<HTMLElement | null>(null);
@@ -21,7 +21,7 @@ export const Resizer: React.FC<{
 
     let [amt, setAmt] = useState(defaultAmt ?? 0.4);
 
-    let [, setDragStart] = useCombinedMouseTouchDrag(sliderHitEl, () => amt, (ev, ds, end) => {
+    let [, setDragStart] = useCombinedMouseTouchDrag(sliderHitEl, () => amt, (ev, ds) => {
         let parentBcr = parentEl!.getBoundingClientRect();
         let deltaPx = vertical ? ev.clientY - ds.clientY : ev.clientX - ds.clientX;
         let fullSizePx = vertical ? parentBcr.height : parentBcr.width;

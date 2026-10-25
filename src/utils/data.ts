@@ -8,12 +8,6 @@ export function makeArrayRange(length: number, min: number, max: number): number
     return new Array(length).fill(0).map((_, i) => min + i * (max - min) / (length - 1));
 }
 
-export function oneHotArray(length: number, index: number, val: number, defaultVal: number = 0.0): number[] {
-    let arr = new Array(length).fill(defaultVal);
-    arr[index] = val;
-    return arr;
-}
-
 export function assignImm<T>(target: T, source: Partial<T>): T {
     let keys = Object.keys(source);
     let changed = false;

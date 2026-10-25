@@ -80,17 +80,12 @@ export function useGlobalDrag<T>(
     return [dragStart, setDragStartTarget];
 }
 
-export interface IMouseLocation {
-    clientX: number;
-    clientY: number;
-}
-
 export interface IPointerEvent {
     clientX: number;
     clientY: number;
 }
 
-export interface IMouseEvent extends IPointerEvent {
+interface IMouseEvent extends IPointerEvent {
     type: string;
     readonly button: number;
     readonly buttons: number;
@@ -102,46 +97,27 @@ export interface IMouseEvent extends IPointerEvent {
     preventDefault(): void;
 }
 
-export interface IWheelEvent extends IMouseEvent {
-    deltaMode: number;
-    deltaY: number;
-}
-
 export interface IBaseEvent {
     type: string;
     stopPropagation(): void;
     preventDefault(): void;
 }
 
-export function getWheelDelta(ev: IWheelEvent): number {
-    let mode = ev.deltaMode;
-    let scale = 1.0;
-    if (mode === 0) { // pixel
-        scale = 125;
-    } else if (mode === 1) { // line
-        scale = 3;
-    } else if (mode === 2) { // page
-        scale = 0.1;
-    }
-
-    return ev.deltaY / scale;
-}
-
-export interface TouchSimple {
+interface TouchSimple {
     clientX: number;
     clientY: number;
 }
 
-export interface TouchEventStart<T> {
+interface TouchEventStart<T> {
     data: T;
     touches: TouchSimple[];
 }
 
-export interface TouchEventStart1PointDrag<T> extends TouchEventStart<T> {
+interface TouchEventStart1PointDrag<T> extends TouchEventStart<T> {
     isDragging: boolean;
 }
 
-export interface ITouchEventOptions {
+interface ITouchEventOptions {
     alwaysSendDragEvent?: boolean;
     sendDragEnd?: boolean;
 }
@@ -243,7 +219,7 @@ export function useTouchEvents<T>(
     }, [el, handle1PointDragRef, handle2PointDragRef, handle1PointClickRef, alwaysSendDragEvent, sendDragEnd]);
 }
 
-export function copyTouchList(tl: TouchList) {
+function copyTouchList(tl: TouchList) {
     let res: TouchSimple[] = [];
     for (let i = 0; i < tl.length; i++) {
         let touch = tl[i];
@@ -295,7 +271,7 @@ export function useCombinedMouseTouchDrag<T>(
             setTouchDragStart(null);
         }
 
-    }, undefined, function handle1PointClick(ev, ds) {
+    }, undefined, function handle1PointClick(ev) {
         if (touchDragStart) {
             handleClick?.(mouseEventFromEventAndSingleTouch(ev, ev.touches[0]), touchDragStart);
         }

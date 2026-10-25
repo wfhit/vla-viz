@@ -18,9 +18,3 @@ export default function RootLayout({
         <body className={s.body}>{children}</body>
     </html>;
 }
-
-/* <head>
-    <link rel="preload" href="/fonts/font-atlas.png" as="image" />
-    <link rel="preload" href="/fonts/font-def.json" as="fetch" />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto&family=Merriweather:ital@0;1" />
-</head> */

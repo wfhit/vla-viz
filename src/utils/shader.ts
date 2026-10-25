@@ -1,4 +1,4 @@
-import { ISharedRender } from "../llm/render/sharedRender";
+import { ISharedRender } from "../vla/render/sharedRender";
 import { roundUpTo } from "./math";
 
 export interface IGLContext {
@@ -14,7 +14,7 @@ export interface EXT_disjoint_timer_query_webgl2 {
     TIME_ELAPSED_EXT: number;
 }
 
-export interface IProgram<T extends string = any> {
+interface IProgram<T extends string = any> {
     name: string;
     program: WebGLProgram;
     vertShader: WebGLShader;
@@ -44,7 +44,7 @@ export function createShaderManager(gl: WebGL2RenderingContext) {
     };
 }
 
-export interface IShaderExtras {
+interface IShaderExtras {
     uboBindings: Record<string, number>;
 }
 
@@ -57,7 +57,7 @@ export function createShaderProgram<T extends string>(manager: IShaderManager | 
 
     let program = gl.createProgram()!;
 
-    function compileAndAttachShader(type: number, source: string, typeStr: string, map: Map<string, WebGLShader>) {
+    function compileAndAttachShader(type: number, source: string, map: Map<string, WebGLShader>) {
         let shader = map.get(source);
         if (!shader) {
             shader = gl.createShader(type)!;
@@ -69,8 +69,8 @@ export function createShaderProgram<T extends string>(manager: IShaderManager | 
         return shader;
     }
 
-    let vertShader = compileAndAttachShader(gl.VERTEX_SHADER, vert, 'vert', manager.vertShaders);
-    let fragShader = compileAndAttachShader(gl.FRAGMENT_SHADER, frag, 'frag', manager.fragShaders);
+    let vertShader = compileAndAttachShader(gl.VERTEX_SHADER, vert, manager.vertShaders);
+    let fragShader = compileAndAttachShader(gl.FRAGMENT_SHADER, frag, manager.fragShaders);
 
     let locs = {} as Record<T, WebGLUniformLocation>;
 
@@ -153,13 +153,13 @@ export function ensureShadersReady(manager: IShaderManager) {
     }
 }
 
-export interface IBindOpts {
+interface IBindOpts {
     divisor?: number;
     locOffset?: number;
     bufOffset?: number;
 }
 
-export interface IFloatAttrib {
+interface IFloatAttrib {
     name: string;
     size: number;
     nCols?: number; // for matrices
@@ -286,7 +286,7 @@ export function resetFloatBufferMap(bufMap: IFloatBuffer) {
     }
 }
 
-export interface IELementLocalBuffer {
+interface IELementLocalBuffer {
     buf: Uint32Array;
     capacityVerts: number;
     usedVerts: number
@@ -294,7 +294,7 @@ export interface IELementLocalBuffer {
     glOffsetBytes: number;
 }
 
-export interface IElementBuffer {
+interface IElementBuffer {
     buf: WebGLBuffer;
     localBufs: IELementLocalBuffer[];
     glCapacityVerts: number; // verts in the gl buffer. May lag capacityVerts

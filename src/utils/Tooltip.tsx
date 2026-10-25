@@ -8,7 +8,7 @@ import { assignImm, clamp } from "./data";
 const PosStart = 16;
 const PosEnd = 32;
 
-export enum TipPos {
+enum TipPos {
     Top = 1,
     Right = 2,
     Left = 4,

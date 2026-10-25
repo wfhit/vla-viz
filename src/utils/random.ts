@@ -25,7 +25,7 @@ function sfc32(a: number, b: number, c: number, d: number) {
     }
 }
 
-export type UniformDistGenerator = () => number;
+type UniformDistGenerator = () => number;
 
 function randomGen(seed?: string): UniformDistGenerator {
     let seeder = xmur3(seed ?? Math.random().toString());

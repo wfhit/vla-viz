@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect } from "react";
-import { Subscriptions, useFunctionRef, useSubscriptions } from "./hooks";
+import { Subscriptions, useFunctionRef } from "./hooks";
 import { multiSortStableAsc } from "./array";
 
 export enum KeyboardOrder {
@@ -9,13 +9,13 @@ export enum KeyboardOrder {
     Popup = 3,
 }
 
-export interface IKeyHandler {
+interface IKeyHandler {
     order: KeyboardOrder;
     handler: (ev: KeyboardEvent) => void;
     receiveKeyUp: boolean;
 }
 
-export interface IKeyHandlerOptions {
+interface IKeyHandlerOptions {
     isActive?: boolean;
     receiveKeyUp?: boolean;
 }
@@ -88,12 +88,6 @@ export function useGlobalKeyboard(order: KeyboardOrder, handler: (ev: KeyboardEv
     return manager;
 }
 
-export function useHasKeyboardFocus() {
-    let manager = useContext(KeyboardManagerContext);
-    useSubscriptions(manager.isFocusedSubs);
-    return manager.isFocused;
-}
-
 export function useCreateGlobalKeyboardDocumentListener() {
     let manager = useContext(KeyboardManagerContext);
 
@@ -114,7 +108,7 @@ export enum Modifiers {
     Shift = 4,
 }
 
-export interface IKeyboardEvent {
+interface IKeyboardEvent {
     type: string;
     key: string;
     altKey: boolean;
@@ -123,7 +117,7 @@ export interface IKeyboardEvent {
     metaKey: boolean;
 }
 
-export interface IModifiersEvent {
+interface IModifiersEvent {
     type: string;
     altKey: boolean;
     ctrlKey: boolean;

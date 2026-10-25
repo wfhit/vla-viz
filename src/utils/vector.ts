@@ -435,15 +435,6 @@ export class Vec3Buf {
     }
 }
 
-export class Vec4Buf {
-    static copy_(a: IArr, aOff: number, out: IArr, outOff: number) {
-        out[outOff + 0] = a[aOff + 0];
-        out[outOff + 1] = a[aOff + 1];
-        out[outOff + 2] = a[aOff + 2];
-        out[outOff + 3] = a[aOff + 3];
-    }
-}
-
 export function segmentNearestPoint(p0: Vec3, p1: Vec3, x: Vec3) {
     let v = p1.sub(p0);
     let w = x.sub(p0);

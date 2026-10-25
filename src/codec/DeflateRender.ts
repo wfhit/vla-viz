@@ -4,7 +4,7 @@ import { Vec2 } from "../utils/vector";
 import { bitsToBinStr, reverseBits } from "./DeflateDecoder";
 import { IDeflateBlock, IPrefixCoding, IPrefixTree } from "./DeflateRenderModel";
 import { lerp } from "../utils/math";
-import { inverseLerp } from "../llm/walkthrough/Walkthrough04_SelfAttention";
+import { inverseLerp } from "../vla/walkthrough/Walkthrough04_SelfAttention";
 import { distBitOffsets, distBitsExtra, lengthBitOffsets, lengthBitsExtra, readBits } from "./deflateRenderHelpers";
 
 interface IRenderCtx {
