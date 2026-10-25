@@ -5,6 +5,11 @@
 > **已裁决（2026-10-25）**
 > 1. 顺序：**π0 先做，GR00T 后做**。
 > 2. 输入：π0 用 **BEHAVIOR challenge 原始数据集（`behavior-1k-knack` 索引 → `2026-challenge-demos`）的真实 demo 帧**喂真权重做激活捕获，**不用** π0 自己的训练数据。
+> 2b. **（补充裁决）/pi0 与 /groot 两页输入帧统一用本地 BEHAVIOR 原始数据**：`behavior-1k-knack`（元数据/索引）+ `2026-challenge-demos`（真实 parquet + HEVC 视频）。**权重照旧下载开源真权重**（`lerobot/pi0_base`、`nvidia/GR00T-N1.6-3B`），不改用本地已有的 π0.5 COMET / GR00T N1.7 微调权重。
+> 2c. **（权重裁决，取代 2b 的"下载开源权重"）零下载，全部用 NAS 本地模型**（`~/workspace/model/` 即 NAS 挂载，只读）：
+>     - π0 页：`openpi_comet/pi05-b1kpt12-cs32`、`openpi_comet/pi05-b1kpt50-cs32`（π0.5 在 BEHAVIOR-1K 上的微调版，各 12 GB）+ HF 缓存 `models--lerobot--pi0_base`（π0 base）。
+>     - GR00T 页：`nvidia/GR00T-N1.7-3B`（6.5 GB，BEHAVIOR 官方 baseline）。
+>     - 输入帧不变：本地 `behavior-1k-knack` + `2026-challenge-demos`。详见 §5.3、§6.3。
 > 3. 许可证：**纯内部使用，不公开部署**，不再作为阻塞项。
 > 4. 改名：~~可见层现在改、内部类名最后统一清~~ → **被法则 5 取代**，可见层与内部一次清完（§2，已完成）。
 > 5. **不拖延法则（Frank）**：问题不往后拖——能删就删、能改就改，再小也改；判定有问题就立即改，不留到"最后统一"。前提是不破坏三套页面渲染，改完跑页面自测。本方案所有阶段都按此执行：发现的遗留命名、死代码、注释掉的代码、无效功能，当场处理，不进待办。
@@ -16,7 +21,7 @@
 
 | | /groot | /pi0 | /vla（原 /llm） |
 |---|---|---|---|
-| 模型 | GR00T N1.6-3B（HF `nvidia/GR00T-N1.6-3B`） | π0 base（HF `lerobot/pi0_base`，PyTorch 版） | k005b（我们自己的） |
+| 模型 | GR00T N1.7-3B（NAS 本地，BEHAVIOR baseline） | π0.5 COMET b1k 微调（NAS 本地）；π0 base（HF 缓存）作对照 | k005b（我们自己的） |
 | 主干 | Eagle-Block2A-2B：SigLIP2 27 层 + Qwen3 **截断到 16 层** | PaliGemma：SigLIP So400m 27 层 + Gemma-2B 18 层 | Qwen3-VL-2B 28 层 |
 | 动作头 | 32 块 DiT（偶数块交叉注意力 / 奇数块自注意力） | Gemma-300M 专家 18 层 | DiT 专家（跑 28 层） |
 | **主干↔专家耦合** | **交叉注意力**：专家只读主干**第 16 层一次性输出**（单一来源） | **联合自注意力**：专家第 i 层与主干第 i 层拼接成一个序列 | **联合注意力**：专家第 i 层读主干第 i 层缓存的 K/V |
@@ -219,7 +224,12 @@ public/data/groot/*  public/data/pi0/*
 
 ### 5.3 数据：`tools/export_pi0.py`
 
-- **权重**：`lerobot/pi0_base`，14 GB fp32。导出时用 bf16 跑前向，约 7 GB 显存，5090 足够；窗口切片保留 fp32 原值。
+- **权重（零下载，NAS 本地）**：
+  - **主权重**：`/home/frank/workspace/model/openpi_comet/pi05-b1kpt12-cs32`（另有 `pi05-b1kpt50-cs32`）。π0.5 在 BEHAVIOR-1K 上微调，openpi JAX/orbax 格式（`params/` zarr 分片 + `assets/behavior-1k/2025-challenge-demos/norm_stats.json`）。导出器直接读 zarr 数组（`zarr`/`tensorstore`，不经 JAX 运行时），在 PyTorch 里按 openpi 结构重建前向。
+    - 含真 `action_in_proj`/`action_out_proj`/`time_mlp_*` 与 R1 Pro 归一化统计：**本体适配层是训练过的真权重，无 toy，动作有语义**。
+    - 与 π0 的结构差异（章组按 π0.5 真实结构画）：专家用 **adaRMSNorm** 注入时间（`time_mlp` → 每层 scale/shift/gate），不再把时间并进动作 token；state 离散化进文本前缀，**没有单独的 state token**。
+  - **对照权重**：HF 缓存 `models--lerobot--pi0_base`。⚠ 核查结果：该缓存是本会话中途被叫停的下载，`model.safetensors` **不完整**（`.incomplete`，10.7/≈14 GB）。零下载约束下 π0 base 暂不可用；页面主线用 π0.5，π0 base 仅在补齐后作为对照章，否则 π0↔π0.5 差异只用文案讲。
+  - 前向用 bf16，约 7 GB 显存；窗口切片保留原始精度。
 - **输入样本（已裁决）**：BEHAVIOR challenge 原始 demo 帧，不用 π0 自己的训练数据。
   - **数据位置**：
     - 索引：`/home/frank/workspace/behavior_challenge_data/dataset/behavior-1k-knack/index`（schema.yaml、episodes.parquet、tasks.parquet、stats.json）。
@@ -298,8 +308,9 @@ public/data/groot/*  public/data/pi0/*
 
 ### 6.3 数据：`tools/export_groot.py`
 
-- **权重**：`nvidia/GR00T-N1.6-3B`，6.57 GB bf16，跑前向约 8 GB 显存。
-- **代码**：clone Isaac-GR00T 的 `n1.6-release`，用它的 processor 和 model 类加载。只用代码，不改模型。
+- **权重（零下载，NAS 本地）**：`/home/frank/workspace/model/nvidia/GR00T-N1.7-3B`（6.5 GB，safetensors；含 `experiment_cfg/`、`embodiment_id.json`、`dataset_statistics.json`）。跑前向约 8 GB 显存。
+  - §1.1 的结构事实按 N1.6 核对，实现前须按 N1.7 的 `config.json` / `final_model_config.json` 重新核对（DiT 块数、交替模式、Euler 步数、主干截断层数），章组 G1–G7 随之修正。
+- **代码**：用与 N1.7 匹配的 Isaac-GR00T 版本的 processor 和 model 类加载。只用代码，不改模型。
 - **输入**：同一帧 BEHAVIOR 观测，embodiment = `behavior_r1_pro`（24）。
   - `statistics.json` 里有该本体的归一化统计，所以输出动作**有语义**，可与 k005b 同帧对比。这是三页里最强的并列对照。
   - 前提：需确认 R1Pro 的 modality 配置（相机键、state/action 维度切片）能从仓库的 embodiment 配置里取到。确认不了时退回仓库自带示例数据（如 GR1 或 G1），见决策点 D3。
@@ -354,11 +365,11 @@ public/data/groot/*  public/data/pi0/*
 |---|---|---|
 | 许可证：GR00T 为 NVIDIA OneWay Noncommercial；π0 权重受 Gemma 条款约束 | **已裁决：纯内部使用，不公开部署**，非阻塞 | 页面角落注明来源和许可证名称即可 |
 | GR00T 的 R1Pro modality 配置不在公开仓 | 不能用 BEHAVIOR 帧做出有语义的动作 | 退回仓库示例本体（D3） |
-| pi0_base 对 R1Pro 是 zero-shot | 动作无语义 | 已裁决仍用 BEHAVIOR 帧；3D 内明确标注 |
+| π0.5 COMET 为 openpi JAX/orbax 格式 | 无现成 PyTorch 加载 | 直接读 zarr 数组，PyTorch 重建前向，与 openpi 参考输出逐项比对自检 |
 | demo 视频为 HEVC | 导出器需要能解码 HEVC 的环境 | 复用 behavior_challenge 现有数据加载代码；不行就用 ffmpeg 抽单帧 |
 | 显存/内存 | 14 GB fp32 加载需要约 28 GB 内存峰值（60 GB 够） | bf16 前向；按需 mmap 读取窗口 |
 | 导出数据体积 | 三页 public/data 膨胀 | 只存窗口；单页目标 < 30 MB（与 k005b 同量级） |
-| GR00T 主分支已是 N1.7 | 代码与 N1.6 权重不匹配 | 固定 `n1.6-release` 的 commit hash |
+| 权重为 N1.7，§1.1 事实按 N1.6 核对 | 章组细节可能偏差 | 实现前按 N1.7 config 重核 §1.1 |
 
 ---
 
