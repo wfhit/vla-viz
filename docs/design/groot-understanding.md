@@ -58,7 +58,7 @@ x_1 = 动作块（取后 40 个动作 token 的输出）
 
 ### 2.1 System 2：VLM 主干（只跑一次）
 - **视觉塔**（24 块）：`norm1 → attn(qkv 1024→3072, proj) → norm2 → MLP(1024→4096→1024)`，LayerNorm 带偏置。[W]
-- **merger**：2×2 空间合并后 LN(1024)·4 → 4096 → 2048。另有 3 个 deepstack merger，把视觉塔第 5/11/17 块特征加到语言模型第 0/1/2 层的图像 token 上（§4.4 [W][S7]
+- **merger**：2×2 空间合并后 LN(1024)·4 → 4096 → 2048。另有 3 个 deepstack merger，把视觉塔第 5/11/17 块特征加到语言模型第 0/1/2 层的图像 token 上（§4.4）。[W][S7]
 - **语言模型**（16 层）：标准 Qwen3 块 `RMSNorm → GQA(q/k_norm, RoPE) → 残差 → RMSNorm → SwiGLU → 残差`。`lm_head` 权重还在文件里但前向用不到（select_layer=16 取的是第 16 层隐状态）。[W][C]
 - **vlln**：LayerNorm(2048)。[W]
 - **vl_self_attention**（4 块）：DiT 风格的 BasicTransformerBlock，但**不带时间条件**（norm1/norm3 是普通 LayerNorm），对整段 VL token 做自注意力后作为 DiT 的 K/V 源。[W]
