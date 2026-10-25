@@ -1,5 +1,5 @@
 import { genModelViewMatrices, ICamera, ICameraPos, updateCamera } from "./Camera";
-import { drawAllArrows } from "./components/Arrow";
+import { auditArrows, drawAllArrows } from "./components/Arrow";
 import { defaultActionViz, drawActionViz, IActionVizState } from "./components/ActionViz";
 import { drawBlockLabels } from "./components/SectionLabels";
 import { drawModelCard } from "./components/ModelCard";
@@ -202,6 +202,11 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     // these will get modified by the walkthrough (stored where?)
     drawAllArrows(state.render, state.layout, cubes => cubesInView(state, cubes));
     drawActionViz(state, cubes => cubesInView(state, cubes));
+    // self-check hook for the headless probes: visible data blocks without an in / out arrow
+    if (typeof window !== 'undefined') {
+        (window as any).__arrowAudit = () => auditArrows(state.layout);
+        (window as any).__k005bState = state;
+    }
 
     drawModelCard(state, state.layout, 'k005b VLA', new Vec3());
 

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useContext, useEffect, useLayoutEffect, useState } from 'react';
-import { createK005bGpuModel, fetchK005bData, IK005bData, shapeFromConfig } from './GptModel';
+import { createK005bGpuModel, fetchK005bData, fetchK005bFm, IK005bData, shapeFromConfig } from './GptModel';
 import s from './LayerView.module.scss';
 import { IRenderState, IRenderView } from './render/modelRender';
 import { fetchFontAtlasData, IFontAtlasData } from './render/fontRender';
@@ -241,6 +241,11 @@ class CanvasRender {
             this.progState.shape = shapeFromConfig(model.config);
             this.progState.mainExample.shape = this.progState.shape;
             (window as any).__k005b = model;
+            // the per-Euler-step capture is only needed by the DiT decode chapter: load it after
+            fetchK005bFm(this.renderState.gl).then(fs => {
+                model.fmSteps = fs;
+                this.markDirty();
+            }).catch(e => console.error('k005b-fm.json', e));
         }
         this.markDirty();
     }

@@ -146,17 +146,15 @@ export const TocDiagram: React.FC<{
     makeEntry(Phase.Head_Done, 'done 头', ['done']);
     makeEntry(Phase.Harness_Law, 'Harness 法则', ['harness']);
 
-    entryGroups.push({ groupName: '动作专家与流匹配', entries: [] });
-    makeEntry(Phase.FM_Overview, '一次前向两条流', ['exIn', 'denoiser'], true);
-    makeEntry(Phase.FM_Inputs, '三个输入', ['exIn'], true);
-    makeEntry(Phase.FM_Suffix, '拼成 17 个后缀 token', ['exIn'], true);
-    makeEntry(Phase.FM_JointAttn, '联合注意力', ['denoiser'], true);
-    makeEntry(Phase.FM_TimeMod, 't 调制每层', ['denoiser'], true);
-    makeEntry(Phase.FM_Velocity, '28 层 → 速度场', ['denoiser', 'vt'], true);
-    makeEntry(Phase.FM_Euler, 'Euler 一步 = 残差', ['vt', 'euler', 'chunk'], true);
-    makeEntry(Phase.FM_Loss, '对照真值', ['chunk'], true);
-    makeEntry(Phase.FM_Particles, '8 个噪声', ['euler', 'chunk'], true);
-    makeEntry(Phase.FM_Robot, '落到机器人', ['chunk'], true);
+    entryGroups.push({ groupName: 'DiT 动作专家与流匹配', entries: [] });
+    makeEntry(Phase.D0_TwoTransformers, 'D0 两个 Transformer', ['exIn', 'denoiser'], true);
+    makeEntry(Phase.D1_DitBlock, 'D1 DiT 块解剖', ['denoiser'], true);
+    makeEntry(Phase.D2_Concat, 'D2 拼接成一条序列', ['exIn'], true);
+    makeEntry(Phase.D3_JointAttn, 'D3 联合注意力 = 耦合', ['denoiser'], true);
+    makeEntry(Phase.D4_Forward, 'D4 一次前向穿过 28 层', ['denoiser', 'vt'], true);
+    makeEntry(Phase.D5_PrefixCache, 'D5 前缀只算一次', ['denoiser'], true);
+    makeEntry(Phase.D6_Decode, 'D6 10 次 DiT 穿行', ['vt', 'euler'], true);
+    makeEntry(Phase.D7_ActionChunk, 'D7 动作块', ['euler', 'chunk'], true);
 
     let focusEntry = entries.find(e => e.id === (hoverId ?? activeId));
     let hasFocus = isNotNil(hoverId) || isNotNil(activePhase);

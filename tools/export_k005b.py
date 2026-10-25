@@ -224,6 +224,11 @@ def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
         return out
 
     hs = [h for i in range(NL) for h in step_hooks(i, expert.layers[i])]
+
+    def enorm(m, a, o):
+        x = o[0] if isinstance(o, (tuple, list)) else o
+        scap["expert_out"] = (x[0] if x.dim() == 3 else x).float()
+    hs.append(expert.norm.register_forward_hook(enorm))
     fba.our_eager_attention_forward = step_attn
     cf = []
     t1 = time.time()
@@ -258,7 +263,7 @@ def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
             for kname, val in scap.items():
                 if not kname.startswith("_"):
                     wide = kname.split(".")[-1] in ("ln1", "o", "res1", "ln2", "mlp", "out", "ada") or kname in (
-                        "expert_in", "fm_action_emb", "fm_time_mlp_hidden", "fm_action_time", "fm_time_emb")
+                        "expert_in", "expert_out", "fm_action_emb", "fm_time_mlp_hidden", "fm_action_time", "fm_time_emb")
                     st[kname] = val[..., :WC] if wide else val
             steps[s] = (tk, st)
             xc = xn

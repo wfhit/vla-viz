@@ -176,6 +176,32 @@ export interface IExpertLayerLink {
     out: IRealTex;      // [n_suf, Wc] expert residual stream after layer i (res1 + mlp)
     attn: IRealTex;     // [n_suf, Wt + n_suf] head-mean probs: prefix window keys | suffix keys
     mass: Float32Array; // [n_suf, 4] attention mass on [state tokens | visual | text | suffix]
+    // the suffix "tails" of the trunk's per-head blocks (same joint attention, expert weights)
+    q: IRealTex[];      // per head [n_suf, Wd]
+    k: IRealTex[];      // per kv group [n_suf, Wd] (expert kv heads tiled to the trunk's groups)
+    v: IRealTex[];      // per kv group [n_suf, Wd]
+    scp: IRealTex[];    // per head [n_suf, Wt] scores vs the prefix-window keys
+    scs: IRealTex[];    // per head [n_suf, n_suf] scores vs the suffix keys
+    pp: IRealTex[];     // per head [n_suf, Wt] softmax probs on the prefix-window keys
+    ps: IRealTex[];     // per head [n_suf, n_suf] softmax probs on the suffix keys
+    vo: IRealTex[];     // per head [n_suf, Wd] attention output
+    gate: IRealTex;     // [n_suf, Wf]
+    up: IRealTex;       // [n_suf, Wf]
+    act: IRealTex;      // [n_suf, Wf]
+}
+
+// One Euler step of the K-step decode (k005b-fm.json): x_t, v, x_next and every layer's
+// suffix lane at t_k. Lazily loaded; float16 on disk.
+export interface IFmStep {
+    t: number;
+    tex: Record<string, IRealTex>;
+}
+
+export interface IFmStepsLink {
+    K: number;
+    checkpointStep: number;
+    inDistribution: boolean;
+    steps: IFmStep[];
 }
 
 export interface IGptModelLink {
@@ -207,6 +233,7 @@ export interface IGptModelLink {
     actionVelocity: IRealTex;
     actionChunk: IRealTex;
     fm: IFmLink;
+    fmSteps?: IFmStepsLink;
 }
 
 // the suffix inputs and flow-matching tensors (all real, see export_flow_matching)
@@ -262,6 +289,41 @@ async function fetchTensorFile(url: string) {
         };
     }
     return { config: json.config as IK005bConfig, tensors: out };
+}
+
+function halfToFloat(h: number) {
+    let s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
+    if (e === 0) return s * Math.pow(2, -14) * (f / 1024);
+    if (e === 31) return f ? NaN : s * Infinity;
+    return s * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+
+function decodeF16(b64: string) {
+    let u16 = new Uint16Array(base64ToArrayBuffer(b64));
+    let out = new Float32Array(u16.length);
+    for (let i = 0; i < u16.length; i++) out[i] = halfToFloat(u16[i]);
+    return out;
+}
+
+// the per-Euler-step capture (tools/export_k005b.py export_flow_matching), whole small tensors
+export async function fetchK005bFm(gl: WebGL2RenderingContext): Promise<IFmStepsLink> {
+    let resp = await fetch('k005b-fm.json');
+    if (!resp.ok) throw new Error(`failed to fetch k005b-fm.json: ${resp.status}`);
+    let json = await resp.json();
+    let steps: IFmStep[] = [];
+    for (let st of json.steps) {
+        let tex: Record<string, IRealTex> = {};
+        for (let k in st.tensors) {
+            let e = st.tensors[k];
+            if (e.dtype !== 'torch.float16') throw new Error(`fm ${k}: unsupported dtype ${e.dtype}`);
+            tex[k] = makeTex(gl, {
+                name: `${k} @t=${(+st.t).toFixed(1)}`, shape: e.shape, data: decodeF16(e.data),
+                fullShape: e.shape, offset: e.shape.map(() => 0), stats: e.stats, desc: e.desc,
+            });
+        }
+        steps.push({ t: st.t, tex });
+    }
+    return { K: json.K, checkpointStep: json.checkpoint_step, inDistribution: !!json.in_distribution, steps };
 }
 
 export async function fetchK005bData(): Promise<IK005bData> {
@@ -460,6 +522,17 @@ export function createK005bGpuModel(gl: WebGL2RenderingContext, data: IK005bData
             out: a(`E${i}.out`),
             attn: a(`E${i}.attn`),
             mass: get(A, `E${i}.attn_mass`).data,
+            q: Array.from({ length: H }, (_, h) => a(`E${i}.q`, h)),
+            k: Array.from({ length: KV }, (_, g) => a(`E${i}.k`, g)),
+            v: Array.from({ length: KV }, (_, g) => a(`E${i}.v`, g)),
+            scp: Array.from({ length: H }, (_, h) => a(`E${i}.scp`, h)),
+            scs: Array.from({ length: H }, (_, h) => a(`E${i}.scs`, h)),
+            pp: Array.from({ length: H }, (_, h) => a(`E${i}.pp`, h)),
+            ps: Array.from({ length: H }, (_, h) => a(`E${i}.ps`, h)),
+            vo: Array.from({ length: H }, (_, h) => a(`E${i}.vo`, h)),
+            gate: a(`E${i}.gate`),
+            up: a(`E${i}.up`),
+            act: a(`E${i}.act`),
         })),
         expertOut: a('expert_out'),
         actionWeight: w('action_w'),

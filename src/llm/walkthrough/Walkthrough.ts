@@ -116,18 +116,16 @@ export function initWalkthrough() {
             ],
         }, {
             groupId: PhaseGroup.FlowMatching,
-            title: '动作专家与流匹配',
+            title: 'DiT 动作专家与流匹配',
             phases: [
-                { id: Phase.FM_Overview, title: '一次前向两条流' },
-                { id: Phase.FM_Inputs, title: '三个输入' },
-                { id: Phase.FM_Suffix, title: '拼成 17 个后缀 token' },
-                { id: Phase.FM_JointAttn, title: '联合注意力' },
-                { id: Phase.FM_TimeMod, title: 't 调制每层' },
-                { id: Phase.FM_Velocity, title: '28 层 → 速度场' },
-                { id: Phase.FM_Euler, title: 'Euler 一步 = 残差' },
-                { id: Phase.FM_Loss, title: '对照真值' },
-                { id: Phase.FM_Particles, title: '8 个噪声' },
-                { id: Phase.FM_Robot, title: '落到机器人' },
+                { id: Phase.D0_TwoTransformers, title: 'D0 两个 Transformer' },
+                { id: Phase.D1_DitBlock, title: 'D1 DiT 块解剖' },
+                { id: Phase.D2_Concat, title: 'D2 拼接成一条序列' },
+                { id: Phase.D3_JointAttn, title: 'D3 联合注意力 = 耦合' },
+                { id: Phase.D4_Forward, title: 'D4 一次前向穿过 28 层' },
+                { id: Phase.D5_PrefixCache, title: 'D5 前缀只算一次' },
+                { id: Phase.D6_Decode, title: 'D6 10 次 DiT 穿行' },
+                { id: Phase.D7_ActionChunk, title: 'D7 动作块' },
             ],
         }] as IPhaseGroup[],
     };
@@ -165,16 +163,14 @@ export enum Phase {
     Head_Knack,
     Head_Done,
     Harness_Law,
-    FM_Overview,
-    FM_Inputs,
-    FM_Suffix,
-    FM_JointAttn,
-    FM_TimeMod,
-    FM_Velocity,
-    FM_Euler,
-    FM_Loss,
-    FM_Particles,
-    FM_Robot,
+    D0_TwoTransformers,
+    D1_DitBlock,
+    D2_Concat,
+    D3_JointAttn,
+    D4_Forward,
+    D5_PrefixCache,
+    D6_Decode,
+    D7_ActionChunk,
 }
 
 export function phaseToGroup(wt: IWalkthrough) {
@@ -213,6 +209,10 @@ export function runWalkthrough(state: IProgramState, view: IRenderView) {
     let wtArgs: IWalkthroughArgs = { state, layout: state.layout, tools: phaseTools(state), walkthrough: wt };
 
     let groupId = phaseToGroup(wt).groupId;
+    // the single-layer trunk chapters explain one mechanism: the DiT tails appear from D0 on
+    if (groupId === PhaseGroup.Detailed_Input && state.layout) {
+        for (let c of state.layout.ditCubes) c.opacity = 0;
+    }
     if (groupId === PhaseGroup.Intro) {
         walkthroughIntro(wtArgs);
         walkthrough01_Prelim(wtArgs);

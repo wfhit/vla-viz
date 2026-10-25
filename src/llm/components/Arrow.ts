@@ -49,8 +49,8 @@ export function auditArrows(layout: IGptModelLayout) {
     // sources by construction: the token ids, the FM inputs, te's per-layer AdaNorm γβ, and
     // the bottom x1 which is the same tensor as the FM input x1 (a skip, not a new source)
     let srcOk = new Set<IBlkDef>([layout.idxObj, layout.fm.state75, layout.fm.x1, layout.fm.timeEmb,
-        layout.actionX1, ...layout.expertLayers.flatMap(e => [e.ada, e.ada2])]);
-    let sinkOk = new Set<IBlkDef>([layout.logitsSoftmax, layout.doneProbs, layout.actionChunk]);
+        layout.actionX1, layout.strip[0], ...layout.expertLayers.flatMap(e => [e.ada, e.ada2])]);
+    let sinkOk = new Set<IBlkDef>([layout.logitsSoftmax, layout.doneProbs, layout.actionChunk, layout.strip[layout.strip.length - 1]]);
     let noIn = visible.filter(c => !hasIn.has(c) && !srcOk.has(c) && c.name);
     let noOut = visible.filter(c => !hasOut.has(c) && !sinkOk.has(c) && c.name);
     return { noIn: noIn.map(c => c.name), noOut: noOut.map(c => c.name), edges: arrowEdges.length };
@@ -61,18 +61,45 @@ export function auditArrows(layout: IGptModelLayout) {
 export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVisible?: (cubes: IBlkDef[]) => boolean) {
 
     let pad = 2.0;
-    let prevResid = layout.residual0;
     let weightColor = Vec4.fromHexColor('#3333aa');
     let dataColor = Vec4.fromHexColor('#33aa33');
     let expertColor = Vec4.fromHexColor('#d97706');
+    let timeColor = Vec4.fromHexColor('#0891b2');
     let flowColor = Vec4.fromHexColor('#facc15');
-    let expertSet = new Set<IBlkDef>([layout.expertIn, ...layout.expertLayers.flatMap(e => e.cubes)]);
+    let ditSet = new Set<IBlkDef>(layout.ditCubes);
+
+    // a [trunk | DiT tail] pair (or a stacked group) drawn as ONE arrow endpoint: the arrow meets
+    // the pair's outer box, so it never runs through the tail
+    let members = new Map<IBlkDef, IBlkDef[]>();
+    function U(...bs: IBlkDef[]): IBlkDef {
+        let vis = bs.filter(b => b.opacity > 0);
+        let use = vis.length ? vis : bs;
+        let x0 = Math.min(...use.map(b => b.x)), x1 = Math.max(...use.map(b => b.x + b.dx));
+        let y0 = Math.min(...use.map(b => b.y)), y1 = Math.max(...use.map(b => b.y + b.dy));
+        let z0 = Math.min(...use.map(b => b.z)), z1 = Math.max(...use.map(b => b.z + b.dz));
+        let u = { ...bs[0], x: x0, y: y0, z: z0, dx: x1 - x0, dy: y1 - y0, dz: z1 - z0,
+            opacity: Math.max(0, ...bs.map(b => b.opacity)), name: '' };
+        members.set(u, bs);
+        return u;
+    }
+    let mem = (b: IBlkDef) => (members.get(b) ?? [b]).filter(c => c.opacity > 0);
+
+    // off-screen layers: record the edges (audit) but upload no geometry
+    let dry = false;
+    function rec(src: IBlkDef, dst: IBlkDef) {
+        let s = mem(src), d = mem(dst);
+        if (s.length === d.length) s.forEach((b, i) => recordArrowEdge(b, d[i]));
+        else for (let a of s) for (let b of d) recordArrowEdge(a, b);
+    }
+    function drawA(st: IRenderState, start: Vec3, end: Vec3, width: number, normal: Vec3, color: Vec4, drawHead: boolean = true, drawCorner: CornerMode = CornerMode.None, endDir?: Vec3) {
+        if (!dry) drawArrow(st, start, end, width, normal, color, drawHead, drawCorner, endDir);
+    }
 
     arrowEdges = [];
     drawVertArrow(layout.idxObj, layout.residual0);
     drawHorizArrow(layout.tokEmbedObj, layout.residual0);
 
-    // flow-matching suffix inputs → expertIn (the x1 chain runs right → left)
+    // flow-matching suffix inputs → the DiT suffix input (the x_t chain runs right → left)
     let fm = layout.fm;
     drawVertArrow(fm.state75, fm.stateProjW, 4);
     drawArrowBetween(fm.stateProjW, BlockPos.Left, fm.stateEmb, BlockPos.Right, 4);
@@ -85,114 +112,221 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
     drawArrowBetween(fm.timeHidden, BlockPos.Left, fm.timeOutW, BlockPos.Right, 4);
     drawArrowBetween(fm.timeOutW, BlockPos.Left, fm.actionTime, BlockPos.Right, 4);
     drawArrowBetween(fm.actionTime, BlockPos.Left, layout.expertIn, BlockPos.Right, 4);
+
+    drawEulerStrip();
+
+    let lnUnit = (ln: IGptModelLayout['ln_f'], tail: IBlkDef) => U(ln.lnAgg1, ln.lnAgg2, ln.lnResid, tail);
+    let prev = U(layout.residual0, layout.expertIn);
     for (let i = 0; i < layout.blocks.length; i++) {
         let block = layout.blocks[i];
-        if (Math.abs(prevResid.x - block.attnResidual.x) > 1) {
+        let e = block.expert;
+        let ln1U = lnUnit(block.ln1, e.ln1);
+        if (i > 0 && Math.abs(layout.blocks[i - 1].attnResidual.x - block.attnResidual.x) > 1) {
             // column wrap: the stream continues at the top of the next column — no arrow
             // runs back up across the scene; both ends are labelled instead
-            recordArrowEdge(prevResid, block.ln1.lnResid);
-            drawWrapLabel(prevResid, `continues: layer ${i} (next column) ->`, 1);
-            let entry = { ...block.attnResidual, y: block.ln1.lnAgg1.y - 4 * layout.margin, dy: 0 };
+            dry = false;
+            rec(prev, ln1U);
+            drawWrapLabel(prev, `continues: layer ${i} (next column) ->`, 1);
+            let r = U(block.attnResidual, e.res1);
+            let entry = { ...r, y: ln1U.y - 4 * layout.margin, dy: 0 };
+            members.set(entry, []);
             drawWrapLabel(entry, `<- from layer ${i - 1}`, -1);
-            prevResid = entry;
+            prev = entry;
         }
-        if (isVisible && !isVisible(block.cubes)) {
-            // off-screen: keep the edge record (audit) without uploading geometry
-            for (let [s, d] of [[prevResid, block.ln1.lnResid], [prevResid, block.attnResidual],
-                [block.attnResidual, block.ln2.lnResid], [block.attnResidual, block.mlpResidual]]) recordArrowEdge(s, d);
-            prevResid = block.mlpResidual;
-            continue;
-        }
-        // the stream enters the layer: down out of the previous ⊕, into the input RMSNorm
-        drawArrowBetween(prevResid, BlockPos.Bot, block.ln1.lnAgg2, BlockPos.Right, 2);
-        drawArrowBetween(prevResid, BlockPos.Bot, block.ln1.lnResid, BlockPos.Right);
+        dry = !!isVisible && !isVisible([...block.cubes, ...e.cubes]);
+
+        // the concatenated [prefix | suffix] stream enters the layer: ⊕ unit → norm unit
+        drawArrowBetween(prev, BlockPos.Bot, ln1U, BlockPos.Top);
         drawVertArrow(block.ln1.lnAgg2, block.ln1.lnResid, 2);
+        drawHorizArrow(block.ln1.lnSigma, block.ln1.lnResid);
+        drawArrowBetween(e.ada, BlockPos.Left, e.ln1, BlockPos.Right, 2);
+        let lnR = U(block.ln1.lnResid, e.ln1);
 
         // K/V are shared by the query heads of a kv group: one arrow per group
-        for (let g of block.kvGroups) {
-            drawArrowBetween(block.ln1.lnResid, BlockPos.Left, g.kBlock, BlockPos.Right);
-            drawArrowBetween(block.ln1.lnResid, BlockPos.Left, g.vBlock, BlockPos.Right);
-            drawHorizArrow(g.kWeightBlock, g.kBlock);
-            drawHorizArrow(g.vWeightBlock, g.vBlock);
+        for (let g = 0; g < block.kvGroups.length; g++) {
+            let grp = block.kvGroups[g];
+            drawArrowBetween(lnR, BlockPos.Left, U(grp.kBlock, e.kv[g].k), BlockPos.Right);
+            drawArrowBetween(lnR, BlockPos.Left, U(grp.vBlock, e.kv[g].v), BlockPos.Right);
+            drawHorizArrow(grp.kWeightBlock, grp.kBlock);
+            drawHorizArrow(grp.vWeightBlock, grp.vBlock);
         }
 
-        for (let head of block.heads) {
-            drawArrowBetween(block.ln1.lnResid, BlockPos.Left, head.qBlock, BlockPos.Right);
+        let oU = U(block.attnOut, e.o);
+        for (let h = 0; h < block.heads.length; h++) {
+            let head = block.heads[h], eh = e.heads[h], g = head.kvGroup;
+            let qU = U(head.qBlock, eh.q), kU = U(head.kBlock, e.kv[g].k), vU = U(head.vBlock, e.kv[g].v);
+            let attU = U(head.attnMtx, eh.scP, eh.scS), smU = U(head.attnMtxSm, eh.pP, eh.pS);
+            let voU = U(head.vOutBlock, eh.vo);
+            drawArrowBetween(lnR, BlockPos.Left, qU, BlockPos.Right);
             // q_norm/k_norm γ act AFTER the projection (they have no arrow into W)
             drawHorizArrow(head.qWeightBlock, head.qBlock);
 
-            drawArrowBotToSide(head.qBlock, head.attnMtx, 0, undefined, head.qBlock.y !== head.kBlock.y);
-            drawArrowBotToSide(head.kBlock, head.attnMtx, 0, undefined, head.kBlock.y !== head.qBlock.y);
-            drawArrowBotToSide(head.vBlock, head.vOutBlock, 0, undefined, head.vBlock.y !== head.kBlock.y);
+            drawArrowBotToSide(qU, attU, 0);
+            drawArrowBotToSide(kU, attU, 0);
+            drawArrowBotToSide(vU, voU, 0);
 
-            drawArrowBetween(head.attnMtx, BlockPos.Left, head.attnMtxAgg2, BlockPos.Right);
-            drawArrowBetween(head.attnMtxAgg1, BlockPos.Left, head.attnMtxSm, BlockPos.Right);
-            drawArrowBetween(head.attnMtxSm, BlockPos.Bot, head.vOutBlock, BlockPos.Left);
+            drawArrowBetween(attU, BlockPos.Left, head.attnMtxAgg2, BlockPos.Right);
+            drawArrowBetween(head.attnMtxAgg1, BlockPos.Left, smU, BlockPos.Right);
+            drawArrowBetween(smU, BlockPos.Bot, voU, BlockPos.Left);
 
-            drawArrowBetween(head.vOutBlock, BlockPos.Bot, block.attnOut, BlockPos.Top);
+            drawArrowBetween(voU, BlockPos.Bot, oU, BlockPos.Top);
         }
 
-        drawHorizArrow(block.attnOut, block.attnResidual);
+        let r1U = U(block.attnResidual, e.res1);
+        drawHorizArrow(oU, r1U);
         drawHorizArrow(block.projWeight, block.attnOut);
-        drawHorizArrow(block.ln1.lnSigma, block.ln1.lnResid);
         // ⊕ = o_proj out + the layer input: the skip is a label, not a line past the sublayers
-        drawSkip(prevResid, block.attnResidual, '+ skip: layer input');
+        drawSkip(prev, r1U, '+ skip: layer input');
 
-        drawArrowBetween(block.attnResidual, BlockPos.Bot, block.ln2.lnAgg2, BlockPos.Right, 2);
-        drawArrowBetween(block.attnResidual, BlockPos.Bot, block.ln2.lnResid, BlockPos.Right);
+        let ln2U = lnUnit(block.ln2, e.ln2);
+        drawArrowBetween(r1U, BlockPos.Bot, ln2U, BlockPos.Top);
         drawVertArrow(block.ln2.lnAgg2, block.ln2.lnResid, 2);
         drawHorizArrow(block.ln2.lnSigma, block.ln2.lnResid);
+        drawArrowBetween(e.ada2, BlockPos.Left, e.ln2, BlockPos.Right, 2);
+        let ln2R = U(block.ln2.lnResid, e.ln2);
 
-        drawArrowBetween(block.ln2.lnResid, BlockPos.Bot, block.mlpFc, BlockPos.Right);
-        drawArrowOverTo(block.ln2.lnResid, block.mlpUp);
+        let gU = U(block.mlpFc, e.gate), upU = U(block.mlpUp, e.up), actU = U(block.mlpAct, e.act);
+        let mU = U(block.mlpResult, e.mlp), r2U = U(block.mlpResidual, e.out);
+        drawArrowBetween(ln2R, BlockPos.Bot, gU, BlockPos.Right);
+        drawArrowOverTo(ln2R, upU);
 
         // SwiGLU: gate & up branches meet in silu(gate)·up
         drawVertArrow(block.mlpFcWeight, block.mlpFc, 12);
         drawVertArrow(block.mlpUpWeight, block.mlpUp, 12);
-        drawVertArrow(block.mlpFc, block.mlpAct, 12);
-        drawArrowBetween(block.mlpUp, BlockPos.Bot, block.mlpAct, BlockPos.Left);
+        drawVertArrow(gU, actU, 12);
+        drawArrowBetween(upU, BlockPos.Bot, actU, BlockPos.Left);
         drawHorizArrow(block.mlpProjWeight, block.mlpResult);
-        drawHorizArrow(block.mlpResult, block.mlpResidual);
-        drawArrowBetween(block.mlpAct, BlockPos.Right, block.mlpResult, BlockPos.Top);
-        drawSkip(block.attnResidual, block.mlpResidual, '+ skip: attn residual');
+        drawHorizArrow(mU, r2U);
+        drawArrowBetween(actU, BlockPos.Right, mU, BlockPos.Top);
+        drawSkip(r1U, r2U, '+ skip: attn residual');
 
-        prevResid = block.mlpResidual;
+        prev = r2U;
     }
+    dry = false;
 
-    drawExpertStream();
+    drawTimeBus();
 
-    drawArrowBetween(prevResid, BlockPos.Bot, layout.ln_f.lnAgg2, BlockPos.Right, 2);
-    drawArrowBetween(prevResid, BlockPos.Bot, layout.ln_f.lnResid, BlockPos.Right);
-    drawVertArrow(layout.ln_f.lnAgg2, layout.ln_f.lnResid);
+    let lnfU = lnUnit(layout.ln_f, layout.expertOut);
+    drawArrowBetween(prev, BlockPos.Bot, lnfU, BlockPos.Top);
+    drawVertArrow(layout.ln_f.lnAgg2, layout.ln_f.lnResid, 2);
     drawHorizArrow(layout.ln_f.lnSigma, layout.ln_f.lnResid);
 
-    // h* → knack head (below) and done head (right)
-    drawVertArrow(layout.ln_f.lnResid, layout.hStar, 2);
+    // h* (the boundary column of ln_f) → knack head (below) and done head (left)
+    drawStraightDown(layout.ln_f.lnResid, layout.hStar, 2, layout.hStar.x + layout.hStar.dx / 2);
     drawVertArrow(layout.hStar, layout.logits, 2);
-    drawHorizArrow(layout.lmHeadWeight, layout.logits);
+    drawHorizArrow(layout.lmHeadWeight, layout.logits, 2);
     drawVertArrow(layout.logits, layout.logitsAgg2, 2);
     drawVertArrow(layout.logitsAgg1, layout.logitsSoftmax, 2);
 
-    drawArrowBetween(layout.hStar, BlockPos.Right, layout.doneLogits, BlockPos.Top, 2);
-    drawArrowBetween(layout.doneWeight, BlockPos.Left, layout.doneLogits, BlockPos.Right, 2);
+    drawArrowBetween(layout.hStar, BlockPos.Left, layout.doneLogits, BlockPos.Right, 2);
+    drawHorizArrow(layout.doneWeight, layout.doneLogits, 2);
     drawVertArrow(layout.doneLogits, layout.doneAgg2, 2);
     drawVertArrow(layout.doneAgg1, layout.doneProbs, 2);
 
-    // expert suffix → action_out_proj → velocity; x1 − v → action chunk
-    drawVertArrow(layout.expertOut, layout.actionVelocity);
-    drawHorizArrow(layout.actionWeight, layout.actionVelocity);
-    drawVertArrow(layout.actionVelocity, layout.actionChunk);
-    drawHorizArrow(layout.actionX1, layout.actionChunk);
+    // DiT final norm (tokens 1..16) → action_out_proj → v; one-step decode x1 − v below
+    let v = layout.actionVelocity;
+    drawStraightDown(layout.expertOut, v, 4, v.x + v.dx / 2);
+    drawArrowBetween(layout.actionWeight, BlockPos.Left, v, BlockPos.Right, 4);
+    drawVertArrow(v, layout.actionChunk, 4);
+    drawArrowBetween(layout.actionX1, BlockPos.Left, layout.actionChunk, BlockPos.Right, 4);
+
+    drawEulerReturn();
+
+    // te(t) → every DiT layer's γβ slots: one bus per column, just right of the γβ slots
+    function drawTimeBus() {
+        let te = layout.fm.timeEmb;
+        let els = layout.blocks.map(b => b.expert);
+        let cols: (typeof els)[] = [];
+        for (let e of els) {
+            let last = cols[cols.length - 1];
+            if (last && Math.abs(last[0].ada.x - e.ada.x) < 1) last.push(e);
+            else cols.push([e]);
+        }
+        let w = 1.6;
+        let normal = new Vec3(0, 0, 1);
+        for (let c = 0; c < cols.length; c++) {
+            let col = cols[c];
+            let ends = col.flatMap(e => [e.ada, e.ada2]).filter(b => b.opacity > 0 && te.opacity > 0);
+            if (ends.length === 0) continue;
+            let res = layout.blocks[col[0].layer].attnResidual;
+            let busX = (ends[0].x + ends[0].dx + res.x) / 2;
+            let z = ends[0].z + ends[0].dz / 2;
+            let op = Math.min(te.opacity, Math.max(...ends.map(b => b.opacity)));
+            let lit = layout.flow && ends.some(b => layout.flow!.active.has(b));
+            let col4 = (lit ? flowColor : timeColor).mul(op);
+            let yEnd = ends[ends.length - 1].y + ends[ends.length - 1].dy / 2;
+            let yStart: number;
+            if (c === 0) {
+                // from te: up out of te, across above the input cluster, down the bus
+                let yTop = layout.fm.state75.y - layout.margin;
+                let tx = te.x + te.dx / 2;
+                yStart = yTop;
+                drawA(state, new Vec3(tx, te.y - pad, z), new Vec3(tx, yTop + w / 2, z), w, normal, col4, false);
+                drawA(state, new Vec3(tx + w / 2, yTop, z), new Vec3(busX - w / 2, yTop, z), w, normal, col4, false, CornerMode.Right);
+            } else {
+                yStart = ends[0].y - 4 * layout.margin;
+                drawWrapLabel({ ...ends[0], x: busX - ends[0].dx / 2, y: yStart + 4, dy: 0 }, 'te(t) bus (from te)', -1);
+            }
+            drawA(state, new Vec3(busX, yStart - w / 2, z), new Vec3(busX, yEnd, z), w, normal, col4, false);
+            for (let b of ends) {
+                rec(te, b);
+                let ym = b.y + b.dy / 2;
+                let c2 = layout.flow?.active.has(b) ? flowColor.mul(op) : col4;
+                drawA(state, new Vec3(busX, ym, z), new Vec3(b.x + b.dx + pad * 0.5, ym, z), w, normal, c2, true);
+            }
+        }
+    }
+
+    // the Euler strip: x(t=1) … x(t=0); board j → board j+1 (− v_j / K); the current board
+    // feeds the x_t input of the DiT
+    function drawEulerStrip() {
+        let S = layout.strip;
+        let eu = layout.euler;
+        for (let j = 0; j < S.length; j++) {
+            if (S[j].opacity <= 0) continue;
+            if (j + 1 < S.length && S[j + 1].opacity > 0) {
+                drawArrowBetween(S[j], BlockPos.Right, S[j + 1], BlockPos.Left, 3);
+            }
+            if (j < S.length - 1) {
+                if (eu && eu.k === j) drawArrowBetween(S[j], BlockPos.Bot, fm.x1, BlockPos.Top, 3);
+                else rec(S[j], fm.x1);
+            }
+        }
+    }
+
+    // v_k → board k+1: the one return line (down, out to the right of the scene, up, back in)
+    function drawEulerReturn() {
+        let eu = layout.euler;
+        let S = layout.strip;
+        if (!eu) return;
+        for (let j = 1; j < S.length; j++) if (S[j].opacity > 0 && v.opacity > 0) rec(v, S[j]);
+        let dst = S[eu.k + 1];
+        if (!dst || eu.ret <= 0 || dst.opacity <= 0 || v.opacity <= 0) return;
+        let w = 3;
+        let normal = new Vec3(0, 0, 1);
+        let col = flowColor.mul(eu.ret);
+        let z = v.z + v.dz / 2;
+        let xFar = Math.max(...layout.cubes.filter(c => c.opacity > 0).map(c => c.x + c.dx)) + 3 * layout.margin;
+        let yLow = v.y + v.dy + layout.margin / 2;
+        let yTop = dst.y - layout.margin;
+        let sx = v.x + v.dx / 2, dx = dst.x + dst.dx / 2;
+        drawA(state, new Vec3(sx, v.y + v.dy + pad, z), new Vec3(sx, yLow - w / 2, z), w, normal, col, false);
+        drawA(state, new Vec3(sx - w / 2, yLow, z), new Vec3(xFar + w / 2, yLow, z), w, normal, col, false, CornerMode.Left);
+        drawA(state, new Vec3(xFar, yLow + w / 2, z), new Vec3(xFar, yTop - w / 2, z), w, normal, col, false, CornerMode.Left);
+        drawA(state, new Vec3(xFar + w / 2, yTop, z), new Vec3(dx - w / 2, yTop, z), w, normal, col, false, CornerMode.Left);
+        drawA(state, new Vec3(dx, yTop - w / 2, z), new Vec3(dx, dst.y - pad, z), w, normal, col, true, CornerMode.Left);
+        drawWrapLabel({ ...dst, y: yTop - 2, dy: 0 }, `v(t=${(1 - eu.k / (S.length - 1)).toFixed(1)}): x - v/${S.length - 1}`, -1);
+    }
 
     // straight down from src's bottom into dest's top at src's x (dest is wider)
     function drawStraightDown(src: IBlkDef, dest: IBlkDef, width: number = 6, x?: number) {
         let opacity = Math.min(src.opacity, dest.opacity);
         if (opacity === 0) return;
-        recordArrowEdge(src, dest);
+        rec(src, dest);
         let start = blockPos(src, BlockPos.Bot);
         if (x !== undefined) start.x = x;
         let end = new Vec3(start.x, dest.y - pad, dest.z + dest.dz / 2);
-        drawArrow(state, start, end, width, new Vec3(0, 0, 1), arrowColor(src, dest, opacity), true);
+        drawA(state, start, end, width, new Vec3(0, 0, 1), arrowColor(src, dest, opacity), true);
     }
 
     function blkColor(src: IBlkDef) {
@@ -202,11 +336,12 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
     // during a data-pass animation the arrow into the block being computed is lit and arrows
     // into blocks the pass has not reached yet are faded
     function arrowColor(src: IBlkDef, dest: IBlkDef, opacity: number) {
-        let base = expertSet.has(src) && src.t !== 'w' ? expertColor : blkColor(src);
+        let sm = members.get(src) ?? [src], dm = (members.get(dest) ?? [dest]).filter(b => b.opacity > 0);
+        let base = sm.every(b => ditSet.has(b)) && src.t !== 'w' ? expertColor : blkColor(src);
         let f = layout.flow;
-        if (f) {
-            if (f.active.has(dest)) return flowColor.mul(opacity);
-            if (f.pending.has(dest)) return base.mul(opacity * 0.18);
+        if (f && dm.length) {
+            if (dm.some(b => f!.active.has(b))) return flowColor.mul(opacity);
+            if (dm.every(b => f!.pending.has(b))) return base.mul(opacity * 0.18);
         }
         return base.mul(opacity);
     }
@@ -216,7 +351,8 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
     function drawSkip(src: IBlkDef, dest: IBlkDef, text: string) {
         let opacity = Math.min(src.opacity, dest.opacity);
         if (opacity === 0) return;
-        recordArrowEdge(src, dest);
+        rec(src, dest);
+        if (dry) return;
         let size = 4;
         let f = layout.flow;
         let a = f && f.pending.has(dest) ? 0.25 : 1;
@@ -228,53 +364,6 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         state.sharedRender.activePhase = RenderPhase.Overlay;
         drawText(state.modelFontBuf, text, -w / 2, 0, opts);
         state.sharedRender.activePhase = prev;
-    }
-
-    // the action expert's suffix stream through its 28 layers; every sublayer is a block in
-    // line with the trunk sublayer it shares a row with (the joint attention couples them)
-    function drawExpertStream() {
-        let els = layout.expertLayers;
-        if (els.length === 0) return;
-        let prev: IBlkDef = layout.expertIn;
-        for (let i = 0; i < els.length; i++) {
-            let e = els[i];
-            if (i > 0 && Math.abs(els[i - 1].ln1.x - e.ln1.x) > 1) {
-                recordArrowEdge(prev, e.ln1);
-                drawWrapLabel(prev, `continues: expert ${i} (next column) ->`, 1);
-                drawWrapLabel(e.ln1, `<- from expert ${i - 1}`, -1);
-            } else if (isVisible && !isVisible(e.cubes)) {
-                recordArrowEdge(prev, e.ln1);
-            } else if (i === 0) {
-                drawStraightDown(prev, e.ln1, 4, e.ln1.x + e.ln1.dx / 2);
-            } else {
-                drawArrowOverTo(prev, e.ln1, 4);
-            }
-            if (isVisible && !isVisible(e.cubes)) {
-                for (let [s, d] of [[e.ada, e.ln1], [e.ln1, e.attn], [e.attn, e.o], [e.o, e.res1], [prev, e.res1],
-                    [e.res1, e.ln2], [e.ada2, e.ln2], [e.ln2, e.mlp], [e.mlp, e.out], [e.res1, e.out]]) recordArrowEdge(s, d);
-                prev = e.out;
-                continue;
-            }
-            drawArrowBetween(e.ada, BlockPos.Left, e.ln1, BlockPos.Right, 3);
-            drawStraightDown(e.ln1, e.attn, 4, e.ln1.x + e.ln1.dx / 2);
-            drawStraightDown(e.attn, e.o, 4, e.o.x + e.o.dx / 2);
-            drawHorizArrow(e.o, e.res1, 4);
-            drawSkip(prev, e.res1, '+ skip: x_in');
-            drawArrowOverTo(e.res1, e.ln2, 4);
-            drawArrowBetween(e.ada2, BlockPos.Left, e.ln2, BlockPos.Right, 3);
-            drawVertArrow(e.ln2, e.mlp, 4);
-            drawHorizArrow(e.mlp, e.out, 4);
-            drawSkip(e.res1, e.out, '+ skip: attn resid');
-            prev = e.out;
-        }
-        let fin = layout.expertOut;
-        if (Math.abs(fin.x - prev.x) < 1 && fin.y > prev.y) {
-            drawVertArrow(prev, fin, 4);
-        } else {
-            recordArrowEdge(prev, fin);
-            drawWrapLabel(prev, `continues: Expert Suffix Out ->`, 1);
-            drawWrapLabel(fin, `<- from expert ${els.length - 1}`, -1);
-        }
     }
 
     function drawVertArrow(src: IBlkDef, dest: IBlkDef, width: number = 6) {
@@ -291,19 +380,20 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         if (opacity === 0) {
             return;
         }
-        recordArrowEdge(src, dest);
+        rec(src, dest);
         let normal = new Vec3(0, 0, 1);
         let color = arrowColor(src, dest, opacity);
         let start = blockPos(src, BlockPos.Bot);
         let end = blockPos(dest, BlockPos.Top);
         let yMid = dest.y - layout.margin / 2;
         let z = dest.z + dest.dz / 2;
-        drawArrow(state, start, new Vec3(start.x, yMid - width / 2, z), width, normal, color, false);
-        drawArrow(state, new Vec3(start.x - width / 2, yMid, z), new Vec3(end.x + width / 2, yMid, z), width, normal, color, false, CornerMode.Left);
-        drawArrow(state, new Vec3(end.x, yMid + width / 2, z), end, width, normal, color, true, CornerMode.Left);
+        drawA(state, start, new Vec3(start.x, yMid - width / 2, z), width, normal, color, false);
+        drawA(state, new Vec3(start.x - width / 2, yMid, z), new Vec3(end.x + width / 2, yMid, z), width, normal, color, false, CornerMode.Left);
+        drawA(state, new Vec3(end.x, yMid + width / 2, z), end, width, normal, color, true, CornerMode.Left);
     }
 
     function drawWrapLabel(blk: IBlkDef, text: string, dir: number) {
+        if (dry) return;
         let size = 6;
         let x = blk.x + blk.dx / 2;
         let y = dir > 0 ? blk.y + blk.dy + 3 * size : blk.y - size;
@@ -335,7 +425,7 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         if (opacity === 0) {
             return;
         }
-        recordArrowEdge(src, dest);
+        rec(src, dest);
 
 
         let normal = new Vec3(0, 0, 1);
@@ -348,7 +438,7 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
             end = blockPos(dest, BlockPos.Top);
         }
 
-        drawArrow(state, start, end, width, normal, color, true, CornerMode.None, endDir);
+        drawA(state, start, end, width, normal, color, true, CornerMode.None, endDir);
     }
     function drawArrowBetween(src: IBlkDef, srcPos: BlockPos, dest: IBlkDef, destPos: BlockPos, width: number = 6) {
         let start = blockPos(src, srcPos);
@@ -358,7 +448,7 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
         if (opacity === 0) {
             return;
         }
-        recordArrowEdge(src, dest);
+        rec(src, dest);
 
         let normal = new Vec3(0, 0, 1);
         let color = arrowColor(src, dest, opacity);
@@ -374,28 +464,28 @@ export function drawAllArrows(state: IRenderState, layout: IGptModelLayout, isVi
             let mid0 = new Vec3(end.x - width / 2, start.y, start.z);
             let mid1 = new Vec3(end.x, start.y + width / 2, end.z);
 
-            drawArrow(state, start, mid0, width, normal, color, false);
-            drawArrow(state, mid1, end, width, normal, color, true, CornerMode.Left);
+            drawA(state, start, mid0, width, normal, color, false);
+            drawA(state, mid1, end, width, normal, color, true, CornerMode.Left);
 
         } else if (srcPos === BlockPos.Bot && destPos === BlockPos.Right) {
             // dogleg down => right
             let mid0 = new Vec3(start.x, end.y - width / 2, end.z);
             let mid1 = new Vec3(start.x - width / 2, end.y, end.z);
 
-            drawArrow(state, start, mid0, width, normal, color, false);
-            drawArrow(state, mid1, end, width, normal, color, true, CornerMode.Left);
+            drawA(state, start, mid0, width, normal, color, false);
+            drawA(state, mid1, end, width, normal, color, true, CornerMode.Left);
 
         } else if (srcPos === BlockPos.Bot && destPos === BlockPos.Left) {
             // dogleg down => left
             let mid0 = new Vec3(start.x, end.y - width / 2, end.z);
             let mid1 = new Vec3(start.x + width / 2, end.y, end.z);
 
-            drawArrow(state, start, mid0, width, normal, color, false, CornerMode.None, new Vec3(0, 1, 0));
-            drawArrow(state, mid1, end, width, normal, color, true, CornerMode.Right);
+            drawA(state, start, mid0, width, normal, color, false, CornerMode.None, new Vec3(0, 1, 0));
+            drawA(state, mid1, end, width, normal, color, true, CornerMode.Right);
 
         } else {
 
-            drawArrow(state, start, end, width, normal, color, true);
+            drawA(state, start, end, width, normal, color, true);
         }
     }
 }

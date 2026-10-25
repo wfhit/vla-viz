@@ -30,12 +30,16 @@ export interface IActionVizState {
     particles: number;   // particle-axis mode (replaces the bar field)
     particleTau: number; // 0..1: each particle moves x1_k → x1_k − v_k
     particleStep: number; // which of the 16 steps the particle axes show
+    massStep: number;    // Euler pass whose attention mass the bars / links use (-1 = the joint forward)
+    quadLabel: number;   // "prefix cannot see suffix" in the empty quadrant of the active layer
+    eulerPass: number;   // decode chapter: the running pass (shown as the step indicator), -1 = none
 }
 
 export function defaultActionViz(): IActionVizState {
     return {
         links: 0, activeLayer: -1, massBars: 0, field: 1, fieldMode: 'decode', decode: 1, showVelocity: 0,
         target: 0, errBars: 0, robotUnits: 0, particles: 0, particleTau: 1, particleStep: 0,
+        massStep: -1, quadLabel: 0, eulerPass: -1,
     };
 }
 
@@ -62,6 +66,8 @@ export function drawActionViz(state: IProgramState, isVisible?: (cubes: IBlkDef[
     state.render.sharedRender.activePhase = RenderPhase.Opaque;
     drawJointLinks(state, layout, m, viz, isVisible);
     if (viz.massBars > 0) drawMassBars(state, layout, m, viz);
+    if (viz.quadLabel > 0) drawQuadLabel(state, layout, viz);
+    drawStripTitle(state, layout, m, viz);
     if (viz.particles > 0) {
         drawParticles(state, layout, m, viz);
     } else if (viz.field > 0) {
@@ -69,9 +75,55 @@ export function drawActionViz(state: IProgramState, isVisible?: (cubes: IBlkDef[
     }
 }
 
+function sceneText(state: IProgramState, text: string, x: number, y: number, z: number, size: number, color: Vec4) {
+    let prev = state.render.sharedRender.activePhase;
+    state.render.sharedRender.activePhase = RenderPhase.Overlay;
+    drawText(state.render.modelFontBuf, text, 0, 0, { color, size, mtx: Mat4f.fromTranslation(new Vec3(x, y, z)) });
+    state.render.sharedRender.activePhase = prev;
+}
+
+// the top-right quadrant of the joint score matrix (prefix queries x suffix keys) is empty:
+// the mask keeps the prefix from seeing the suffix
+function drawQuadLabel(state: IProgramState, layout: IGptModelLayout, viz: IActionVizState) {
+    let i = viz.activeLayer;
+    if (i < 0) return;
+    let block = layout.blocks[i], e = layout.expertLayers[i];
+    let h = block.heads.length - 1;
+    let a = block.heads[h].attnMtx, s = e.heads[h].scS;
+    if (a.opacity <= 0 || s.opacity <= 0) return;
+    let col = new Vec4(0.35, 0.35, 0.4, 1).mul(viz.quadLabel);
+    let x = a.x + a.dx + 2, y = a.y + 4, z = a.z + a.dz / 2;
+    sceneText(state, 'prefix Q cannot', x, y, z, 2.2, col);
+    sceneText(state, 'see suffix K', x, y + 3, z, 2.2, col);
+    sceneText(state, '(masked)', x, y + 6, z, 2.2, col);
+}
+
+// above the Euler strip: what it is, the pre-stamp warning, and the 10-cell step indicator
+function drawStripTitle(state: IProgramState, layout: IGptModelLayout, m: IGptModelLink, viz: IActionVizState) {
+    let S = layout.strip;
+    if (!S.length || S[0].opacity <= 0) return;
+    let fs = m.fmSteps;
+    let K = S.length - 1;
+    let x = S[0].x, z = S[0].z + S[0].dz / 2, a = S[0].opacity;
+    let y = S[0].y - 24;
+    sceneText(state, `Euler strip: x(t=1) noise -> x(t=0) action,  K=${K} DiT passes,  x <- x - v/${K}`, x, y, z, 4, new Vec4(0.1, 0.1, 0.15, 1).mul(a));
+    if (fs && !fs.inDistribution) {
+        sceneText(state, `preview: pre-stamp weights (step_${fs.checkpointStep}, trained at t=1 only; t<1 is out of distribution)`,
+            x, y + 6, z, 3, Vec4.fromHexColor('#b45309').mul(a));
+    }
+    if (viz.eulerPass >= 0) {
+        let k = viz.eulerPass;
+        let cells = Array.from({ length: K }, (_, j) => j < k ? '[#]' : j === k ? '[>]' : '[ ]').join('');
+        let t = fs?.steps[Math.min(k, K - 1)]?.t ?? 1 - k / K;
+        let txt = k >= K ? `${cells}  done: x(t=0) = action chunk` : `${cells}  pass ${k + 1}/${K}   t = ${t.toFixed(1)}`;
+        sceneText(state, txt, x, y + 12, z, 4, Vec4.fromHexColor('#a16207').mul(a));
+    }
+}
+
 // mean over the 17 suffix queries of layer i's attention mass [state | visual | text | suffix]
-export function layerMass(m: IGptModelLink, i: number) {
-    let ms = m.expertLayers[i].mass, n = m.config.n_suffix, acc = [0, 0, 0, 0];
+export function layerMass(m: IGptModelLink, i: number, step: number = -1) {
+    let fs = step >= 0 ? m.fmSteps?.steps[step]?.tex[`E${i}.mass`] : undefined;
+    let ms = fs ? fs.localBuffer : m.expertLayers[i].mass, n = m.config.n_suffix, acc = [0, 0, 0, 0];
     for (let q = 0; q < n; q++) for (let k = 0; k < 4; k++) acc[k] += ms[q * 4 + k] / n;
     return acc;
 }
@@ -102,23 +154,27 @@ function drawJointLinks(state: IProgramState, layout: IGptModelLayout, m: IGptMo
     isVisible?: (cubes: IBlkDef[]) => boolean) {
     let flow = layout.flow;
     for (let i = 0; i < layout.expertLayers.length; i++) {
-        let { attn } = layout.expertLayers[i];
+        let e = layout.expertLayers[i];
         let block = layout.blocks[i];
-        if (attn.opacity <= 0) continue;
         let bright = (viz.activeLayer === i ? viz.links : 0);
-        if (flow && flow.active.has(attn)) bright = 1;
-        let visible = !isVisible || isVisible([attn, ...block.kvGroups.map(g => g.kBlock)]);
-        let faint = flow && flow.pending.has(attn) ? 0.08 : 0.22;
-        let mass = layerMass(m, i);
-        let thick = bright > 0 ? 1 + 3 * (mass[1] + mass[2]) : 0.6;
-        let end = new Vec3(attn.x - 2, attn.y + attn.dy / 2, attn.z + attn.dz / 2);
-        for (let g of block.kvGroups) {
-            for (let [src, col] of [[g.kBlock, kColor], [g.vBlock, vColor]] as [IBlkDef, Vec4][]) {
-                if (src.opacity <= 0) continue;
-                recordArrowEdge(src, attn);
+        if (flow && e.heads.some(h => flow!.active.has(h.scP) || flow!.active.has(h.vo))) bright = 1;
+        let visible = !isVisible || isVisible([...e.heads.map(h => h.scP), ...block.kvGroups.map(g => g.kBlock)]);
+        let faint = flow && e.heads.every(h => flow!.pending.has(h.scP)) ? 0.08 : 0.22;
+        let mass = layerMass(m, i, viz.massStep);
+        let thick = bright > 0 ? 0.6 + 2 * (mass[1] + mass[2]) : 0.5;
+        // the coupling: the trunk's K of a kv group → the suffix-prefix score quadrant scP of
+        // each query head in that group (Q_suffix · K_prefix^T); the trunk's V → the suffix's
+        // softmax·V output of those heads
+        for (let h = 0; h < block.heads.length; h++) {
+            let g = block.kvGroups[block.heads[h].kvGroup];
+            let eh = e.heads[h];
+            for (let [src, dst, col] of [[g.kBlock, eh.scP, kColor], [g.vBlock, eh.vo, vColor]] as [IBlkDef, IBlkDef, Vec4][]) {
+                if (src.opacity <= 0 || dst.opacity <= 0) continue;
+                recordArrowEdge(src, dst);
                 if (!visible) continue;
-                let start = new Vec3(src.x + src.dx + 2, src.y + src.dy / 2, src.z + src.dz / 2);
-                arrow3(state, start, end, thick, col.mul(Math.max(bright, faint) * src.opacity));
+                let start = new Vec3(src.x + src.dx / 2, src.y + src.dy + 1, src.z + src.dz / 2);
+                let end = new Vec3(dst.x + dst.dx / 2, dst.y - 1, dst.z + dst.dz / 2);
+                arrow3(state, start, end, thick, col.mul(Math.max(bright, faint) * Math.min(src.opacity, dst.opacity)));
             }
         }
     }
@@ -128,8 +184,10 @@ function drawMassBars(state: IProgramState, layout: IGptModelLayout, m: IGptMode
     let i = viz.activeLayer;
     if (i < 0) return;
     let cfg = m.config;
-    let { attn } = layout.expertLayers[i];
-    let mass = layerMass(m, i);
+    let e = layout.expertLayers[i];
+    // anchor: right of the frontmost head's suffix-suffix score block
+    let attn = e.heads[e.heads.length - 1].scS;
+    let mass = layerMass(m, i, viz.massStep);
     let nVis = cfg.suffix_visible_visual, nTxt = cfg.suffix_visible_prefix - cfg.suffix_visible_visual;
     let nAns = cfg.T_text - cfg.suffix_visible_prefix;
     let rows: [string, number | null, Vec4][] = [

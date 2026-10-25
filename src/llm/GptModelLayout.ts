@@ -1,4 +1,4 @@
-import { IGptModelLink, IModelShape, IRealTex, IRmsNormLink, IBlockLayerLink } from "./GptModel";
+import { IGptModelLink, IModelShape, IRealTex, IRmsNormLink, IBlockLayerLink, IExpertLayerLink } from "./GptModel";
 import { isNil } from "@/src/utils/data";
 import { Mat4f } from "@/src/utils/matrix";
 import { Dim, Vec3 } from "@/src/utils/vector";
@@ -358,11 +358,39 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         return { lnAgg1, lnAgg2, lnResid, lnSigma, lnMu, cubes: lnCubes };
     }
 
-    let lnLeftX = leftX - (T + 2) * cell - 3 * margin;
+    // ---- joint-block geometry: every trunk token-axis block carries the DiT's 17-token suffix
+    // "tail" flush on its right (same sublayer, same row, same depth). The pair is ONE portal:
+    // the concatenated [prefix ‖ suffix] sequence runs through it; the tail is computed by the
+    // expert's weights. γβ(t) slots sit right of the norm tails, fed by the time bus.
+    let seam = cell;
+    let sufW = seam + nSuffix * cell;
+    let adaW = 2 * cell;
+    let lnShift = sufW + seam + adaW;
+    let lnLeftX = leftX - lnShift - (T + 2) * cell - 2 * margin - sufW;
     let resMidX = 0;
+    // pre-offset coordinates of a block (mk() adds `offset` again)
+    let bx = (b: IBlkDef) => b.x - offset.x;
+    let by = (b: IBlkDef) => b.y - offset.y;
+    let bxR = (b: IBlkDef) => b.x - offset.x + b.dx;
 
-    function createLayer(src: IBlkDef, target: IBlockLayerLink | undefined) {
-        let ln1 = createLn(0, src, target?.ln_1);
+    let expertCubesAll: IBlkDef[] = [];
+
+    function createLayer(src: IBlkDef, target: IBlockLayerLink | undefined, el: IExpertLayerLink | undefined, adaTex: IRealTex | undefined, li: number) {
+        let ln1 = createLn(-lnShift, src, target?.ln_1);
+
+        // suffix tail: 17 token columns × a channel / head-dim window
+        let tok = (name: string, yy: number, xL: number, tex: IRealTex | undefined, zM: number = 0, cy: number = C) => mk({
+            t: 'i', cx: nSuffix, cy, cz: B, y: yy, xL, zM,
+            access: acc(tex, [0, 1, 0], [1, 0, 0]),
+            dimX: DimStyle.T, dimY: cy === C ? DimStyle.C : DimStyle.A, name,
+        });
+        let adaBlk = (name: string, yy: number, xL: number, row0: number) => mk({
+            t: 'i', cx: 2, cy: C, cz: B, y: yy, xL, zM: 0,
+            access: acc(adaTex, [0, 1, 0], [1, 0, 0, row0]),
+            dimX: DimStyle.None, dimY: DimStyle.C, name,
+        });
+        let eLn1 = tok(`AdaRMSNorm1 (DiT ${li})`, by(ln1.lnResid), bxR(ln1.lnResid) + seam, el?.ln1);
+        let eAda = adaBlk(`gamma1/beta1 (t) ${li}`, by(eLn1), bxR(eLn1) + seam, 0);
 
         let interGroupMargin = 3 * margin + (C * cell) / 16;
         let qkvMargin = 1 * margin + (C * cell) / 16;
@@ -371,11 +399,14 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         let groupSlots = groupSize + 2;
 
         let attn1Y = y + A * cell + margin;
-        let vOutY = attn1Y + T * cell + margin;
+        let sufRowsY = attn1Y + T * cell + seam;
+        let vOutY = sufRowsY + nSuffix * cell + margin;
 
         let attnLeftX = lnLeftX;
+        let tailX = attnLeftX + seam;
         let qkvValLeftX = attnLeftX - T * cell - margin;
         let qkvBiasLeftX = qkvValLeftX - C * cell - margin;
+        let attn2LeftX = attnLeftX - (T + 2) * cell - 2 * margin - sufW;
 
         // z order inside group g: q(2g) | K_g | V_g | q(2g+1)
         let groupZ0 = (g: number) => groupWidth * g - (nKvHeads - 1) * groupWidth / 2;
@@ -383,6 +414,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         let qSlot = (j: number) => j === 0 ? 0 : j + 2; // q | K | V | q … (slots 0, 3, 4, …)
 
         let groups = [];
+        let eKv: { k: IBlkDef, v: IBlkDef }[] = [];
         for (let g = 0; g < nKvHeads; g++) {
             let kv = target?.kv[g];
             let kMid = slotZ(g, 1);
@@ -431,11 +463,16 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
                 dimX: DimStyle.T, dimY: DimStyle.A,
                 name: `V vectors (kv ${g})`,
             });
+            eKv.push({
+                k: tok(`DiT K (kv ${g}) ${li}`, y, tailX, el?.k[g], kMid, A),
+                v: tok(`DiT V (kv ${g}) ${li}`, y, tailX, el?.v[g], vMid, A),
+            });
             groups.push({ kWeightBlock, vWeightBlock, kBiasBlock, vBiasBlock, kBlock, vBlock,
                 cubes: [kWeightBlock, vWeightBlock, kBiasBlock, kBlock, vBlock] });
         }
 
         let heads = [];
+        let eHeads: { q: IBlkDef, scP: IBlkDef, scS: IBlkDef, pP: IBlkDef, pS: IBlkDef, vo: IBlkDef }[] = [];
         for (let i = 0; i < nHeads; i++) {
             let g = Math.floor(i / groupSize);
             let grp = groups[g];
@@ -465,8 +502,9 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
                 name: `Q vectors (head ${i})`,
             });
 
-            let attn2LeftX = attnLeftX - (T + 2) * cell - 2 * margin;
-
+            // the joint score matrix, keys along x, queries along y:
+            //   [ prefix q · prefix k (causal) |  (empty: prefix cannot see suffix) ]
+            //   [ suffix q · prefix k  = scP   |  suffix q · suffix k = scS          ]
             let attnMtx = mk({
                 t: 'i', cx: T, cz: B, cy: T, y: attn1Y,
                 xR: attnLeftX, zM: headZMid,
@@ -514,6 +552,20 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
                 deps: { dot: [[grp.vBlock, 'iy'], [attnMtxSm, 'ix']], dotLen: A },
                 dimX: DimStyle.T, dimY: DimStyle.A,
                 name: 'V Output',
+            });
+
+            let sq = (name: string, yy: number, xx: { xL?: number, xR?: number }, cx: number, tex: IRealTex | undefined) => mk({
+                t: 'i', cx, cy: nSuffix, cz: B, y: yy, ...xx, zM: headZMid,
+                access: acc(tex, [1, 0, 0], [0, 1, 0]),
+                dimX: DimStyle.T, dimY: DimStyle.None, name,
+            });
+            eHeads.push({
+                q: tok(`DiT Q (head ${i}) ${li}`, y, tailX, el?.q[i], headZMid, A),
+                scP: sq(`suffix Q . prefix K (head ${i})`, sufRowsY, { xR: attnLeftX }, T, el?.scp[i]),
+                scS: sq(`suffix Q . suffix K (head ${i})`, sufRowsY, { xL: tailX }, nSuffix, el?.scs[i]),
+                pP: sq(`suffix softmax: prefix (head ${i})`, sufRowsY, { xR: attn2LeftX }, T, el?.pp[i]),
+                pS: sq(`suffix softmax: suffix (head ${i})`, sufRowsY, { xL: attn2LeftX + seam }, nSuffix, el?.ps[i]),
+                vo: tok(`DiT V Output (head ${i}) ${li}`, vOutY, tailX, el?.vo[i], headZMid, A),
             });
 
             let ownCubes = [qWeightBlock, qBiasBlock, qBlock, attnMtx, attnMtxAgg1, attnMtxAgg2, attnMtxSm, vOutBlock];
@@ -592,10 +644,16 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
             dimX: DimStyle.T, dimY: DimStyle.C,
             name: 'Attention Residual',
         });
+        let resTailX = resMidX + T * cell / 2 + seam;
+        let eO = tok(`DiT o_proj ${li}`, vFinalZ, tailX, el?.o);
+        let eRes1 = tok(`DiT Attn Residual ${li}`, vFinalZ, resTailX, el?.res1);
 
-        y = vFinalZ + C * cell + margin;
+        // room for the S-shaped entry arrow ⊕ → next norm
+        y = vFinalZ + C * cell + 3 * margin;
 
-        let ln2 = createLn(0, attnResidual, target?.ln_2);
+        let ln2 = createLn(-lnShift, attnResidual, target?.ln_2);
+        let eLn2 = tok(`AdaRMSNorm2 (DiT ${li})`, by(ln2.lnResid), bxR(ln2.lnResid) + seam, el?.ln2);
+        let eAda2 = adaBlk(`gamma2/beta2 (t) ${li}`, by(eLn2), bxR(eLn2) + seam, 2);
 
         // SwiGLU: gate & up weights [F, C], drawn side by side
         let mlpFcWeight = mk({
@@ -622,6 +680,12 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
         y += C * cell + margin;
 
+        // transposed MLP blocks: channels along x, tokens along y; the 17 suffix rows sit below
+        let fTail = (name: string, yy: number, xR: number, tex: IRealTex | undefined) => mk({
+            t: 'i', cx: F, cy: nSuffix, cz: B, y: yy, xR, zM: 0,
+            access: acc(tex, [1, 0, 0], [0, 1, 0]),
+            dimX: DimStyle.C4, dimY: DimStyle.T, name,
+        });
         let mlpFc = mk({
             t: 'i', cx: F, cz: B, cy: T, y: y,
             xR: attnLeftX, zM: 0,
@@ -640,8 +704,10 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
             name: 'up',
             transpose: true,
         });
+        let eGate = fTail(`DiT gate ${li}`, y + T * cell + seam, attnLeftX, el?.gate);
+        let eUp = fTail(`DiT up ${li}`, y + T * cell + seam, attnLeftX - F * cell - margin, el?.up);
 
-        y += T * cell + margin;
+        y += (T + nSuffix + 1) * cell + margin;
 
         let mlpAct = mk({
             t: 'i', cx: F, cz: B, cy: T, y: y,
@@ -652,8 +718,9 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
             name: 'SiLU(gate)·up',
             transpose: true,
         });
+        let eAct = fTail(`DiT SiLU(gate)*up ${li}`, y + T * cell + seam, attnLeftX, el?.act);
 
-        y += T * cell + margin;
+        y += (T + nSuffix + 1) * cell + margin;
 
         let mlpProjWeight = mk({
             t: 'w', cx: F, cz: 1, cy: C, y: y,
@@ -687,6 +754,8 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
             dimX: DimStyle.T, dimY: DimStyle.C,
             name: 'MLP Residual',
         });
+        let eMlp = tok(`DiT MLP ${li}`, y, bxR(mlpResult) + seam, el?.mlp);
+        let eOut = tok(`DiT ${li} Out`, y, resTailX, el?.out);
 
         y += C * cell - margin;
 
@@ -702,12 +771,24 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
         cubes.push(...blockCubes);
 
+        let expert = {
+            ln1: eLn1, ada: eAda, o: eO, res1: eRes1, ln2: eLn2, ada2: eAda2,
+            gate: eGate, up: eUp, act: eAct, mlp: eMlp, out: eOut,
+            heads: eHeads, kv: eKv, layer: li,
+            cubes: [eLn1, eAda, ...eKv.flatMap(k => [k.k, k.v]),
+                ...eHeads.flatMap(h => [h.q, h.scP, h.scS, h.pP, h.pS, h.vo]),
+                eO, eRes1, eLn2, eAda2, eGate, eUp, eAct, eMlp, eOut],
+        };
+        expertCubesAll.push(...expert.cubes);
+        cubes.push(...expert.cubes);
+
         return {
             ln1,
             heads,
             kvGroups: groups,
             labels: [transformerLabel, projLabel, selfAttendLabel, mlpLabel, ...heads.flatMap(h => h.labels)],
             cubes: blockCubes,
+            expert,
             transformerLabel,
             projLabel,
             selfAttendLabel,
@@ -742,25 +823,22 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
     let blocks: ReturnType<typeof createLayer>[] = [];
     let blockSrc = residual0;
 
-    // the action expert runs beside the trunk: layer-pair i = trunk layer i + expert layer i,
-    // sharing ONE attention. Its column sits just right of the trunk's residual stream.
-    let nAttnKeys = T + nSuffix;
-    let expertX = () => resMidX + T * cell / 2 + 2 * margin;
+    // the DiT's suffix input = the tail of the prefix input embedding: one concatenated sequence
     let expertIn = mk({
-        t: 'i', cx: nSuffix, cy: C, cz: B, y: residual0.y,
-        xL: expertX(), zM: 0,
+        t: 'i', cx: nSuffix, cy: C, cz: B, y: by(residual0),
+        xL: bxR(residual0) + seam, zM: 0,
         access: acc(m?.expertIn, [0, 1, 0], [1, 0, 0]),
         dimX: DimStyle.T, dimY: DimStyle.C,
-        name: 'Expert Suffix In',
+        name: 'DiT Suffix In',
     });
 
     // ---- flow-matching suffix inputs (model._suffix_embeds), all real tensors ----
-    // token 0: state_proj(state75); tokens 1..16: time_mlp_out(silu(time_mlp_in(cat[action_in_proj(x1), te])))
-    // The x1 chain runs right → left into expertIn's right face; the state chain sits above it.
+    // token 0: state_proj(state75); tokens 1..16: time_mlp_out(silu(time_mlp_in(cat[action_in_proj(x_t), te(t)])))
+    // The x_t chain runs right → left into expertIn's right face; the state chain sits above it.
     let fmM = m?.fm;
     let nState = fmM?.state75.meta.fullShape[0] ?? 75;
-    let fmY = expertIn.y;
-    let fmX = expertIn.x + expertIn.dx + margin;
+    let fmY = by(expertIn);
+    let fmX = bxR(expertIn) + margin;
     let chainX = fmX;
     let nextX = (cx: number) => { let x = chainX; chainX += cx * cell + margin; return x; };
     let fmActionTime = mk({
@@ -786,7 +864,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
     let fmActionEmb = mk({
         t: 'i', cx: actH, cy: C, cz: B, y: fmY, xL: nextX(actH), zM: 0,
         access: acc(fmM?.actionEmb, [0, 1, 0], [1, 0, 0]),
-        dimX: DimStyle.T, dimY: DimStyle.C, name: 'action_in_proj(x1)',
+        dimX: DimStyle.T, dimY: DimStyle.C, name: 'action_in_proj(x_t)',
     });
     let fmActionInW = mk({
         t: 'w', cx: actD, cy: C, cz: 1, y: fmY, xL: nextX(actD), zM: 0,
@@ -796,32 +874,48 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
     let fmX1 = mk({
         t: 'i', cx: actH, cy: actD, cz: B, y: fmY, xL: nextX(actH), zM: 0,
         access: acc(m?.actionX1, [0, 1, 0], [1, 0, 0]),
-        dimX: DimStyle.T, dimY: DimStyle.None, name: 'x1 (noise, t=1)',
+        dimX: DimStyle.T, dimY: DimStyle.None, name: 'x_t (t=1: noise x1)',
     });
     let fmTimeEmb = mk({
-        t: 'i', cx: C, cy: 1, cz: B, y: fmY - margin - cell, xL: fmTimeInW.x, zM: 0,
+        t: 'i', cx: C, cy: 1, cz: B, y: fmY - margin - cell, xL: bx(fmTimeInW), zM: 0,
         access: acc(fmM?.timeEmb, [0, 0, 0], [1, 0, 0]),
-        dimX: DimStyle.C, dimY: DimStyle.None, name: 'te = sincos(t=1)',
+        dimX: DimStyle.C, dimY: DimStyle.None, name: 'te = sincos(t)',
     });
     let fmStateEmb = mk({
-        t: 'i', cx: 1, cy: C, cz: B, y: fmY - margin - C * cell, xL: expertIn.x, zM: 0,
+        t: 'i', cx: 1, cy: C, cz: B, y: fmY - margin - C * cell, xL: bx(expertIn), zM: 0,
         access: acc(fmM?.stateEmb, [0, 0, 0], [0, 1, 0]),
         dimX: DimStyle.None, dimY: DimStyle.C, name: 'state_proj -> token 0',
     });
     let fmStateProjW = mk({
-        t: 'w', cx: nState, cy: C, cz: 1, y: fmStateEmb.y, xL: expertIn.x + cell + margin, zM: 0,
+        t: 'w', cx: nState, cy: C, cz: 1, y: by(fmStateEmb), xL: bx(expertIn) + cell + margin, zM: 0,
         access: acc(fmM?.stateProjW, [1, 0, 0], [0, 1, 0]),
         dimX: DimStyle.None, dimY: DimStyle.C, name: 'state_proj W',
     });
     let fmState75 = mk({
-        t: 'i', cx: nState, cy: 1, cz: B, y: fmStateEmb.y - margin - cell, xL: fmStateProjW.x, zM: 0,
+        t: 'i', cx: nState, cy: 1, cz: B, y: by(fmStateEmb) - margin - cell, xL: bx(fmStateProjW), zM: 0,
         access: acc(fmM?.state75, [0, 0, 0], [1, 0, 0]),
         dimX: DimStyle.None, dimY: DimStyle.None, name: 'state75 (normalized)',
     });
     let fmCubes = [fmState75, fmStateProjW, fmStateEmb, fmX1, fmActionInW, fmActionEmb, fmTimeEmb,
         fmTimeInW, fmTimeHidden, fmTimeOutW, fmActionTime];
-    let expertLayers: { ln1: IBlkDef, ada: IBlkDef, attn: IBlkDef, o: IBlkDef, res1: IBlkDef, ln2: IBlkDef,
-        ada2: IBlkDef, mlp: IBlkDef, out: IBlkDef, layer: number, cubes: IBlkDef[] }[] = [];
+
+    // ---- the Euler trajectory strip (decode only): x(t=1.0) … x(t=0.1), x(t=0), above the
+    // x_t input. Board k feeds pass k; pass k's v writes board k+1 = board k − v/K.
+    let fmS = m?.fmSteps;
+    let nEuler = fmS?.K ?? 10;
+    let stripY = by(fmTimeEmb) - margin - actD * cell;
+    let strip: IBlkDef[] = [];
+    for (let k = 0; k <= nEuler; k++) {
+        let tex = k === 0 ? fmS?.steps[0]?.tex['x'] : fmS?.steps[k - 1]?.tex['x_next'];
+        let tk = 1 - k / nEuler;
+        strip.push(mk({
+            t: 'i', cx: actH, cy: actD, cz: B, y: stripY, xL: bx(fmX1) + k * (actH * cell + margin), zM: 0,
+            access: acc(tex, [0, 1, 0], [1, 0, 0]),
+            dimX: DimStyle.T, dimY: DimStyle.None, hidden: true,
+            name: k === nEuler ? `x(t=0) = action (K=${nEuler})` : `x(t=${tk.toFixed(1)})`,
+        }));
+    }
+
     for (let i = 0; i < nBlocks; i++) {
         if (blockIdxInColumn >= blocksPerColumn) {
             blockIdxInColumn = 0;
@@ -833,98 +927,60 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         }
 
         y += blockHalfMargin;
-        let block = createLayer(blockSrc, m?.blocks[i]);
+        let block = createLayer(blockSrc, m?.blocks[i], m?.expertLayers[i], fmM?.ada[i], i);
         if (i === 0) {
-            let minX = Math.min(...block.cubes.map(c => c.x));
-            let maxX = Math.max(...block.cubes.map(c => c.x + c.dx));
+            let all = [...block.cubes, ...block.expert.cubes];
+            let minX = Math.min(...all.map(c => c.x));
+            let maxX = Math.max(...all.map(c => c.x + c.dx));
             columnWidth = (maxX - minX) + 8 * margin;
         }
         blocks.push(block);
-        // expert layer i, each sublayer level with the trunk's matching sublayer:
-        //   main column: AdaNorm1 → joint attn → o_proj ; AdaNorm2 → MLP
-        //   residual column (right): ⊕ res1, ⊕ out          γβ(te) blocks sit beside the norms
-        let el = m?.expertLayers[i];
-        let xMain = expertX();
-        let xAda = xMain + nSuffix * cell + margin;
-        let xRes = xAda + 2 * cell + 2 * margin;
-        let eBlk = (name: string, y: number, xL: number, src: IRealTex | undefined) => mk({
-            t: 'i', cx: nSuffix, cy: C, cz: B, y, xL, zM: 0,
-            access: acc(src, [0, 1, 0], [1, 0, 0]),
-            dimX: DimStyle.T, dimY: DimStyle.C, name,
-        });
-        let eLn1 = eBlk(`AdaRMSNorm1 (expert ${i})`, block.ln1.lnResid.y, xMain, el?.ln1);
-        // AdaRMSNorm modulation by te: rows γ, β of the input norm / of the post-attn norm (first 64 ch)
-        let eAda = mk({
-            t: 'i', cx: 2, cy: C, cz: B, y: eLn1.y, xL: xAda, zM: 0,
-            access: acc(fmM?.ada[i], [0, 1, 0], [1, 0, 0]),
-            dimX: DimStyle.None, dimY: DimStyle.C,
-            name: `gamma/beta in (te) ${i}`,
-        });
-        let eAttn = mk({
-            t: 'i', cx: nAttnKeys, cy: nSuffix, cz: B,
-            y: Math.max(block.heads[0].attnMtx.y, eLn1.y + eLn1.dy + margin),
-            xL: xMain, zM: 0,
-            access: acc(el?.attn, [1, 0, 0], [0, 1, 0]),
-            dimX: DimStyle.T, dimY: DimStyle.None,
-            special: BlkSpecial.Attention,
-            name: `Joint Attn (expert ${i})`,
-        });
-        let eO = eBlk(`o_proj (expert ${i})`, block.attnOut.y, xMain, el?.o);
-        let eRes1 = eBlk(`Attn Residual (expert ${i})`, block.attnOut.y, xRes, el?.res1);
-        let eLn2 = eBlk(`AdaRMSNorm2 (expert ${i})`, block.ln2.lnResid.y, xMain, el?.ln2);
-        let eAda2 = mk({
-            t: 'i', cx: 2, cy: C, cz: B, y: eLn2.y, xL: xAda, zM: 0,
-            access: acc(fmM?.ada[i], [0, 1, 0], [1, 0, 0, 2]),
-            dimX: DimStyle.None, dimY: DimStyle.C,
-            name: `gamma/beta post (te) ${i}`,
-        });
-        let eMlp = eBlk(`MLP (expert ${i})`, block.mlpResult.y, xMain, el?.mlp);
-        let eOut = eBlk(`Expert ${i} Out`, block.mlpResidual.y, xRes, el?.out);
-        if (i === 0) {
-            let minX = Math.min(...block.cubes.map(c => c.x));
-            let maxX = Math.max(eAttn.x + eAttn.dx, eOut.x + eOut.dx);
-            columnWidth = (maxX - minX) + 8 * margin;
-        }
-        expertLayers.push({ ln1: eLn1, ada: eAda, attn: eAttn, o: eO, res1: eRes1, ln2: eLn2, ada2: eAda2,
-            mlp: eMlp, out: eOut, layer: i,
-            cubes: [eLn1, eAda, eAttn, eO, eRes1, eLn2, eAda2, eMlp, eOut] });
         blockSrc = block.mlpResidual;
         y += blockHalfMargin;
         blockIdxInColumn++;
     }
+    let expertLayers = blocks.map(b => b.expert);
 
     y += blockHalfMargin;
-    let ln_f = createLn(0, blockSrc, m?.ln_f);
+    let ln_f = createLn(-lnShift, blockSrc, m?.ln_f);
 
     cubes.push(...ln_f.cubes);
+
+    // the DiT's final RMSNorm (not t-modulated) is the tail of ln_f
+    let expertOut = mk({
+        t: 'i', cx: nSuffix, cy: C, cz: B, y: by(ln_f.lnResid),
+        xL: bxR(ln_f.lnResid) + seam, zM: 0,
+        access: acc(m?.expertOut, [0, 1, 0], [1, 0, 0]),
+        dimX: DimStyle.T, dimY: DimStyle.C,
+        name: 'DiT final RMSNorm',
+    });
 
     y += C * cell + margin;
 
     // ---- the heads: h* = ln_f out at the boundary token (the last token of the window) ----
+    let hR = bxR(ln_f.lnResid);
     let hStar = mk({
         t: 'i', cx: 1, cy: C, cz: B, y: y,
-        xR: leftX, zM: 0,
+        xR: hR, zM: 0,
         access: acc(m?.hStar, [0, 0, 0], [0, 1, 0]),
         deps: { add: [[ln_f.lnResid, '0y']] },
         dimX: DimStyle.None, dimY: DimStyle.C,
         name: 'h* (boundary state)',
     });
 
-    let leftX2 = leftX - 1 * cell - margin;
+    let knackY = y + C * cell + margin;
 
     let lmHeadWeight = mk({
-        t: 'w', cx: C, cy: nKnack, cz: 1, y: y + C * cell + margin,
-        xR: leftX2, zM: 0,
+        t: 'w', cx: C, cy: nKnack, cz: 1, y: knackY,
+        xR: hR - cell - margin, zM: 0,
         access: acc(m?.knackWeight, [1, 0, 0], [0, 1, 0]),
         dimX: DimStyle.C, dimY: DimStyle.n_vocab,
         name: 'knack_head Weights',
     });
 
-    let knackY = y + C * cell + margin;
-
     let logits = mk({
         t: 'i', cx: 1, cy: nKnack, cz: B, y: knackY,
-        xR: leftX, zM: 0,
+        xR: hR, zM: 0,
         access: acc(m?.knackLogits, [0, 0, 0], [0, 1, 0]),
         deps: { dot: [[lmHeadWeight, 'iy'], [hStar, '0i']], dotLen: C },
         dimX: DimStyle.None, dimY: DimStyle.n_vocab,
@@ -933,7 +989,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
     let logitsAgg2 = mk({
         t: 'a', cx: 1, cy: 1, cz: B, y: knackY + nKnack * cell + margin,
-        xR: leftX, zM: 0,
+        xR: hR, zM: 0,
         access: acc(m?.knackAgg, [0, 0, 0], [0, 0, 0, 0]),
         deps: { add: [[logits, 'xi']], special: BlKDepSpecial.SoftmaxAggMax },
         dimX: DimStyle.None, dimY: DimStyle.None,
@@ -942,7 +998,7 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
     let logitsAgg1 = mk({
         t: 'a', cx: 1, cy: 1, cz: B, y: knackY + nKnack * cell + margin + cell,
-        xR: leftX, zM: 0,
+        xR: hR, zM: 0,
         access: acc(m?.knackAgg, [0, 0, 0], [0, 0, 0, 1]),
         deps: { add: [[logits, 'xi'], [logitsAgg2, 'x0']], special: BlKDepSpecial.SoftmaxAggExp },
         dimX: DimStyle.None, dimY: DimStyle.None,
@@ -953,106 +1009,97 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
     let logitsSoftmax = mk({
         t: 'i', cx: 1, cy: nKnack, cz: B, y: probsY,
-        xR: leftX, zM: 0,
+        xR: hR, zM: 0,
         access: acc(m?.knackProbs, [0, 0, 0], [0, 1, 0], 1.0),
         deps: { add: [[logits, 'xy'], [logitsAgg1, 'x0'], [logitsAgg2, 'x0']], special: BlKDepSpecial.Softmax },
         dimX: DimStyle.None, dimY: DimStyle.n_vocab,
         name: 'Knack Softmax',
     });
 
-    // done head, to the right of the residual column
-    // done head right of the expert column (the expert chain runs straight down to the action group)
-    let doneX = expertX() + nAttnKeys * cell + 2 * margin;
+    // done head on h*'s row, LEFT of h* (the right side belongs to the DiT's action group)
+    let doneR = hR - cell - margin;
     let doneWeight = mk({
-        t: 'w', cx: C, cy: nDone, cz: 1, y: knackY,
-        xL: doneX + 2 * cell + margin, zM: 0,
+        t: 'w', cx: C, cy: nDone, cz: 1, y: y,
+        xR: doneR - cell - margin, zM: 0,
         access: acc(m?.doneWeight, [1, 0, 0], [0, 1, 0]),
         dimX: DimStyle.C, dimY: DimStyle.None,
         name: 'done_head Weights',
     });
     let doneLogits = mk({
-        t: 'i', cx: 1, cy: nDone, cz: B, y: knackY,
-        xL: doneX, zM: 0,
+        t: 'i', cx: 1, cy: nDone, cz: B, y: y,
+        xR: doneR, zM: 0,
         access: acc(m?.doneLogits, [0, 0, 0], [0, 1, 0]),
         deps: { dot: [[doneWeight, 'iy'], [hStar, '0i']], dotLen: C },
         dimX: DimStyle.None, dimY: DimStyle.None,
         name: 'Done Logits',
     });
     let doneAgg2 = mk({
-        t: 'a', cx: 1, cy: 1, cz: B, y: knackY + nDone * cell + margin,
-        xL: doneX, zM: 0,
+        t: 'a', cx: 1, cy: 1, cz: B, y: y + nDone * cell + margin,
+        xR: doneR, zM: 0,
         access: acc(m?.doneAgg, [0, 0, 0], [0, 0, 0, 0]),
         deps: { add: [[doneLogits, 'xi']], special: BlKDepSpecial.SoftmaxAggMax },
         dimX: DimStyle.None, dimY: DimStyle.None,
         name: '',
     });
     let doneAgg1 = mk({
-        t: 'a', cx: 1, cy: 1, cz: B, y: knackY + nDone * cell + margin + cell,
-        xL: doneX, zM: 0,
+        t: 'a', cx: 1, cy: 1, cz: B, y: y + nDone * cell + margin + cell,
+        xR: doneR, zM: 0,
         access: acc(m?.doneAgg, [0, 0, 0], [0, 0, 0, 1]),
         deps: { add: [[doneLogits, 'xi'], [doneAgg2, 'x0']], special: BlKDepSpecial.SoftmaxAggExp },
         dimX: DimStyle.None, dimY: DimStyle.None,
         name: '',
     });
     let doneProbs = mk({
-        t: 'i', cx: 1, cy: nDone, cz: B, y: knackY + nDone * cell + 2 * cell + 2 * margin,
-        xL: doneX, zM: 0,
+        t: 'i', cx: 1, cy: nDone, cz: B, y: y + nDone * cell + 2 * cell + 2 * margin,
+        xR: doneR, zM: 0,
         access: acc(m?.doneProbs, [0, 0, 0], [0, 1, 0], 1.0),
         deps: { add: [[doneLogits, 'xy'], [doneAgg1, 'x0'], [doneAgg2, 'x0']], special: BlKDepSpecial.Softmax },
         dimX: DimStyle.None, dimY: DimStyle.None,
         name: 'Done Softmax',
     });
 
-    let headsBottom = probsY + nKnack * cell + margin;
-
-    // action expert suffix → action_out_proj → velocity; action = x1 − velocity
-    let actY = headsBottom + 2 * margin;
-    let ax = expertX();
-    let expertOut = mk({
-        t: 'i', cx: nSuffix, cy: C, cz: B, y: actY,
+    // DiT exit, straight under its final norm: drop token 0, action_out_proj → v (16 × 23);
+    // the one-step decode x1 − v below it. In the K-step decode v instead feeds the strip.
+    let ax = bx(expertOut) + cell;
+    let actionVelocity = mk({
+        t: 'i', cx: actH, cy: actD, cz: B, y: y,
         xL: ax, zM: 0,
-        access: acc(m?.expertOut, [0, 1, 0], [1, 0, 0]),
-        dimX: DimStyle.T, dimY: DimStyle.C,
-        name: 'Expert Suffix Out',
+        access: acc(m?.actionVelocity, [0, 1, 0], [1, 0, 0]),
+        dimX: DimStyle.T, dimY: DimStyle.None,
+        name: 'Velocity v',
     });
     let actionWeight = mk({
-        t: 'w', cx: C, cy: actD, cz: 1, y: actY + C * cell + margin,
-        xR: ax - margin, zM: 0,
+        t: 'w', cx: C, cy: actD, cz: 1, y: y,
+        xL: ax + actH * cell + margin, zM: 0,
         access: acc(m?.actionWeight, [1, 0, 0], [0, 1, 0]),
         dimX: DimStyle.C, dimY: DimStyle.None,
         name: 'action_out_proj Weights',
     });
-    let actionVelocity = mk({
-        t: 'i', cx: actH, cy: actD, cz: B, y: actY + C * cell + margin,
-        xL: ax + cell, zM: 0,
-        access: acc(m?.actionVelocity, [0, 1, 0], [1, 0, 0]),
-        deps: { dot: [[actionWeight, 'iy'], [expertOut, 'xi']], dotLen: C },
+    (actionVelocity.deps as any) = depArgsToDeps({ dot: [[actionWeight, 'iy'], [expertOut, 'xi']], dotLen: C });
+    let chunkY = y + actD * cell + margin;
+    let actionChunk = mk({
+        t: 'i', cx: actH, cy: actD, cz: B, y: chunkY,
+        xL: ax, zM: 0,
+        access: acc(m?.actionChunk, [0, 1, 0], [1, 0, 0]),
         dimX: DimStyle.T, dimY: DimStyle.None,
-        name: 'Velocity',
+        name: 'Action Chunk = x1 - v (K=1)',
     });
     let actionX1 = mk({
-        t: 'i', cx: actH, cy: actD, cz: B, y: actY + C * cell + actD * cell + 2 * margin,
-        xR: ax - margin, zM: 0,
+        t: 'i', cx: actH, cy: actD, cz: B, y: chunkY,
+        xL: ax + actH * cell + margin, zM: 0,
         access: acc(m?.actionX1, [0, 1, 0], [1, 0, 0]),
         dimX: DimStyle.T, dimY: DimStyle.None,
         name: 'x1 (skip: same input x1)',
     });
-    let actionChunk = mk({
-        t: 'i', cx: actH, cy: actD, cz: B, y: actY + C * cell + actD * cell + 2 * margin,
-        xL: ax + cell, zM: 0,
-        access: acc(m?.actionChunk, [0, 1, 0], [1, 0, 0]),
-        deps: { add: [[actionX1, 'xy'], [actionVelocity, 'xy']] },
-        dimX: DimStyle.T, dimY: DimStyle.None,
-        name: 'Action Chunk = x1 − v',
-    });
+    actionChunk.deps = depArgsToDeps({ add: [[actionX1, 'xy'], [actionVelocity, 'xy']] });
 
-    y = actY + C * cell + 2 * actD * cell + 3 * margin;
+    y = Math.max(chunkY + actD * cell + margin, probsY + nKnack * cell + margin);
 
     // 3D bar field of the action chunk (drawn by components/ActionViz.ts): dims along x,
     // the 16 steps receding along z, bar height = real value
     let barPitch = 4;
     let actionField = {
-        x: actionChunk.x + actionChunk.dx + 4 * margin,
+        x: bxR(actionWeight) + 4 * margin,
         y: actionChunk.y + actionChunk.dy,
         z: -actH * barPitch / 2,
         pitch: barPitch,
@@ -1066,10 +1113,13 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
 
     let headCubes = [hStar, lmHeadWeight, logits, logitsAgg1, logitsAgg2, logitsSoftmax,
         doneWeight, doneLogits, doneAgg1, doneAgg2, doneProbs];
-    let expertCubes = [...fmCubes, expertIn, ...expertLayers.flatMap(e => e.cubes)];
-    let actionCubes = [expertOut, actionWeight, actionVelocity, actionX1, actionChunk];
-    cubes.push(...expertCubes);
+    let actionCubes = [actionVelocity, actionWeight, actionChunk, actionX1];
+    let ditIoCubes = [...fmCubes, expertIn, expertOut, ...strip];
+    cubes.push(...ditIoCubes);
     cubes.push(...headCubes, ...actionCubes);
+    // every block that belongs to the DiT (suffix tails, its inputs / outputs, the strip)
+    let ditCubes = [...ditIoCubes, ...expertCubesAll, actionVelocity, actionWeight, actionChunk, actionX1];
+    let expertCubes = [...fmCubes, expertIn, ...expertCubesAll, expertOut];
 
     for (let i = 0; i < cubes.length; i++) {
         cubes[i].idx = i;
@@ -1106,6 +1156,10 @@ export function genGptModelLayout(shape: IModelShape, gptGpuModel: IGptModelLink
         actionField,
         expertIn,
         expertLayers,
+        ditCubes,
+        strip,
+        // set by the decode chapter: the current Euler step k (the return arrow v_k → board k+1)
+        euler: null as null | { k: number, ret: number },
         fm: { state75: fmState75, stateProjW: fmStateProjW, stateEmb: fmStateEmb, x1: fmX1,
             actionInW: fmActionInW, actionEmb: fmActionEmb, timeEmb: fmTimeEmb, timeInW: fmTimeInW,
             timeHidden: fmTimeHidden, timeOutW: fmTimeOutW, actionTime: fmActionTime, cubes: fmCubes },
