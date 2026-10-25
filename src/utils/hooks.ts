@@ -34,25 +34,6 @@ export function useRequestAnimationFrame(active: boolean, cb: (dtSeconds: number
     }, [active, cbRef]);
 }
 
-interface IIntervalOptions {
-    // run the callback immediately on mount
-    runImmediately?: boolean;
-}
-
-export function useInterval(active: boolean, delay: number, cb: () => void, opts?: IIntervalOptions) {
-    let cbRef = useFunctionRef(cb);
-    let runImmediately = opts?.runImmediately ?? false;
-    useEffect(() => {
-        if (active) {
-            let handle = setInterval(cbRef.current, delay);
-            if (runImmediately) {
-                cbRef.current();
-            }
-            return () => clearInterval(handle);
-        }
-    }, [active, delay, cbRef, runImmediately]);
-}
-
 
 export class Subscriptions {
     subs = new Set<() => void>();

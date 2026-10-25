@@ -1,6 +1,6 @@
 # 三套 VLA 可视化总体方案：/groot · /pi0 · /vla
 
-> 状态：**第三版，待 Frank 审**。§3 起仍是设计，未下载任何权重（只用 HTTP Range 读了 safetensors 头和 config）；§2 的改名与遗留清理已按法则 5 实施完毕。
+> 状态：**第三版（已批，施工中）**。§3 起仍是设计，未下载任何权重（只用 HTTP Range 读了 safetensors 头和 config）；§2 的改名与遗留清理已按法则 5 实施完毕。
 >
 > **已裁决（2026-10-25）**
 > 1. 顺序：**π0 先做，GR00T 后做**。
@@ -144,7 +144,7 @@
 - `src/`、`public/`、`tools/` 里 `grep -ri "llm\|gpt"` 除第三方/base64 误报外为零。
 - `next build` 通过；/vla 截图与改名前 /llm 对比：3D 场景一致，仅页头少了已失效的 "?" 按钮。
 
-**未动、待 Frank 定**：仓库里 bbycroft 的其他应用（`src/cpu`、`src/codec`、`src/fluidsim` 及路由，生产环境本就 404）和首页的个人简介/捐助链接/`public/me.jpeg`——按法则 5 应删，但属于范围判断，请确认（§10 D7）。
+**第二轮（D7 批准后）**：bbycroft 其他应用、首页个人信息、yarn 与无用依赖全部删除（见 §10 D7）；`src/utils` 随之再清一轮无引用文件/导出。首页现为单卡（/vla），/pi0、/groot 卡随页面落地再加。
 
 ---
 
@@ -232,14 +232,12 @@ public/data/groot/*  public/data/pi0/*
     - `observation.rgb.right_realsense_link_camera_0` → `right_wrist_0_rgb`
     - 深度通道不用。
   - **语言**：该 episode 的任务描述来自 `tasks.parquet`，经 PaliGemma tokenizer 编码。
-  - **state 61 → 32（新问题）**：π0 的 `max_state_dim=32`，装不下 61 维。
-    - 方案：按 R1Pro 的 state schema 抽出**与 23 维动作同序的关节量**（底盘 3 + 躯干 4 + 左臂 7 + 左夹爪 1 + 右臂 7 + 右夹爪 1 = 23），其余补零到 32。
-    - 精确切片在实现时由 `behavior_challenge/src/data/schema.py` 确认，导出 JSON 里记录切片表。
-    - 3D 里标一行 `state: 23 of 61 dims mapped, zero-padded to 32`。
+  - **R1 Pro embodiment 配置（D6 已撤销，非问题）**：state 维度与 action 维度本来独立，各自经自己的投影进隐空间（k005b 即 `state_proj` 61→768 与 `action_in_proj` 23→768 互不相干；BEHAVIOR 官方 GR00T N1.7 baseline 也是写一份 R1 Pro embodiment 配置：state 61→隐层、action 23→隐层）。π0 同理：给它的状态/动作编解码层写一份 R1 Pro 配置（`tools/pi0_r1pro.yaml`：state 61、action 23、三相机键），**不做任何跨维映射设计**。
+    - 若 `pi0_base` 里没有 R1 Pro 已训练的编解码权重，这几层是唯一非真值部件，3D 中标 `toy: R1 Pro adapter (untrained)`；主干与专家权重、全部激活仍是真值。
   - **归一化**：pi0_base 没有 R1Pro 统计量。state 用 `index/stats.json` 做 mean/std 归一化，并在导出 JSON 中记录所用统计量。
 - **真值标注**：pi0_base 是预训练底模，没在 BEHAVIOR 上微调。激活和权重是真的，但输出动作对 R1Pro **无语义保证**。
   - 场景里标一行 `pi0_base zero-shot on BEHAVIOR frame: activations real, actions not calibrated for R1Pro`。
-  - 50×32 的动作块只取前 23 维，按 R1Pro 名称标注，并注明这是"未校准映射"。
+  - 动作块按 R1 Pro 配置解码为 50×23，按 R1Pro 名称标注。
 - **hook**：
   - 每层两侧 RMSNorm 输入输出、Q/K/V、注意力权重（窗口化）、MLP。
   - 10 步循环里的 x_t、v、t。
@@ -336,7 +334,7 @@ public/data/groot/*  public/data/pi0/*
 | 阶段 | 内容 | 估计 |
 |---|---|---|
 | 1 | ✅ LLM → VLA 改名与遗留清理（全部，§2）；首页三卡占位 | 已完成（卡位随 2/4 阶段补） |
-| 2 | export_pi0.py（下载 14 GB；BEHAVIOR demo 帧解码与相机映射；state 61→32 切片；hook；自检） | 1–1.5 天 |
+| 2 | export_pi0.py（下载 14 GB；BEHAVIOR demo 帧解码与相机映射；R1 Pro embodiment 配置；hook；自检） | 1–1.5 天 |
 | 3 | /pi0 布局 + 模型连接 + P0–P7（按需抽 vizcore） | 3–4 天 |
 | 4 | export_groot.py（clone n1.6-release、R1Pro 配置、hook、自检） | 1–1.5 天 |
 | 5 | /groot 布局（串联 + 总线 + 抽屉）+ G0–G7 | 4–5 天 |
@@ -357,7 +355,6 @@ public/data/groot/*  public/data/pi0/*
 | 许可证：GR00T 为 NVIDIA OneWay Noncommercial；π0 权重受 Gemma 条款约束 | **已裁决：纯内部使用，不公开部署**，非阻塞 | 页面角落注明来源和许可证名称即可 |
 | GR00T 的 R1Pro modality 配置不在公开仓 | 不能用 BEHAVIOR 帧做出有语义的动作 | 退回仓库示例本体（D3） |
 | pi0_base 对 R1Pro 是 zero-shot | 动作无语义 | 已裁决仍用 BEHAVIOR 帧；3D 内明确标注 |
-| BEHAVIOR state 61 维 > π0 的 32 维 | 必须做有损映射 | 按动作同序抽 23 维、补零，记录切片表并标注（§5.3） |
 | demo 视频为 HEVC | 导出器需要能解码 HEVC 的环境 | 复用 behavior_challenge 现有数据加载代码；不行就用 ffmpeg 抽单帧 |
 | 显存/内存 | 14 GB fp32 加载需要约 28 GB 内存峰值（60 GB 够） | bf16 前向；按需 mmap 读取窗口 |
 | 导出数据体积 | 三页 public/data 膨胀 | 只存窗口；单页目标 < 30 MB（与 k005b 同量级） |
@@ -374,5 +371,5 @@ public/data/groot/*  public/data/pi0/*
 | D3 | GR00T 输入帧 | ⏳ 待定，GR00T 阶段再议。推荐 BEHAVIOR 同帧 + embodiment 24，R1Pro 配置拿不到时退回示例本体 |
 | D4 | 许可证 | ✅ 纯内部使用，不公开部署 |
 | D5 | 改名范围 | ✅ 法则 5：可见层与内部一次清完，已完成（§2） |
-| D6 | π0 的 state 61→32 映射 | ❓ **新问题，请确认**：按动作同序抽 23 维、补零到 32（推荐），还是另选 32 维子集？ |
-| D7 | bbycroft 其他应用（cpu/codec/fluidsim）与首页个人信息 | ❓ **请确认**：按法则 5 建议整体删除，首页只留三张 VLA 卡 |
+| D6 | π0 的 state 映射 | ✅ **撤销（伪问题）**：state/action 各自投影进隐层，写一份 R1 Pro embodiment 配置即可（§5.3）。此类本体适配问题以后按此模式直接处理，不再提问 |
+| D7 | bbycroft 其他应用与首页个人信息 | ✅ 已全部删除：`src/cpu`、`src/codec`、`src/fluidsim`、`src/config` 及路由、`public/riscv`、`me.jpeg`、个人简介/捐助链接、`progress/`、`ols.json`、空 `.gitmodules`、yarn（统一 npm）、13 个无用依赖、死的 `eslintConfig`/`resolutions`、`create-symbol-font.jsm` |

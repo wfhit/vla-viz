@@ -5,7 +5,7 @@ import { drawDependences } from "../Interaction";
 import { IProgramState } from "../Program";
 import { drawText, IFontOpts, measureText } from "../render/fontRender";
 import { clamp, makeArray } from "@/src/utils/data";
-import { lerp, lerpSmoothstep } from "@/src/utils/math";
+import { inverseLerp, lerp, lerpSmoothstep } from "@/src/utils/math";
 import { Mat4f } from "@/src/utils/matrix";
 import { Dim, Vec3, Vec4 } from "@/src/utils/vector";
 import { Phase } from "./Walkthrough";
@@ -555,14 +555,6 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
     }
 
 
-}
-
-// when t < edge0, returns 0
-// when t > edge1, returns 1
-// when t is between edge0 and edge1, returns a value between 0 and 1
-// note that edge1 must be greater than edge0
-export function inverseLerp(edge0: number, edge1: number, t: number) {
-    return (clamp(t, edge0, edge1) - edge0) / (edge1 - edge0);
 }
 
 interface IProcessDimOpts {

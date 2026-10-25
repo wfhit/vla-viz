@@ -4,9 +4,6 @@ import { multiSortStableAsc } from "./array";
 
 export enum KeyboardOrder {
     MainPage = 0,
-    Element = 1,
-    Modal = 2,
-    Popup = 3,
 }
 
 interface IKeyHandler {
@@ -20,7 +17,7 @@ interface IKeyHandlerOptions {
     receiveKeyUp?: boolean;
 }
 
-export class KeyboardManager {
+class KeyboardManager {
     private handlers: IKeyHandler[] = [];
     public isFocused = false;
     public isFocusedSubs = new Subscriptions();
@@ -86,58 +83,4 @@ export function useGlobalKeyboard(order: KeyboardOrder, handler: (ev: KeyboardEv
     }, [order, handlerRef, manager, receiveKeyUp, isActive]);
 
     return manager;
-}
-
-export function useCreateGlobalKeyboardDocumentListener() {
-    let manager = useContext(KeyboardManagerContext);
-
-    useEffect(() => {
-        window.addEventListener("keydown", manager.handleKey);
-        window.addEventListener("keyup", manager.handleKey);
-        return () => {
-            window.removeEventListener("keydown", manager.handleKey);
-            window.removeEventListener("keyup", manager.handleKey);
-        };
-    }, [manager]);
-}
-
-export enum Modifiers {
-    None = 0,
-    Alt = 1,
-    CtrlOrCmd = 2,
-    Shift = 4,
-}
-
-interface IKeyboardEvent {
-    type: string;
-    key: string;
-    altKey: boolean;
-    ctrlKey: boolean;
-    shiftKey: boolean;
-    metaKey: boolean;
-}
-
-interface IModifiersEvent {
-    type: string;
-    altKey: boolean;
-    ctrlKey: boolean;
-    shiftKey: boolean;
-    metaKey: boolean;
-}
-
-export function isArrowKeyWithModifiers(ev: IKeyboardEvent, direction: "up" | "down" | "left" | "right", modifiers: Modifiers = Modifiers.None) {
-    return (ev.key.toLowerCase() === direction || ev.key.toLowerCase() === `arrow${direction}`) && hasModifiers(ev, modifiers);
-}
-
-export function isKeyWithModifiers(ev: IKeyboardEvent, key: string, modifiers: Modifiers = Modifiers.None) {
-    return key.toLowerCase() === ev.key.toLowerCase() && hasModifiers(ev, modifiers);
-}
-
-export function hasModifiers(ev: IModifiersEvent, modifiers: Modifiers) {
-    let modifiersActual = Modifiers.None;
-    modifiersActual |= ev.altKey ? Modifiers.Alt : 0;
-    modifiersActual |= ev.ctrlKey || ev.metaKey ? Modifiers.CtrlOrCmd : 0;
-    modifiersActual |= ev.shiftKey ? Modifiers.Shift : 0;
-
-    return modifiersActual === modifiers;
 }

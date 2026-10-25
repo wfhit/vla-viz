@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useFunctionRef } from "./hooks";
 
-export interface IDragStart<T> {
+interface IDragStart<T> {
     clientX: number;
     clientY: number;
     data: T;
@@ -80,7 +80,7 @@ export function useGlobalDrag<T>(
     return [dragStart, setDragStartTarget];
 }
 
-export interface IPointerEvent {
+interface IPointerEvent {
     clientX: number;
     clientY: number;
 }
@@ -93,12 +93,6 @@ interface IMouseEvent extends IPointerEvent {
     readonly altKey: boolean;
     readonly ctrlKey: boolean;
     readonly metaKey: boolean;
-    stopPropagation(): void;
-    preventDefault(): void;
-}
-
-export interface IBaseEvent {
-    type: string;
     stopPropagation(): void;
     preventDefault(): void;
 }
