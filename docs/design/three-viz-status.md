@@ -11,7 +11,7 @@ fabricated mappings. No toy data. No popups/overlays — in-scene walkthrough st
 | Page | Model | Weights (local) | Status |
 |---|---|---|---|
 | `/vla` | k005b dual-head VLA | `outputs/k005b-task0-v3/checkpoints` (step_150000) | DONE + verified |
-| `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`) | DONE (self-tested; `window.__arrowAudit` (same `auditEdges` as /groot): 261 edges, noIn/noOut empty on P0-P8; awaiting Hermes acceptance) |
+| `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`) | DONE + ACCEPTED (Hermes, 2026-10-25: auditEdges 261 edges noIn/noOut empty on P5/P7 re-run independently, 0 console errors, no overlays, 2 weight spot-checks exact vs openpi checkpoint) |
 | `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | DONE + ACCEPTED (Hermes, 2026-10-25) |
 
 Input frames for ALL pages: local BEHAVIOR dataset
@@ -43,9 +43,12 @@ Input frames for ALL pages: local BEHAVIOR dataset
    `tools/export_pi0.py` (+ `tools/ref_pi0_jax.py`, official JAX agreement 2.6e-5) ->
    `public/pi0-*.json`; `src/pi0/*`; P0-P8 self-test: 0 console errors, arrow audit empty
    (261 edges); `next build` OK; homepage card added.
-3. Hermes acceptance per page: value spot-check vs weights, step-through screenshots,
-   no orphan arrows, no popups. Fail -> back to Opus.
-4. Homepage: three cards -> `/vla` `/pi0` `/groot`. Final report to Frank.
+3. ~~Hermes acceptance per page~~ DONE 2026-10-25: `/groot` and `/pi0` both ACCEPTED
+   (independent re-verification: arrow audits noIn/noOut empty, 0 console errors, no
+   overlays/popups, weight spot-checks exact vs local checkpoints). `/vla` verified earlier.
+4. ~~Homepage: three cards~~ DONE (all three cards + real screenshots served 200).
+   MISSION COMPLETE except the /vla 10-step activation re-export, gated on training
+   (step 5).
 5. SEPARATE TRACK (training): 10-step flow restart RAN overnight from step_150000
    (--flow-steps 1 regression mode, fresh optimizer), reached step 158500 healthy
    (action 0.539); **Frank PAUSED it at 10:25 Oct 25** — do not relaunch without his go.
@@ -55,15 +58,16 @@ Input frames for ALL pages: local BEHAVIOR dataset
 
 ## Current reasoning (rewritten each sentinel run)
 
-2026-10-25 19:00 — The only important thing now is FINISHING: `/pi0` is the last page
-(Opus mid-polish: panel framing/label fixes, re-shooting chapters), then acceptance,
-homepage, report. Two deviations found and fixed this run: (1) this doc's step 5 still
-said "awaits Frank's go" while training had actually run and been paused by Frank —
-rewritten above; (2) `/groot` acceptance was sitting idle even though it is the
-checker's (Hermes) job and independent of Opus — running it this run. cc10step tmux
-session is idle-but-done (its bug fix 20b39c2 is merged; training now paused by Frank
-anyway) — left in place, no live task. Working set rule: keep Opus on /pi0 until
-self-test clean, do NOT interleave new asks.
+2026-10-25 19:40 — MISSION COMPLETE: all three pages DONE + Hermes-accepted; homepage
+done. This run accepted /groot and /pi0 (maker Opus, checker Hermes — both audits,
+error sweeps, overlay checks, and exact weight spot-checks against the safetensors /
+openpi zarr checkpoints re-run independently). One infra incident, fixed: the viz dev
+container (node:22-bookworm, :3002, bind-mounts vla-viz) had a stale/corrupt root-owned
+`.next` — cleared via a root container and rebuilt clean; both pages verified after.
+Only open item is step 5's /vla activation re-export, which is GATED on Frank un-
+pausing the training — nothing to do until then. Ops notes: cc10step tmux session is
+idle-but-done (fix 20b39c2 merged); next dev server cache lives in vla-viz/.next owned
+by root (container) — clear it with a root container, not host rm.
 
 ## Standing rules (Frank)
 
