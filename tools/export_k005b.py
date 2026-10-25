@@ -71,7 +71,7 @@ FM_CF_STEPS = 10
 
 
 def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
-                         x1, vel, action, vis_cols, txt_cols, fba, orig_attn):
+                         x1, vel, action, vis_cols, txt_cols, fba, orig_attn, tw):
     """The suffix inputs, per-layer AdaRMSNorm modulation, the training target, K=8 real
     noise particles (t=1 deploy forwards) and the 10-step counterfactual summary."""
     import torch
@@ -168,23 +168,106 @@ def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
     mean_chunk = chunks.mean(0)
     put("fm_mean_chunk", mean_chunk, mean_chunk, [0, 0], "mean over the K particle chunks")
 
-    # counterfactual: 10 Euler steps with t patched 1→0.1 (outside the trained t=1 regime)
-    tv = {"t": 1.0}
+    # K Euler steps x ← x − v/K, t = 1, 0.9, …, 0.1 (sample_action_chunk's loop, run as joint
+    # forwards with flow_time = t_k — numerically the encode_prefix + predict_velocity path).
+    # Per step: x_t, v, and every layer's suffix lane (the expert half of each layer block).
+    # Steps ≥ 1 are only in-distribution for a checkpoint trained over t ∈ (0, 1].
+    steps = {}
+    scap = {}
+
+    def lane(i, nm, x):
+        x = x[0] if x.dim() == 3 else x
+        scap[f"E{i}.{nm}"] = x.float()
+        return x
+
+    def void(_):
+        return None
+
+    def step_hooks(i, layer):
+        hs = []
+        ex = {}
+
+        def pre(mod, a, kw):
+            if kw.get("compute_qkv"):
+                x = a[0]
+                ex["x_in"] = x[0] if x.dim() == 3 else x
+                if i == 0:
+                    scap["expert_in"] = ex["x_in"].float()
+        hs.append(layer.register_forward_pre_hook(pre, with_kwargs=True))
+        hs.append(layer.input_layernorm.register_forward_hook(lambda m, a, o: void(lane(i, "ln1", o))))
+
+        def o_hook(m, a, o):
+            out = lane(i, "o", o)
+            lane(i, "res1", out + ex["x_in"])
+        hs.append(layer.self_attn.o_proj.register_forward_hook(o_hook))
+        hs.append(layer.post_attention_layernorm.register_forward_hook(lambda m, a, o: void(lane(i, "ln2", o))))
+        hs.append(layer.mlp.register_forward_hook(lambda m, a, o: void(lane(i, "mlp", o))))
+
+        def post(mod, a, kw, o):
+            if kw.get("output_atten"):
+                x = o[0] if isinstance(o, (tuple, list)) else o
+                lane(i, "out", x)
+        hs.append(layer.register_forward_hook(post, with_kwargs=True))
+        return hs
+
+    def step_attn(q, k, v, mask):
+        out = orig_attn(q, k, v, mask)
+        i = scap["_i"]
+        kr = k[0].repeat_interleave(H // k.shape[2], dim=1)
+        sq = torch.einsum("thd,shd->hts", q[0, T:], kr) / math.sqrt(HD)
+        ps = torch.softmax(sq.masked_fill(~mask[0, T:][None], float("-inf")), -1)
+        pm = ps.mean(0)
+        scap[f"E{i}.attn"] = torch.cat([pm[:, tw], pm[:, T:]], -1)
+        scap[f"E{i}.mass"] = torch.stack([pm[:, :16].sum(-1), pm[:, :T][:, vis_cols].sum(-1),
+                                          pm[:, :T][:, txt_cols].sum(-1), pm[:, T:].sum(-1)], -1)
+        scap["_i"] = i + 1
+        return out
+
+    hs = [h for i in range(NL) for h in step_hooks(i, expert.layers[i])]
+    fba.our_eager_attention_forward = step_attn
     cf = []
+    t1 = time.time()
     try:
         xc = x1.clone()
         for s in range(FM_CF_STEPS):
-            tv["t"] = 1.0 - s / FM_CF_STEPS
+            tk = 1.0 - s / FM_CF_STEPS
             d = dict(tensors)
             d["noisy_action"] = xc[None].to(tensors["noisy_action"].dtype)
-            d["flow_time"] = torch.full_like(tensors["flow_time"], tv["t"])
+            d["flow_time"] = torch.full_like(tensors["flow_time"], tk)
+            scap.clear()
+            scap["_i"] = 0
             with torch.no_grad():
                 vc = model(**d).action_velocity[0].float()
-            xc = xc - vc / FM_CF_STEPS
-            cf.append({"t": tv["t"], "vnorm": float(vc.norm()), "mse": mse(xc, tg)})
+            assert scap["_i"] == NL, scap["_i"]
+            with torch.no_grad():  # the suffix input chain and the AdaRMSNorm γβ at this t_k
+                tek = create_sinusoidal_pos_embedding(torch.full((1,), tk), pw, min_period=4e-3, max_period=4.0)[0]
+                aek = P.action_in_proj(xc)
+                hik = F.silu(P.action_time_mlp_in(torch.cat([aek, tek[None].expand(aek.shape[0], pw)], -1)))
+                atk = P.action_time_mlp_out(hik)
+                assert float((atk - scap["expert_in"][1:]).abs().max()) < 1e-3, "suffix tokens 1..16 mismatch"
+                scap["fm_time_emb"] = tek
+                scap["fm_action_emb"], scap["fm_time_mlp_hidden"], scap["fm_action_time"] = aek, hik, atk
+                for i in range(NL):
+                    lay = expert.layers[i]
+                    scap[f"E{i}.ada"] = torch.stack([f(tek) for nrm in (lay.input_layernorm, lay.post_attention_layernorm)
+                                                     for f in (nrm.gamma, nrm.beta)])
+            if s == 0:  # step 0 (t = 1, x = x1) is the main forward exactly
+                assert float((vc - vel).abs().max()) < 1e-3, "step 0 != main forward"
+            xn = xc - vc / FM_CF_STEPS
+            st = {"x": xc.clone(), "v": vc, "x_next": xn.clone()}
+            for kname, val in scap.items():
+                if not kname.startswith("_"):
+                    wide = kname.split(".")[-1] in ("ln1", "o", "res1", "ln2", "mlp", "out", "ada") or kname in (
+                        "expert_in", "fm_action_emb", "fm_time_mlp_hidden", "fm_action_time", "fm_time_emb")
+                    st[kname] = val[..., :WC] if wide else val
+            steps[s] = (tk, st)
+            xc = xn
+            cf.append({"t": tk, "vnorm": float(vc.norm()), "mse": mse(xc, tg)})
     finally:
-        pass
-    print(f"[fm] counterfactual euler{FM_CF_STEPS} final mse {cf[-1]['mse']:.3f}", flush=True)
+        fba.our_eager_attention_forward = orig_attn
+        for h in hs:
+            h.remove()
+    print(f"[fm] euler{FM_CF_STEPS} ({time.time() - t1:.0f}s) final mse {cf[-1]['mse']:.3f}", flush=True)
 
     asserts = {
         "prefix_kv_max_abs_diff_across_seeds": cap["kvdiff"],
@@ -204,7 +287,18 @@ def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
         "mse_per_particle": [mse(c, tg) for c in chunks],
         "particle_chunk_std": float(chunks.std(0).mean()),
         "state_valid": int((s75 != 0).sum()),
-        "cf_euler": cf, "asserts": asserts,
+        "cf_euler": cf, "asserts": asserts, "_steps": steps,
+    }
+
+
+def ent16(x, desc):
+    """float16 entry (whole tensor) for the lazily loaded per-Euler-step file."""
+    import torch
+    w = x.detach().to(torch.float32).contiguous().cpu()
+    return {
+        "shape": list(w.shape), "dtype": "torch.float16",
+        "data": base64.b64encode(w.numpy().astype("<f2").tobytes()).decode("ascii"),
+        "stats": stats(w), "desc": desc,
     }
 
 
@@ -397,6 +491,11 @@ def main():
         hooks.append(layer.post_attention_layernorm.register_forward_hook(ln2_hook))
 
         def mlp_hook(m, a, o):
+            xn = a[0]
+            g, u = m.gate_proj(xn), m.up_proj(xn)
+            e2d(f"E{i}.gate", g, f"expert layer {i} gate_proj out")
+            e2d(f"E{i}.up", u, f"expert layer {i} up_proj out")
+            e2d(f"E{i}.act", F.silu(g) * u, f"expert layer {i} silu(gate)·up")
             e2d(f"E{i}.mlp", o, f"expert layer {i} SwiGLU MLP out (down_proj)")
             ectx["mlp"] = o[0] if o.dim() == 3 else o
         hooks.append(layer.mlp.register_forward_hook(mlp_hook))
@@ -452,6 +551,25 @@ def main():
         vr = v[0].repeat_interleave(H // v.shape[2], dim=1)
         o_suf = torch.einsum("hts,shd->thd", ps, vr)
         assert torch.allclose(o_suf, out[0, T:].view(L - T, H, HD), atol=1e-4), "suffix attention mismatch"
+        # the suffix "tail" of every per-head block of this layer's joint attention: the
+        # expert's 17 tokens are extra columns/rows of the SAME q, k, v, scores, probs, out
+        ns = L - T
+        put(f"E{i}.q", q[0, T:, :, :WD].permute(1, 0, 2), q[0].permute(1, 0, 2), [0, T, 0],
+            f"layer pair {i}: expert Q of the suffix tokens (AdaRMSNorm → q_proj → q_norm → RoPE) [head, token, dim]")
+        put(f"E{i}.k", k[0, T:, :, :WD].permute(1, 0, 2), k[0].permute(1, 0, 2), [0, T, 0],
+            f"layer pair {i}: expert K of the suffix tokens (2 kv heads tiled to {k.shape[2]}) [kv_head, token, dim]")
+        put(f"E{i}.v", v[0, T:, :, :WD].permute(1, 0, 2), v[0].permute(1, 0, 2), [0, T, 0],
+            f"layer pair {i}: expert V of the suffix tokens (tiled) [kv_head, token, dim]")
+        put(f"E{i}.scp", sq[:, :, tw], sq, [0, T, t0w],
+            f"layer pair {i}: suffix queries · prefix-window keys / √{HD} (masked=-inf) [head, suffix q, key]")
+        put(f"E{i}.scs", sq[:, :, T:], sq, [0, T, T],
+            f"layer pair {i}: suffix queries · suffix keys / √{HD} [head, suffix q, suffix key]")
+        put(f"E{i}.pp", ps[:, :, tw], ps, [0, T, t0w],
+            f"layer pair {i}: suffix attention probs on the prefix-window keys (rows normalised over all {L} keys)")
+        put(f"E{i}.ps", ps[:, :, T:], ps, [0, T, T],
+            f"layer pair {i}: suffix attention probs on the {ns} suffix keys")
+        put(f"E{i}.vo", o_suf[:, :, :WD].permute(1, 0, 2), o_suf.permute(1, 0, 2), [0, T, 0],
+            f"layer pair {i}: per-head attention output of the suffix tokens Σp·V [head, token, dim]")
         pm = ps.mean(0)                                                # [n_suf, L] head-mean
         put(f"E{i}.attn", torch.cat([pm[:, tw], pm[:, T:]], dim=-1), pm, [0, t0w],
             f"layer pair {i}: expert suffix queries' head-mean attention; cols = prefix window "
@@ -512,7 +630,7 @@ def main():
 
     # ---------------- flow matching (docs/design/flow-matching-viz.md §2) ---------------- #
     fm = export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
-                              x1, vel, action, vis_cols, txt_cols, fba, orig_attn)
+                              x1, vel, action, vis_cols, txt_cols, fba, orig_attn, tw)
 
     # ---------------- weights ---------------- #
     W = {}
@@ -604,6 +722,7 @@ def main():
         "pred_done": bool(int(done.argmax()) == 1),
         "fm": fm,
     }
+    steps_ = fm.pop("_steps")
 
     os.makedirs(out_dir, exist_ok=True)
     W["config"] = config
@@ -613,6 +732,14 @@ def main():
         with open(path, "w") as f:
             json.dump(obj, f)
         print(f"[write] {path} {os.path.getsize(path) / 1e6:.1f} MB", flush=True)
+    fm_out = {"K": FM_CF_STEPS, "checkpoint_step": ckpt_step,
+              "in_distribution": False,  # this lineage only trained t = 1; steps ≥ 1 are a preview
+              "steps": [{"t": tk, "tensors": {nm: ent16(x, nm) for nm, x in st.items()}}
+                        for _, (tk, st) in sorted(steps_.items())]}
+    path = os.path.join(out_dir, "k005b-fm.json")
+    with open(path, "w") as f:
+        json.dump(fm_out, f)
+    print(f"[write] {path} {os.path.getsize(path) / 1e6:.1f} MB", flush=True)
 
     # spot values for the JS-vs-Python self test — read straight from the live
     # torch tensors (NOT from the exported windows) so the comparison is end-to-end
