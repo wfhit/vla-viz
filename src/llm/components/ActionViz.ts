@@ -12,6 +12,7 @@ import { drawText, IFontOpts, measureText } from "../render/fontRender";
 import { RenderPhase } from "../render/sharedRender";
 import { Mat4f } from "@/src/utils/matrix";
 import { Vec3, Vec4 } from "@/src/utils/vector";
+import { clamp } from "@/src/utils/data";
 import { actionGroups, unnormalizeAction } from "../actionDims";
 import { drawArrow, recordArrowEdge } from "./Arrow";
 import { IBlkDef } from "../GptModelLayout";
@@ -33,13 +34,17 @@ export interface IActionVizState {
     massStep: number;    // Euler pass whose attention mass the bars / links use (-1 = the joint forward)
     quadLabel: number;   // "prefix cannot see suffix" in the empty quadrant of the active layer
     eulerPass: number;   // decode chapter: the running pass (shown as the step indicator), -1 = none
+    normCmp: number;     // opacity of the AdaRMSNorm before/after chart beside a gamma/beta block
+    normLayer: number;   // which layer pair the chart reads
+    normWhich: 1 | 2;    // 1 = AdaRMSNorm1 (gamma1/beta1), 2 = AdaRMSNorm2 (gamma2/beta2)
+    normTok: number;     // which suffix token's 64 channels are charted
 }
 
 export function defaultActionViz(): IActionVizState {
     return {
         links: 0, activeLayer: -1, massBars: 0, field: 1, fieldMode: 'decode', decode: 1, showVelocity: 0,
         target: 0, errBars: 0, robotUnits: 0, particles: 0, particleTau: 1, particleStep: 0,
-        massStep: -1, quadLabel: 0, eulerPass: -1,
+        massStep: -1, quadLabel: 0, eulerPass: -1, normCmp: 0, normLayer: 0, normWhich: 1, normTok: 1,
     };
 }
 
@@ -67,6 +72,7 @@ export function drawActionViz(state: IProgramState, isVisible?: (cubes: IBlkDef[
     drawJointLinks(state, layout, m, viz, isVisible);
     if (viz.massBars > 0) drawMassBars(state, layout, m, viz);
     if (viz.quadLabel > 0) drawQuadLabel(state, layout, viz);
+    if (viz.normCmp > 0) drawNormCompare(state, layout, m, viz);
     drawStripTitle(state, layout, m, viz);
     if (viz.particles > 0) {
         drawParticles(state, layout, m, viz);
@@ -96,6 +102,53 @@ function drawQuadLabel(state: IProgramState, layout: IGptModelLayout, viz: IActi
     sceneText(state, 'prefix Q cannot', x, y, z, 2.2, col);
     sceneText(state, 'see suffix K', x, y + 3, z, 2.2, col);
     sceneText(state, '(masked)', x, y + 6, z, 2.2, col);
+}
+
+// Beside a gamma/beta block: per channel (rows aligned with the block's channel rows), the
+// plain RMSNorm(x)*w value (grey) and the modulated (1+g)*n+b value (orange) of one token.
+// The modulated value is the captured AdaRMSNorm output; the plain value is recovered
+// exactly per channel as n = (out - b) / (1 + g), since the modulation is element-wise.
+function drawNormCompare(state: IProgramState, layout: IGptModelLayout, m: IGptModelLink, viz: IActionVizState) {
+    let i = viz.normLayer;
+    let e = layout.expertLayers[i], el = m.expertLayers?.[i], ada = m.fm?.ada[i];
+    if (!e || !el || !ada) return;
+    let blk = viz.normWhich === 1 ? e.ada : e.ada2;
+    let out = (viz.normWhich === 1 ? el.ln1 : el.ln2).localBuffer;
+    if (blk.opacity <= 0) return;
+    let wc = ada.localBuffer.length / 4; // rows: g1, b1, g2, b2
+    let g0 = (viz.normWhich - 1) * 2;
+    let nTok = out.length / wc, t = Math.min(viz.normTok, nTok - 1);
+    let a = viz.normCmp;
+    let cell = layout.cell;
+    let scale = 2.2, lim = 22;
+    let x0 = blk.x + blk.dx + lim + 6, z = blk.z + blk.dz + 0.5;
+    let grey = new Vec4(0.45, 0.45, 0.5, 1).mul(a), orange = Vec4.fromHexColor('#ea580c').mul(a);
+    let tri = state.render.triRender;
+    let prev = state.render.sharedRender.activePhase;
+    state.render.sharedRender.activePhase = RenderPhase.Overlay;
+    let n = new Vec3(0, 0, 1);
+    let bar = (y0: number, y1: number, v: number, col: Vec4) => {
+        let len = clamp(v * scale, -lim, lim);
+        let xa = Math.min(x0, x0 + len), xb = Math.max(x0, x0 + len) + 0.15;
+        quad(tri, new Vec3(xa, y0, z), new Vec3(xb, y0, z), new Vec3(xa, y1, z), new Vec3(xb, y1, z), col, n);
+    };
+    for (let c = 0; c < Math.min(wc, blk.cy); c++) {
+        let gm = ada.localBuffer[g0 * wc + c], bt = ada.localBuffer[(g0 + 1) * wc + c];
+        let post = out[t * wc + c];
+        let pre = Math.abs(1 + gm) > 1e-3 ? (post - bt) / (1 + gm) : NaN;
+        let y = blk.y + c * cell;
+        if (!isNaN(pre)) bar(y + 0.1, y + cell * 0.45, pre, grey);
+        bar(y + cell * 0.5, y + cell * 0.9, post, orange);
+    }
+    state.render.sharedRender.activePhase = prev;
+    let txt = new Vec4(0.1, 0.1, 0.15, 1).mul(a);
+    let ty = blk.y - 13;
+    let nm = viz.normWhich === 1 ? 'AdaRMSNorm1' : 'AdaRMSNorm2';
+    sceneText(state, `${nm} layer ${i}, suffix token ${t}, ch 0-${wc - 1}`, x0 - lim, ty, z, 2.4, txt);
+    sceneText(state, 'grey  : RMSNorm(x)*w  (before t-modulation)', x0 - lim, ty + 3.5, z, 2.2, grey);
+    sceneText(state, 'orange: (1+g(t))*n + b(t)  (after)', x0 - lim, ty + 6.5, z, 2.2, orange);
+    let lr = state.render.lineRender;
+    addLine(lr, 0.6, txt, new Vec3(x0, blk.y, z), new Vec3(x0, blk.y + blk.dy, z), undefined, undefined, 0);
 }
 
 // above the Euler strip: what it is, the pre-stamp warning, and the 10-cell step indicator

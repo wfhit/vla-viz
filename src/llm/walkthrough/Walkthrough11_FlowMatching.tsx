@@ -128,33 +128,199 @@ k005b 里其实有两个 Transformer。主干是 Qwen3-VL（隐藏维 ${cfg?.n_e
     } break;
 
     case Phase.D1_DitBlock: {
+        // D1a–D1h (docs/design/dit-framework-design.md §1): one DiT block, part by part
+        let eh = e0.heads[hF];
         let laneTop = [e0.ln1, e0.ada, e0.o, e0.res1, b0.ln1.lnResid, b0.attnResidual, b0.attnOut];
         let laneBot = [e0.res1, e0.ln2, e0.ada2, e0.gate, e0.act, e0.mlp, e0.out, b0.mlpResidual];
-        initialFrame(state, [...laneTop, ...laneBot], 276, 6, { fill: 1.05 });
+        let lane = [...laneTop, ...laneBot];
         let st = (i: number) => {
             let s = m?.fm.ada[i].meta.stats;
             return s ? `[${fmtSigned(s.min, 2)}, ${fmtSigned(s.max, 2)}]` : '…';
         };
+        // real values of suffix token 1 (the first action token), window channel c
+        let el0 = m?.expertLayers[0];
+        let ada0 = m?.fm.ada[0].localBuffer;
+        let wc = ada0 ? ada0.length / 4 : 64;
+        let at = (t: { localBuffer: Float32Array } | undefined, r: number, c: number) => t?.localBuffer[r * wc + c];
+        // the channel where the plain RMSNorm value is largest, so the modulation is visible
+        let cPick = 0;
+        if (ada0 && el0) {
+            let best = -1;
+            for (let c = 0; c < wc; c++) {
+                let pre = (el0.ln1.localBuffer[wc + c] - ada0[wc + c]) / (1 + ada0[c]);
+                if (Math.abs(pre) > best) { best = Math.abs(pre); cPick = c; }
+            }
+        }
+        let g1 = ada0?.[cPick], b1 = ada0?.[wc + cPick], post1 = at(el0?.ln1, 1, cPick);
+        let pre1 = g1 !== undefined && b1 !== undefined && post1 !== undefined ? (post1 - b1) / (1 + g1) : undefined;
+        let xin = m?.expertIn.localBuffer[wc], o10 = at(el0?.o, 1, 0), r10 = at(el0?.res1, 1, 0);
+        let mlp10 = at(el0?.mlp, 1, 0), out10 = at(el0?.out, 1, 0);
+        let te = m?.fm.timeEmb.localBuffer;
+        let preStamp = `（数据说明：这里的激活来自 ${ckpt} 旧权重、t = 1 的一次前向；t = 1 正是它训练时见过的分布，但仍属 pre-stamp 预览，step_160000 印章检查点落盘后会换数据。）`;
+
+        initialFrame(state, lane, 270, 4, { fill: 1.05 });
         commentary(wt, null, 0)`
 
-镜头拉近第 0 层的 DiT 泳道。它和主干层的结构几乎一样，只有两处不同。
+D1a 全貌。动作专家就是一个 DiT：用时间 t 做条件的 Transformer。这一章把它的一个块从头到尾拆开讲。
 
-第一处：两个归一化都是 AdaRMSNorm。
-out = (1 + γ(te)) · RMSNorm(x) · w + β(te)
-γ、β 由时间嵌入 te 经线性层得到。${c_blockRef('γ₁β₁', e0.ada)} 调制注意力前的 ${c_blockRef('AdaRMSNorm1', e0.ln1)}，${c_blockRef('γ₂β₂', e0.ada2)} 调制 MLP 前的 ${c_blockRef('AdaRMSNorm2', e0.ln2)}。两根窄块合起来就是第 0 层真实的 4 × 768 组 γβ（图中前 64 通道），值域 ${st(0)}；第 ${nPairs - 1} 层是 ${st(nPairs - 1)}。
+教科书 DiT 的一块是：adaLN 条件化的 Norm → 注意力 → 残差 → adaLN Norm → MLP → 残差。堆 N 块，最后接 final norm 和线性输出。
+
+场景里右侧橙色窄条就是第 0 层的 DiT 块。下面先让真实数据把这一层完整走一遍，黄色是正在计算的部件。
+${preStamp}
 `;
         breakAfter();
-        let tRun = afterTime(null, nFlowStages * 0.9);
+        let tA = afterTime(null, nFlowStages * 0.6);
         breakAfter();
+
+        // B and C share the close frontal view of gamma/beta (wider frames put the layer-0 heads in front of the lane)
+        let chartBox = { x: e0.ada.x + e0.ada.dx, y: e0.ada.y - 14, z: e0.ada.z, dx: 56, dy: e0.ada.dy + 14, dz: 2 };
+        let adaView = [b0.ln1.lnResid, e0.ln1, e0.ada, chartBox];
+        let tB = afterTime(null, 1.2);
+        frameTo(state, tB, adaView, 270, 2, { fill: 1.15 });
         commentary(wt)`
 
-第二处：它的注意力不是自己单独做的。DiT 的 Q（${c_blockRef('q', e0.heads[hF].q)}）要同时对主干同层的 K/V 和自己的 K/V 做注意力，D3 会展开。
+D1b 时间条件。t 先变成正弦嵌入 ${c_blockRef('te = sincos(t)', fm.timeEmb)}（min_period 4e-3、max_period 4.0，代码 :378），这里 t = 1，te 前两维 = ${f3(te?.[0])}、${f3(te?.[1])}。
 
-刚才点亮的顺序就是 DiT 一层的完整路径：AdaRMSNorm → Q/K/V → 联合注意力 → softmax·V → o_proj → ⊕ → AdaRMSNorm → gate/up → SiLU·up → down_proj → ⊕。t 变了，γβ 就跟着变，同一组权重在不同 t 下给出不同的速度场。
+te 沿时间总线（γβ 右侧的竖线，D0 里看过全貌）从上方送到每一层的两个 γβ 小块：${c_blockRef('γ₁β₁', e0.ada)} 和 ${c_blockRef('γ₂β₂', e0.ada2)}。
+
+教科书 DiT 的条件是 t 嵌入加上类别 c 嵌入。k005b 只有 t：任务和场景信息不走条件向量，而是由注意力去读主干（D1d / D3）。
 `;
-        if (tRun.active && tRun.t < 1) applyFlowPass(L, tRun.t * nFlowStages, { suffixOnly: true });
-        e0.ada.highlight = Math.max(e0.ada.highlight, 0.3);
-        e0.ada2.highlight = Math.max(e0.ada2.highlight, 0.3);
+        breakAfter();
+
+        let tC = afterTime(null, 1.2);
+        frameTo(state, tC, adaView, 270, 2, { fill: 1.15 });
+        commentary(wt)`
+
+D1c adaLN 调制。${c_blockRef('AdaRMSNorm1', e0.ln1)} 的公式：
+out = (1 + γ(te)) · RMSNorm(x) · w + β(te)
+γ、β 由 te 经线性层得到，零初始化。
+
+右侧条形图是后缀 token 1（第一个动作 token）的 64 个通道：灰条是调制前的 RMSNorm(x)·w，橙条是调制后的真实输出。例如通道 ${cPick}：γ₁ = ${f3(g1)}，β₁ = ${f3(b1)}，调制前 ${f3(pre1)} → 调制后 ${f3(post1)}。灰条普遍很短，橙条很长：t = 1 时 γ 把多数通道放大了十倍以上，β 再整体平移。
+
+第 0 层 4 × 768 组 γβ 值域 ${st(0)}，第 ${nPairs - 1} 层 ${st(nPairs - 1)}。和教科书 adaLN-Zero 的区别：用 RMSNorm 而非 LayerNorm；每层只有 2 处 γβ，没有 α 门控，残差直接相加。
+`;
+        breakAfter();
+
+        let tD = afterTime(null, 1.2);
+        frameTo(state, tD, [eh.q, eh.scP, eh.scS, eh.pP, eh.pS, eh.vo, b0.heads[hF].attnMtx], 278, 8, { fill: 1.5 });
+        commentary(wt)`
+
+D1d 注意力。17 个后缀 token 生成 ${c_blockRef('Q', eh.q)}、K、V，接着打分（${c_blockRef('scP', eh.scP)} 对主干前缀，${c_blockRef('scS', eh.scS)} 对后缀自身），softmax 后乘 V 得到 ${c_blockRef('vo', eh.vo)}。
+
+教科书是自注意力，只看自己的 token。k005b 是联合注意力：K/V 同时包含主干前缀和后缀，这是 DiT 拿到场景与任务信息的唯一入口（D3 细讲）。
+`;
+        breakAfter();
+        let tDrun = afterTime(null, 3 * 0.9);
+        breakAfter();
+
+        let tE = afterTime(null, 1.2);
+        frameTo(state, tE, [e0.o, b0.attnResidual, e0.res1], 270, 4, { fill: 1.3 });
+        commentary(wt)`
+
+D1e 残差 1。${c_blockRef('o_proj', e0.o)} 的输出是增量，在 ⊕ 处加回主线，得到 ${c_blockRef('res1', e0.res1)}。
+
+真值核对（token 1，通道 0）：输入 ${f3(xin)} + o ${f3(o10)} = res1 ${f3(r10)}。每个块只学增量。
+`;
+        breakAfter();
+        let tErun = afterTime(null, 2 * 0.9);
+        breakAfter();
+
+        let tF = afterTime(null, 1.2);
+        frameTo(state, tF, [e0.ln2, e0.ada2, e0.gate, e0.up, e0.act, e0.mlp, e0.out], 270, 4, { fill: 1.15 });
+        commentary(wt)`
+
+D1f MLP。${c_blockRef('AdaRMSNorm2', e0.ln2)}（由 ${c_blockRef('γ₂β₂', e0.ada2)} 调制）→ ${c_blockRef('gate', e0.gate)} / ${c_blockRef('up', e0.up)} → ${c_blockRef('SiLU(gate)·up', e0.act)} → ${c_blockRef('down_proj', e0.mlp)} → ⊕ → ${c_blockRef('out', e0.out)}。
+
+教科书用 GELU 的点式 MLP；k005b 用 SwiGLU，768 → 2752 → 768，逐 token 独立。
+真值核对（token 1，通道 0）：res1 ${f3(r10)} + mlp ${f3(mlp10)} = out ${f3(out10)}。
+`;
+        breakAfter();
+        let tFrun = afterTime(null, 5 * 0.9);
+        breakAfter();
+
+        let cG = commentary(wt)`
+
+D1g 堆叠。第 0 层的 out 就是第 1 层的输入，同样的块一层层叠下去。教科书 DiT-XL 有 28 块；k005b 也是 ${nL} 层，每层与主干同名层配对。
+
+每层有自己的 γβ（同一个 te，不同的线性层），值域从第 0 层的 ${st(0)} 到第 ${nPairs - 1} 层的 ${st(nPairs - 1)}。
+`;
+        breakAfter();
+        let tG = afterTime(null, 4.0);
+        breakAfter();
+        let tGpull = afterTime(null, 1.5);
+        frameTo(state, tGpull, el.flatMap(e => [e.ln1, e.out]), 280, 10, { fill: 1.05 });
+        breakAfter();
+
+        let tH = afterTime(null, 1.5);
+        frameTo(state, tH, [el[nL - 1].out, L.expertOut, L.actionWeight, L.actionVelocity], 270, 6, { fill: 1.45 });
+        commentary(wt)`
+
+D1h 输出。${nL} 层之后：${c_blockRef('final RMSNorm', L.expertOut)}（普通 RMSNorm，final_norm_adanorm = False，不受 t 调制）→ 丢掉 state token → ${c_blockRef('action_out_proj', L.actionWeight)}（768 → 23）→ ${c_blockRef('速度场 v', L.actionVelocity)}，16 × 23，例如 v[0][14] = ${f3(vel?.[14])}。
+
+教科书 DiT 在这里是 final adaLN + Linear + unpatchify。
+
+教科书 DiT ↔ k005b 对照：
+
+① patchify → token：每个动作步一行就是一个 token，再加 1 个 state token，共 17 个（:356-386，D2）
+
+② 自注意力 → 联合注意力，K/V 含主干前缀（:86-140，D3）
+
+③ 条件 t + 类别 c → 只有 t（:378）
+
+④ LayerNorm + adaLN-Zero(γβα) → AdaRMSNorm（γβ 零初始化，无 α）
+
+⑤ GELU MLP → SwiGLU 768→2752→768
+
+⑥ N 块 → ${nL} 层，与主干配对
+
+⑦ final adaLN + Linear + unpatchify → RMSNorm → action_out_proj → 16×23（:214, :441）
+
+⑧ K 步采样 → Euler ${K} 步，x ← x − v/${K}（:526-549，D6）
+
+${preStamp}
+`;
+
+        // which sub-step is on screen (a … h)
+        let sub = tH.active ? 7 : cG.active ? 6 : tF.active ? 5 : tE.active ? 4 : tD.active ? 3 : tC.active ? 2 : tB.active ? 1 : 0;
+        let S = nFlowStages;
+        if (sub === 0) {
+            if (tA.active && tA.t < 1) applyFlowPass(L, tA.t * S, { suffixOnly: true });
+        } else if (sub === 1) {
+            applyFlowPass(L, 0, { suffixOnly: true });
+            fm.timeEmb.highlight = 0.45;
+            e0.ada2.highlight = 0.45;
+            dimExcept(L, [...fm.cubes, L.expertIn, e0.ln1, e0.ln2, ...el.flatMap(e => [e.ada, e.ada2])], 1 - 0.85 * tB.t);
+        } else if (sub === 2) {
+            applyFlowPass(L, 0, { suffixOnly: true });
+            viz.normCmp = tC.t;
+            viz.normLayer = 0;
+            viz.normWhich = 1;
+            viz.normTok = 1;
+        } else if (sub === 3) {
+            applyFlowPass(L, 1 + (tDrun.active ? Math.min(2.99, tDrun.t * 3) : 0), { suffixOnly: true });
+            viz.activeLayer = 0;
+            viz.links = 0.6;
+        } else if (sub === 4) {
+            applyFlowPass(L, 4 + (tErun.active ? Math.min(1.99, tErun.t * 2) : 0), { suffixOnly: true });
+        } else if (sub === 5) {
+            applyFlowPass(L, 6 + (tFrun.active ? Math.min(4.99, tFrun.t * 5) : 0), { suffixOnly: true });
+        } else if (sub === 6) {
+            // the pass descends layers 0 → 2 with the camera, then the stack pulls back
+            if (!tGpull.active) {
+                let pos = S + tG.t * 2 * S;
+                applyFlowPass(L, Math.min(pos, 3 * S - 0.01), { suffixOnly: true });
+                followPair(state, L, Math.max(0, pos / S - 0.5), 270, 4, 1.6, false);
+            } else {
+                let li = Math.min(nL - 1, Math.floor(tGpull.t * nL));
+                for (let i = 0; i <= li; i++) {
+                    el[i].ada.highlight = Math.max(el[i].ada.highlight, i === li ? 0.45 : 0.2);
+                    el[i].ada2.highlight = Math.max(el[i].ada2.highlight, i === li ? 0.45 : 0.2);
+                }
+            }
+        } else {
+            for (let b of [L.expertOut, L.actionWeight, L.actionVelocity]) b.highlight = 0.45;
+        }
+        e0.ada.highlight = Math.max(e0.ada.highlight, sub <= 2 ? 0.45 : 0.25);
     } break;
 
     case Phase.D2_Concat: {
