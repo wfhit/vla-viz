@@ -43,16 +43,41 @@ export function drawBlockLabels(state: IRenderState, layout: IVlaModelLayout, fo
 
     // every label is pinned to the blocks it names: a bracket along their left edge (or a header
     // line along their top edge) at their own position, never at a fixed offset in empty space
-    let towers: [ILayerLike[], string][] = [[layout.blocks, 'Layer'], [layout.expertLayers, 'DiT Layer']];
-    for (let [layers, prefix] of towers) {
-        layers.forEach((L, li) => {
-            let all = L.transformerLabel.cubes;
-            let eAll = extent(all);
-            if (eAll) {
-                let color = baseColor.mul(eAll.op * L.transformerLabel.visible);
-                let hdrBox = fits ? fits(new Vec3(eAll.minX, eAll.minY - 24, eAll.midZ), new Vec3(eAll.maxX, eAll.maxY, eAll.midZ)) : true;
-                if (color.w > 0 && hdrBox) drawHeader(state, `${prefix} ${li}`, eAll, color, 14);
-            }
+    // the two towers are one column of layer pairs: a title over each tower, and one header
+    // per pair spanning trunk layer i and expert layer i (they share layer i's joint attention)
+    let nPairs = Math.min(layout.blocks.length, layout.expertLayers.length);
+    let towerTitles: [IExtent | null, string[]][] = [
+        [extent(layout.blocks[0]?.transformerLabel.cubes ?? []), ['Qwen3-VL trunk', `x${layout.blocks.length} layers`]],
+        [extent(layout.expertLayers[0]?.transformerLabel.cubes ?? []), ['DiT action expert', `x${layout.expertLayers.length} layers`]],
+    ];
+    let tVis = layout.towersLabel.visible;
+    // titles sit in the empty space beside the column: trunk on the left, expert on the right
+    towerTitles.forEach(([e, lines], side) => {
+        if (!e || tVis <= 0) return;
+        let fs = 40, y0 = e.minY + 40;
+        let tw = Math.max(...lines.map(l => measureTextWidth(state.modelFontBuf, l, fs)));
+        let x0 = side === 0 ? e.minX - 50 - tw : e.maxX + 50;
+        if (fits && !fits(new Vec3(x0, y0, e.midZ), new Vec3(x0 + tw, y0 + 2 * (fs + 8), e.midZ))) return;
+        let mtx = new Mat4f(); mtx[14] = e.midZ;
+        lines.forEach((l, k) => {
+            let w = measureTextWidth(state.modelFontBuf, l, fs);
+            let x = side === 0 ? x0 + tw - w : x0;
+            writeTextToBuffer(state.modelFontBuf, l, new Vec4(0.75, 0.75, 0.75, 1).mul(e.op * tVis), x, y0 + k * (fs + 8), fs, mtx);
+        });
+    });
+    for (let i = 0; i < nPairs; i++) {
+        let T = layout.blocks[i], E = layout.expertLayers[i];
+        let eT = extent(T.transformerLabel.cubes), eE = extent(E.transformerLabel.cubes);
+        let vis = Math.max(eT ? eT.op * T.transformerLabel.visible : 0, eE ? eE.op * E.transformerLabel.visible : 0);
+        let e = eT && eE ? union(eT, eE) : (eT ?? eE);
+        if (!e || vis <= 0) continue;
+        let fs = 26;
+        if (fits && !fits(new Vec3(e.minX, e.minY - 12 - fs, e.midZ), new Vec3(e.maxX, e.maxY, e.midZ))) continue;
+        drawPairHeader(state, `Layer pair ${i}:  trunk L${i}  <->  expert E${i}`, e, [eT, eE], baseColor.mul(vis), fs);
+    }
+    let towers: ILayerLike[][] = [layout.blocks, layout.expertLayers];
+    for (let layers of towers) {
+        layers.forEach((L) => {
             let attnCubes = L.heads.flatMap(h => h.cubes);
             let eAttn = extent(attnCubes);
             if (eAttn) {
@@ -111,18 +136,26 @@ function pinLeft(state: IRenderState, text: string, e: IExtent, color: Vec4, fon
     drawSectionLabel(state, text, new Vec3(e.minX, e.minY, z), new Vec3(e.minX, e.maxY, z), { color, fontSize, pad });
 }
 
-// a header above the blocks: text, then a line along their top edge with ticks down to it
-function drawHeader(state: IRenderState, text: string, e: IExtent, color: Vec4, fontSize: number) {
-    if (color.w <= 0) return;
+function union(a: IExtent, b: IExtent): IExtent {
+    let e = { minX: Math.min(a.minX, b.minX), maxX: Math.max(a.maxX, b.maxX), minY: Math.min(a.minY, b.minY),
+        maxY: Math.max(a.maxY, b.maxY), minZ: Math.min(a.minZ, b.minZ), maxZ: Math.max(a.maxZ, b.maxZ), midZ: 0, op: Math.max(a.op, b.op) };
+    e.midZ = (e.minZ + e.maxZ) / 2;
+    return e;
+}
+
+// a header above a layer pair: text, then a bar along the pair's top edge with a tick down
+// to each member (trunk layer, expert layer), so the bar visibly joins the two
+function drawPairHeader(state: IRenderState, text: string, e: IExtent, parts: (IExtent | null)[], color: Vec4, fontSize: number) {
     let mtx = new Mat4f();
     mtx[14] = e.midZ;
-    let y = e.minY - 6;
+    let y = e.minY - 10;
     writeTextToBuffer(state.modelFontBuf, text, color, e.minX, y - fontSize - 2, fontSize, mtx);
-    let lc = color.mul(0.4);
-    let p0 = new Vec3(e.minX, y, e.midZ), p1 = new Vec3(e.maxX, y, e.midZ);
-    addLine(state.lineRender, 1.0, lc, p0, p1, undefined);
-    addLine(state.lineRender, 1.0, lc, p0, new Vec3(e.minX, e.minY, e.midZ), undefined);
-    addLine(state.lineRender, 1.0, lc, p1, new Vec3(e.maxX, e.minY, e.midZ), undefined);
+    let lc = color.mul(0.6);
+    addLine(state.lineRender, 2.0, lc, new Vec3(e.minX, y, e.midZ), new Vec3(e.maxX, y, e.midZ), undefined);
+    for (let p of parts) {
+        if (!p) continue;
+        for (let x of [p.minX, p.maxX]) addLine(state.lineRender, 2.0, lc, new Vec3(x, y, e.midZ), new Vec3(x, p.minY, e.midZ), undefined);
+    }
 }
 
 interface ILabelOpts {

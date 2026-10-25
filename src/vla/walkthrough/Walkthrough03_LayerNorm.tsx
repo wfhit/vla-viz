@@ -99,7 +99,7 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
 
     for (let blk of layout.cubes) {
             if (!relevantBlocks.has(blk)) {
-            blk.opacity = lerp(1.0, 0.0, t_hideExtra.t);
+            blk.opacity = lerp(1.0, 0.15, t_hideExtra.t);
         }
     }
 

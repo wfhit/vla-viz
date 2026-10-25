@@ -49,7 +49,12 @@ export function walkthroughIntro(args: IWalkthroughArgs) {
         return;
     }
 
-    initialFrame(state, args.layout.cubes, 296, 16, { fill: 1.0 });
+    // two towers side by side, layer pair i level: frame the top pairs so the pairing reads
+    // (the full 28-pair column is the later pull-back)
+    initialFrame(state, [layout.residual0, layout.expertIn, ...layout.blocks.slice(0, 3).flatMap(b => b.cubes),
+        ...layout.expertLayers.slice(0, 3).flatMap(e => e.cubes)], 280, 6, { fill: 1.0 });
+    for (let L of [...layout.blocks, ...layout.expertLayers]) L.transformerLabel.visible = 1;
+    layout.towersLabel.visible = 1;
 
     let cfg = layout.shape.full;
     let c0 = commentary(wt, null, 0)`欢迎来到 _k005b_ VLA 网络的可视化讲解。k005b 把相机画面、语言指令和机器人状态放进同一个 Qwen3-VL-2B 主干，再分出输出：knack 分类头（说"现在该做什么"）、done 头，以及动作专家（生成 16×23 的动作块）。

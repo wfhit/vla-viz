@@ -139,19 +139,7 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
 
     // one transformer layer — trunk or expert, the same drawing; the expert's score row is
     // [prefix keys | suffix keys] (its prefix K/V come from the trunk: see ActionViz drawJointLinks)
-    function drawLayer(L: ITrunkLayer | IExpertLayer, prev: IBlkDef, prevL: ITrunkLayer | IExpertLayer | null, name: string, i: number) {
-        let ln1U = lnUnit(L.ln1);
-        if (prevL && Math.abs(prevL.attnResidual.x - L.attnResidual.x) > 1) {
-            // column wrap: the stream continues at the top of the next column — no arrow
-            // runs back up across the scene; both ends are labelled instead
-            dry = false;
-            rec(prev, ln1U);
-            drawWrapLabel(prev, `continues: ${name} ${i} (next column) ->`, 1);
-            let entry = { ...L.attnResidual, y: ln1U.y - 4 * layout.margin, dy: 0 };
-            members.set(entry, []);
-            drawWrapLabel(entry, `<- from ${name} ${i - 1}`, -1);
-            prev = entry;
-        }
+    function drawLayer(L: ITrunkLayer | IExpertLayer, prev: IBlkDef) {
         dry = !!isVisible && !isVisible(L.cubes);
 
         drawLn(prev, L.ln1);
@@ -212,14 +200,14 @@ export function drawAllArrows(state: IRenderState, layout: IVlaModelLayout, isVi
 
     let prev: IBlkDef = layout.residual0;
     for (let i = 0; i < layout.blocks.length; i++) {
-        prev = drawLayer(layout.blocks[i], prev, i > 0 ? layout.blocks[i - 1] : null, 'layer', i);
+        prev = drawLayer(layout.blocks[i], prev);
     }
     dry = false;
     drawLn(prev, layout.ln_f);
 
     let eprev: IBlkDef = layout.expertIn;
     for (let i = 0; i < layout.expertLayers.length; i++) {
-        eprev = drawLayer(layout.expertLayers[i], eprev, i > 0 ? layout.expertLayers[i - 1] : null, 'DiT layer', i);
+        eprev = drawLayer(layout.expertLayers[i], eprev);
     }
     dry = false;
     drawLn(eprev, layout.expertNorm);

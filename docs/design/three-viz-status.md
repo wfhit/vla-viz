@@ -10,7 +10,7 @@ fabricated mappings. No toy data. No popups/overlays — in-scene walkthrough st
 
 | Page | Model | Weights (local) | Status |
 |---|---|---|---|
-| `/vla` | k005b dual-head VLA | `outputs/k005b-task0-v3/checkpoints` (step_150000) | REWORK DONE (a)(b)(c), self-tested; awaiting Hermes re-acceptance (see Current reasoning) |
+| `/vla` | k005b dual-head VLA | `outputs/k005b-task0-v3/checkpoints` (step_150000) | REWORK DONE (a)(b)(c) + single-column layer-pair stack (28 pairs: trunk Li beside expert Ei, pair headers, tower titles beside the column; old 14+14 wrap deleted), self-tested: 84-shot sweep audit empty, build OK, /pi0 261 + /groot 292 edges clean; awaiting Hermes re-acceptance |
 | `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`) | DONE + ACCEPTED (Hermes, 2026-10-25: auditEdges 261 edges noIn/noOut empty on P5/P7 re-run independently, 0 console errors, no overlays, 2 weight spot-checks exact vs openpi checkpoint) |
 | `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | DONE + ACCEPTED (Hermes, 2026-10-25) |
 
@@ -58,32 +58,19 @@ Input frames for ALL pages: local BEHAVIOR dataset
 
 ## Current reasoning (rewritten each sentinel run)
 
-2026-10-25 20:26 — MISSION REOPENED on /vla: the earlier /vla acceptance is SUPERSEDED.
-Frank issued three directives after acceptance, in order: (a) D-chapters must reuse the
-page's established visual language (one per-layer view: AdaRMSNorm→Q/K/V→attn→o_proj→⊕→
-AdaRMSNorm→SwiGLU→⊕, 28 isomorphic layers; t-bus + Euler strip are annotations, not a new
-style); (b) layout: each step's workset centered, camera close (fill 1.05–1.7), attention
-matrices/head blocks anchored inside their layer blocks, labels pinned to blocks — sweep
-all 21 steps with per-step screenshots; (c) collapse repetition: same-type block drawn
-once + "×16/×32 heads" multiplicity text, at most one same-name label per screen pinned
-to its block, priority = finish the 28-layer structure main line (layer→coupling→output)
-before decorative detail. Opus is currently implementing (c) exactly (VlaModelLayout
-z-slot collapse, hide-extra-heads, label dedupe, multiplicity labels) — no steering
-needed. ~20 files uncommitted (+1209/−664 incl. Walkthrough11 649 lines); k005b-acts.json
-re-export on old weights is sanctioned (Frank ruling: pre-stamp preview with warning).
-2026-10-25 update — (a)(b)(c) implemented and self-tested: one representative head / kv
-group per layer (others share its z slot, hidden; text and label say "x16 heads"); same-name
-labels and block tags deduped (nearest the focus wins); pinned labels dropped when the
-label plus its text do not fit entirely in view (no giant close-up fragments); blocks in
-front of the framed working set fade; frameCubes adds a 1.2 margin and lifts the subject
-above the caption bar. Sweep of 84 shots (21 chapters × steps 0/2/4/6): arrow audit
-noIn/noOut empty on all, 0 console errors; `next build` OK; /pi0 (261 edges) and /groot
-(292 edges) regression audits empty.
-Sequence when Opus stops: self-test (0 console errors, arrow audit noIn/noOut empty,
-per-step screenshots vs directive (b)) → Hermes re-acceptance of /vla → commit. Only then
-is the mission complete again. Still gated on Frank: training restart (paused 10:25, do
-not relaunch); step_160000 stamp → real 10-step activation re-export replaces the
-pre-stamp preview data.
+2026-10-25 21:28 — (a)(b)(c) are now COMMITTED (baac081: trunk visual language, one
+representative head ×16, label/tag dedupe, fit-to-view labels, occluder fade, framing
+margin). Opus is in final polish: tower titles moved beside their columns (trunk left,
+experts right) to stop overlapping embedding blocks, then the closing sequence is already
+underway — full 84-shot sweep (w*.png via /tmp/dshots/list.txt) → `next build` →
+/pi0+`/groot` regression audits → docs + commit. Its plan matches the required sequence
+exactly; no steering. 5 files still modified mid-iteration (VlaModelLayout, Arrow,
+SectionLabels, Walkthrough00, Walkthrough11) — normal while the sweep runs. After Opus
+stops: Hermes re-acceptance of /vla (arrow audit noIn/noOut empty, 0 console errors,
+per-step screenshots vs directive (b)) — that is the only remaining unowned step; do it
+in the next sentinel run once Opus's closing commit lands. Still gated on Frank:
+training restart (paused 10:25, do not relaunch; resume from step_150000); step_160000
+stamp → real 10-step activation re-export replaces the pre-stamp preview data.
 
 ## Standing rules (Frank)
 

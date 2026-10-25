@@ -142,9 +142,14 @@ k005b 里有两个 Transformer。左边是前面几章一层层拆开过的主�
 `;
         breakAfter();
         let tPull = afterTime(null, 2.0);
-        let towers = [L.residual0, L.expertIn, ...L.blocks.flatMap(b => [b.ln1.lnAgg1, b.mlpResidual]),
-            ...el.flatMap(e => [e.ln1.lnAgg1, e.ada, e.mlpResidual])];
-        frameTo(state, tPull, towers, 270, 6, { fill: 1.05 });
+        // the top layer pairs (headers join trunk Li and expert Ei); the column continues below
+        let towers = [L.residual0, L.expertIn, ...L.blocks.slice(0, 3).flatMap(b => b.cubes),
+            ...el.slice(0, 3).flatMap(e => e.cubes)];
+        frameTo(state, tPull, towers, 280, 6, { fill: 1.0 });
+        if (tPull.t > 0) {
+            for (let X of [...L.blocks, ...el]) X.transformerLabel.visible = tPull.t;
+            L.towersLabel.visible = tPull.t;
+        }
         commentary(wt)`
 
 两座塔各 ${nPairs} 层，第 i 层与第 i 层同高并排：它们在这一层共用一次联合注意力（D3），这就是耦合。

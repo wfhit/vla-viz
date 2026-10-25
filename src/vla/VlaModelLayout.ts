@@ -1056,11 +1056,8 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
 
     y += blockHalfMargin;
 
-    let blocksPerColumn = 14;
-    let blockIdxInColumn = 0;
-    let blockYTop = y;
-    let columnWidth = 0;
-
+    // one column of 28 layer pairs: trunk layer i and expert layer i side by side, so the
+    // overview reads as two towers paired level by level (close-ups come from the camera)
     let blocks: ReturnType<typeof createLayer>[] = [];
     let blockSrc = residual0;
 
@@ -1168,15 +1165,6 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
     let expertLayers: ReturnType<typeof createExpertLayer>[] = [];
     let expertSrc = expertIn;
     for (let i = 0; i < nBlocks; i++) {
-        if (blockIdxInColumn >= blocksPerColumn) {
-            blockIdxInColumn = 0;
-            y = blockYTop;
-            lnLeftX += columnWidth;
-            leftX += columnWidth;
-            rightX += columnWidth;
-            resMidX += columnWidth;
-        }
-
         y += blockHalfMargin;
         let y0 = y;
         let block = createLayer(blockSrc, m?.blocks[i]);
@@ -1184,18 +1172,11 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
         y = y0;
         let ex = createExpertLayer(resMidX + eDX, expertSrc, m?.expertLayers[i], fmM?.ada[i], i, block);
         y = Math.max(y, y1);
-        if (i === 0) {
-            let all = [...block.cubes, ...ex.cubes];
-            let minX = Math.min(...all.map(c => c.x));
-            let maxX = Math.max(...all.map(c => c.x + c.dx));
-            columnWidth = (maxX - minX) + 8 * margin;
-        }
         blocks.push(block);
         expertLayers.push(ex);
         blockSrc = block.mlpResidual;
         expertSrc = ex.mlpResidual;
         y += blockHalfMargin;
-        blockIdxInColumn++;
     }
 
     y += blockHalfMargin;
@@ -1424,6 +1405,8 @@ export function genVlaModelLayout(shape: IModelShape, vlaGpuModel: IVlaModelLink
             timeHidden: fmTimeHidden, timeOutW: fmTimeOutW, actionTime: fmActionTime, cubes: fmCubes },
         expertLabel,
         embedLabel,
+        // tower titles over the column of layer pairs (overview steps only)
+        towersLabel: mkLabel([]),
         headsLabel,
         actionLabel,
         blocks,
