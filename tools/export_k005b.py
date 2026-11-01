@@ -70,8 +70,36 @@ FM_SEEDS = [None] + list(range(1001, 1008))   # None = the row's own x1 (batch a
 FM_CF_STEPS = 10
 
 
+def trace_euler(P, expert, scap, xc, vc, tk, NL, WC, K, eps):
+    """Action [0][0] through Euler step 0 (tools/trace_common.py): x_t → action_in_proj →
+    time MLP → expert token → NL residual layers → final RMSNorm → action_out_proj → v → x_next."""
+    import torch
+    import trace_common as tc
+    i, j, tok = 0, 0, 1
+    Wo, bo = P.action_out_proj.weight, P.action_out_proj.bias
+    h, n = scap[f"E{NL - 1}.out"][tok], scap["expert_out"][tok]
+    ce = int(torch.argmax((Wo[j, :WC] * n[:WC]).abs()))
+    pw = P.action_time_mlp_out.in_features
+    ae, te = scap["fm_action_emb"][i], scap["fm_time_emb"]
+    enc_mlp = tc.mlp2(("action_time_mlp_in", "silu", "action_time_mlp_out"), torch.cat([ae, te]),
+                      P.action_time_mlp_in.weight, P.action_time_mlp_in.bias, P.action_time_mlp_out.weight,
+                      P.action_time_mlp_out.bias, ce, tc.top_in(0, ae.numel()), "silu", scap["expert_in"][tok, ce],
+                      xnames=[[0, "a_emb"], [ae.numel(), "te"]])
+    k1 = enc_mlp[0]["terms"][0][0]
+    enc = [tc.linear("action_in_proj", P.action_in_proj.weight[k1], xc[i], P.action_in_proj.bias[k1], [j], ae[k1],
+                     out=f"a_emb[{k1}]"), *enc_mlp]
+    rows, x_in = [], scap["expert_in"]
+    for l in range(NL):
+        rows.append((x_in[tok, ce], scap[f"E{l}.res1"][tok, ce], scap[f"E{l}.out"][tok, ce]))
+        x_in = scap[f"E{l}.out"]
+    dec = [tc.norm_mod("norm", h, eps, ce, expert.norm.weight, None, n),
+           tc.linear("action_out_proj", Wo[j], n, bo[j], [ce], vc[i, j], out=f"v[{i}][{j}]")]
+    return tc.euler(step=0, t=tk, dt=-1.0 / K, i=i, j=j, c=ce, tok=tok, x=xc[i, j], enc=enc, layers=rows, dec=dec,
+                    v=vc[i, j], x_next=xc[i, j] - vc[i, j] / K)
+
+
 def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
-                         x1, vel, action, vis_cols, txt_cols, fba, orig_attn, tw):
+                         x1, vel, action, vis_cols, txt_cols, fba, orig_attn, tw, ecfg_eps):
     """The suffix inputs, per-layer AdaRMSNorm modulation, the training target, K=8 real
     noise particles (t=1 deploy forwards) and the 10-step counterfactual summary."""
     import torch
@@ -258,6 +286,7 @@ def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
                                                      for f in (nrm.gamma, nrm.beta)])
             if s == 0:  # step 0 (t = 1, x = x1) is the main forward exactly
                 assert float((vc - vel).abs().max()) < 1e-3, "step 0 != main forward"
+                tr_euler = trace_euler(P, expert, scap, xc, vc, tk, NL, WC, FM_CF_STEPS, ecfg_eps)
             xn = xc - vc / FM_CF_STEPS
             st = {"x": xc.clone(), "v": vc, "x_next": xn.clone()}
             for kname, val in scap.items():
@@ -292,7 +321,7 @@ def export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
         "mse_per_particle": [mse(c, tg) for c in chunks],
         "particle_chunk_std": float(chunks.std(0).mean()),
         "state_valid": int((s75 != 0).sum()),
-        "cf_euler": cf, "asserts": asserts, "_steps": steps,
+        "cf_euler": cf, "asserts": asserts, "_steps": steps, "_trace_euler": tr_euler,
     }
 
 
@@ -417,12 +446,17 @@ def main():
             if kw.get("compute_qkv"):
                 ctx["i"] = i
                 act2d(f"L{i}.x_in", x, f"layer {i} residual stream in")
+                if i == 0:
+                    priv["tr_x"] = x.float().clone()
                 put_agg(f"L{i}.ln1_agg", x)
             else:
                 ctx["x_in"] = x
         hooks.append(layer.register_forward_pre_hook(pre, with_kwargs=True))
-        hooks.append(layer.input_layernorm.register_forward_hook(
-            lambda m, a, o: act2d(f"L{i}.ln1_out", o[0], f"layer {i} input RMSNorm out")))
+        def ln1_hook(m, a, o):
+            act2d(f"L{i}.ln1_out", o[0], f"layer {i} input RMSNorm out")
+            if i == 0:
+                priv["tr_y"] = o[0].float().clone()
+        hooks.append(layer.input_layernorm.register_forward_hook(ln1_hook))
 
         def o_hook(m, a, o):
             out = o[0]
@@ -431,6 +465,8 @@ def main():
             act2d(f"L{i}.attn_resid", res, f"layer {i} attention residual")
             put_agg(f"L{i}.ln2_agg", res)
             ctx["attn_resid"] = res
+            if i == 0:
+                priv["tr_o"], priv["tr_r1"] = out.float().clone(), res.float().clone()
         hooks.append(layer.self_attn.o_proj.register_forward_hook(o_hook))
         hooks.append(layer.post_attention_layernorm.register_forward_hook(
             lambda m, a, o: act2d(f"L{i}.ln2_out", o[0], f"layer {i} post-attn RMSNorm out")))
@@ -559,6 +595,10 @@ def main():
         put(f"L{i}.attn_out", o[tw, :, :WD].permute(1, 0, 2), o.permute(1, 0, 2), [0, t0w, 0],
             f"layer {i} per-head attention output Σp·V [head, token, dim]")
         priv[f"p_star_probs_{i}"] = p[:, -1].clone()
+        if i == 0:
+            priv["tr_attn"] = dict(q=q[0, p_star, 0].float().clone(), K=k[0, :, 0].float().clone(),
+                                   V=v[0, :, 0].float().clone(), mask=mask[0, p_star].float().clone(),
+                                   probs=p[0, -1].float().clone(), out=out[0, p_star].float().clone())
         # the expert's half of the SAME shared attention: suffix queries over all keys
         L = q.shape[1]
         sq = torch.einsum("thd,shd->hts", q[0, T:], kr) * scale      # [H, n_suf, L]
@@ -651,7 +691,7 @@ def main():
 
     # ---------------- flow matching (docs/design/flow-matching-viz.md §2) ---------------- #
     fm = export_flow_matching(model, tensors, batch, put, expert, NL, T, H, HD, WC,
-                              x1, vel, action, vis_cols, txt_cols, fba, orig_attn, tw)
+                              x1, vel, action, vis_cols, txt_cols, fba, orig_attn, tw, ecfg.rms_norm_eps)
 
     # ---------------- weights ---------------- #
     W = {}
@@ -761,6 +801,7 @@ def main():
         "fm": fm,
     }
     steps_ = fm.pop("_steps")
+    write_trace(out_dir, fm.pop("_trace_euler"), priv, trunk, text_ids, p_star, t0w, T, H, HD, vcfg.rms_norm_eps)
 
     os.makedirs(out_dir, exist_ok=True)
     W["config"] = config
@@ -806,6 +847,32 @@ def main():
     print(f"[done] pred knack={config['pred_knack']} done={config['pred_done']} "
           f"target knack={config['sample']['target_knack']} done={config['sample']['target_done']} "
           f"total {time.time() - t0:.0f}s", flush=True)
+
+
+def write_trace(out_dir, eu, priv, trunk, text_ids, p_star, t0w, T, H, HD, eps):
+    """public/k005b-trace.json: the example token h* (window last) through L0 RMSNorm and head-0
+    attention (tools/trace_common.py), plus the Euler-step-0 chain `eu`."""
+    import torch
+    import trace_common as tc
+    at, L = trunk.layers[0].self_attn, trunk.layers[0]
+    x, y, A = priv["tr_x"], priv["tr_y"], priv["tr_attn"]
+    p = p_star
+    Wq, Wk, Wv = at.q_proj.weight[:HD], at.k_proj.weight[:HD], at.v_proj.weight[:HD]
+    bq, bk, bv = [None if m.bias is None else m.bias[:HD] for m in (at.q_proj, at.k_proj, at.v_proj)]
+    c = int(torch.argmax((Wq[0, :WC] * y[p, :WC]).abs()))
+    tok_id = int(text_ids[p - 16])
+    erow = trunk.embed_tokens.weight[tok_id]
+    emb = {"id": tok_id, "row_c": float(erow[c]), "mult": 1.0, "mult_name": "", "x_c": float(x[p, c])}
+    assert abs(emb["row_c"] - emb["x_c"]) < 1e-3 * (1 + abs(emb["x_c"])), "embed link"
+    attn = tc.attention(
+        p=p, y_all=y, x_p=x[p, c], Wq=Wq, bq=bq, Wk=Wk, bk=bk, Wv=Wv, bv=bv,
+        qn=at.q_norm.weight, kn=at.k_norm.weight, eps=eps, q=A["q"], K=A["K"], V=A["V"],
+        mask_row=A["mask"], probs_row=A["probs"], attn_out=A["out"][:HD], o_cat=A["out"],
+        Wo_row=at.o_proj.weight[c], o_ref=priv["tr_o"][p, c], resid_ref=priv["tr_r1"][p, c],
+        c=c, d=0, head=0, D=HD, scale=HD ** -0.5, win=(t0w, p + 1))
+    tc.write(os.path.join(out_dir, "k005b-trace.json"), {
+        "model": "k005b", "p": p, "win_idx": p - t0w, "embed": emb,
+        "rms": tc.rms(x[p], L.input_layernorm.weight, eps, c, y[p], "g"), "attn": attn, "euler": eu})
 
 
 if __name__ == "__main__":

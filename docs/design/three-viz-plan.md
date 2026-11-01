@@ -205,6 +205,24 @@ tools/export_{k005b,pi0,groot}.py  → 同一 "VLA schema" 的 JSON（public/{,p
 3. ✅ /groot 同理（主干 20 = LM 16 + vlsa 4；DiT 32 块 cross 文本/self/cross 图像/self 交替；AdaLN；4 步 Euler；删除 `src/groot` 墙；审计 1809 边，主干单层章 720 边）。
 4. 每步：tsc、截图逐章自测、审计为空、`next build`，然后提交。
 
+### 3.6 讲解法则：路径连续性（Frank 裁决，优先级高于一切装饰）
+
+> 代码只需结果对；讲解需要从零到结果的完整路径，具体化、串起来。
+
+硬标准：每章选**一个真实对象**，把它的完整旅程逐步给出真值；**上一步输出的数字 = 下一步输入的数字**，全链可对账。数字断了，就等于没讲清楚。
+
+- **数据**：`tools/trace_common.py` + 三个导出器的 `--trace`，用 float64 在真权重、真激活上重算一条链，与模型前向逐点断言，写入 `public/<prefix>-trace.json`。`tools/check_trace.py public/*-trace.json` 逐环核对：输入 = 上一环输出（相对误差 2e-3），Σ 项 + 余项 = 和；Euler 起点和终点还要与 `<prefix>-fm.json` 中页面实际绘制的那一格相等。
+- **账本**：`src/vla/components/TraceLedger.tsx` 中的账本组件 `LinLedger` / `ChainLedger` / `QkLedger` / `EulerLedger` 嵌在讲解文字里。黄框 = 上一步的输出（承接），绿色粗体 = 本步输出。点积列出承接项 + 最大的几项 + 其余项之和 = 真和。
+- **3D 对账**：`drawIdxTag` 在被跟踪的格子旁画 ASCII 数字标签，标签放在矩阵外侧，不遮挡其他格子。场景标签与账本数值一致。
+- **跟踪对象**（三页同构，取窗口最后一个 token、一个通道 c）：
+
+| 章 | 链 |
+|---|---|
+| 输入嵌入 → RMSNorm（W03） | x[c] → Σx² → rsqrt → · g[c] → y[c] |
+| 注意力（W04/W05） | y → q[0]/k[0]（含 q_norm/k_norm 与 RoPE 配对旋转）→ s_j = q·k/√D → softmax（max、Z）→ p_j → o[0] = Σ p_j v_j |
+| 输出投影与残差（W06） | o[0] → o_proj 第 c 行 → o_out[c] → x′[c] = x[c] + o_out[c]（闭环回到 W03 的起点 x[c]） |
+| Euler 第一步（D7） | 噪声板上的 x[i][j] → 输入链（action_in_proj / action_encoder，含时间条件）→ 通道 c 逐层残差（输入 / + 注意力 / + MLP）→ 末端 norm → 输出投影 → v → x_next = x + dt · v = 板 1 的同一格 |
+
 ---
 
 ## 4. /vla（k005b）

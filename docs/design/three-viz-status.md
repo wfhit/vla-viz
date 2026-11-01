@@ -17,6 +17,12 @@ fabricated mappings. No toy data. No popups/overlays — in-scene walkthrough st
 Input frames for ALL pages: local BEHAVIOR dataset
 `~/workspace/behavior_challenge_data/dataset/{behavior-1k-knack, 2026-challenge-demos}`.
 
+Path continuity (Frank's top rule, plan §3.6): DONE on all 3 pages. Traced object per chapter =
+last token, one channel; W03 RMSNorm, W04/W05 attention (q,k,s_j,p_j,o[0]), W06 o_proj+residual
+(closes back to W03's x[c]), D7 Euler step 1 (x -> input chain -> every layer -> v -> x_next =
+board 1). Ledgers in commentary + ASCII 3D tags on the traced cells, same numbers.
+`tools/check_trace.py public/*-trace.json` = [ok] x3 (also cross-checks fm.json boards).
+
 ## Verified facts (do not re-litigate)
 
 - k005b action head: K-step Euler decode (`sample_action_chunk`), K=10 default, K=1 = old

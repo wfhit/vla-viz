@@ -1,5 +1,7 @@
 import { Phase } from "./Walkthrough";
-import { commentary, DimStyle, IWalkthroughArgs, frameTo, initialFrame } from "./WalkthroughTools";
+import { commentary, DimStyle, IWalkthroughArgs, frameTo, initialFrame, drawIdxTag, TraceColors } from "./WalkthroughTools";
+import { embedInline } from "./Walkthrough01_Prelim";
+import { Box, fmtA, LinLedger, N } from "../components/TraceLedger";
 import { lerp, lerpSmoothstep } from "@/src/utils/math";
 import { processUpTo, startProcessBefore } from "./Walkthrough00_Intro";
 
@@ -20,6 +22,8 @@ export function walkthrough06_Projection(args: IWalkthroughArgs) {
     let outBlocks = [vOut0];
 
     let f = state.page.facts!;
+    let at = state.vlaModel?.trace?.attn;
+    let qi = layout.shape.T - 1;
     commentary(wt, null, 0)`
 
 注意力计算完成后，每个 head 都得到了自己的输出：由 Q/K 决定权重、对 V 向量加权混合后的结果。
@@ -40,7 +44,10 @@ ${f.id === 'pi0' ? 'π0.5' : f.id === 'groot' ? 'GR00T 主干' : 'k005b'} 中 he
 因此拼回去后长度还是 ${c_dimRef('C', DimStyle.C)}。图中显示的是真实 o_proj 权重的一个 64 × 64 窗口。
 
 接着用输出投影矩阵（output projection）对每一列做矩阵-向量乘法（无 bias），把各 head 的信息混合起来，
-得到这一层注意力的输出。`;
+得到这一层注意力的输出。
+
+继续跟踪：上一章的 o[${at?.d ?? 0}] 在拼接后的向量里位于第 ${at?.o_slot ?? 0} 个位置，它进入 o_proj 第 ${at?.c ?? '…'} 行的点积：
+${embedInline(at && <LinLedger l={at.o_proj} inName='o' />)}`;
 
     breakAfter();
 
@@ -52,6 +59,9 @@ ${f.id === 'pi0' ? 'π0.5' : f.id === 'groot' ? 'GR00T 主干' : 'k005b'} 中 he
 
 现在得到了注意力层的输出。我们不直接把它交给下一阶段，而是逐元素加回到这一层的输入上，
 即绿色竖直箭头所示的_残差连接_（residual connection / residual pathway）。
+
+我们的通道 ${at?.c ?? '…'} 在这里回到起点：x[${at?.c ?? '…'}] 正是“RMSNorm”一章开头那个数。
+${embedInline(at && <Box>x′[{at.c}] = x[{at.c}] (<N v={at.x_c} carry />) + o_out[{at.c}] (<N v={at.o_proj.y} carry />) = <N v={at.resid} out /></Box>)}
 ${f.id === 'groot' ? 'GR00T 的主干只有一条流：这里加回的就是主干自己的残差流。DiT 有自己的 o_proj 和残差，在 D 章组里展开。' : `在 ${f.id === 'pi0' ? 'π0.5' : 'k005b'} 中，prefix（VLM）流和 suffix（action expert）流各自经过自己的输出投影，并分别加回各自的残差流。`}
 `;
 
@@ -93,5 +103,12 @@ ${f.id === 'groot' ? 'GR00T 的主干只有一条流：这里加回的就是主�
 
     if (t_processResid.active) {
         processUpTo(state, t_processResid, block.attnResidual, processInfo);
+    }
+
+    if (at) {
+        if (t_zoomOut.t <= 0) drawIdxTag(state, vOut0, qi, 0, `o[0]=${fmtA(at.o.sum)}`, TraceColors.carry, 'left');
+        if (t_process.t >= 1) drawIdxTag(state, block.attnOut, qi, at.c, `o_out[${at.c}]=${fmtA(at.o_proj.y)}`, TraceColors.carry, 'right', 4);
+        if (t_zoomOut.t > 0) drawIdxTag(state, layout.residual0, qi, at.c, `x[${at.c}]=${fmtA(at.x_c)}`, TraceColors.carry);
+        if (t_processResid.t >= 1) drawIdxTag(state, block.attnResidual, qi, at.c, `x'[${at.c}]=${fmtA(at.resid)}`, TraceColors.out);
     }
 }

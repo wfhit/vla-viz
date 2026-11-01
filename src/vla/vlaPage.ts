@@ -110,8 +110,9 @@ export function makeEnginePage(id: PageId, prefix: string, facts: IModelFacts, i
         initialCamera,
 
         async loadData(state: IProgramState) {
-            let data = await fetchModelData(prefix);
+            let [data, trace] = await Promise.all([fetchModelData(prefix), fetch(`${prefix}-trace.json`).then(r => r.json())]);
             let model = createModelGpuLink(state.render.gl, data);
+            model.trace = trace;
             state.vlaModel = model;
             state.shape = shapeFromConfig(model.config);
             state.mainExample.shape = state.shape;

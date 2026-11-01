@@ -6,11 +6,12 @@ import { lerp } from "@/src/utils/math";
 import { Dim, Vec3 } from "@/src/utils/vector";
 import { Phase } from "./Walkthrough";
 import { processUpTo, startProcessBefore } from "./Walkthrough00_Intro";
-import { commentary, DimStyle, IWalkthroughArgs, frameTo, initialFrame } from "./WalkthroughTools";
+import { embedInline } from "./Walkthrough01_Prelim";
+import { fmtA, N, TermsTable } from "../components/TraceLedger";
+import { commentary, DimStyle, IWalkthroughArgs, frameTo, initialFrame, drawCellTag, TraceColors } from "./WalkthroughTools";
 
 export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
     let { walkthrough: wt, layout, state, tools: { afterTime, c_blockRef, c_dimRef, breakAfter, cleanup } } = args;
-    let { C } = layout.shape;
 
     if (wt.phase !== Phase.Input_Detail_LayerNorm) {
         return;
@@ -22,11 +23,18 @@ export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
     initialFrame(state, [args.layout.residual0, ...args.layout.blocks[0].ln1.cubes], 281, 9, { fill: 1.0 });
     wt.dimHighlightBlocks = [layout.residual0, ...ln.cubes];
 
+    let tr = state.vlaModel?.trace;
+    let cfg = layout.shape.full;
+    let exampleIdx = layout.shape.T - 1;
+    let tokStr = cfg ? JSON.stringify(cfg.window_tokens[exampleIdx]) : '…';
+    let c = tr?.rms.c ?? 0;
+    let pi0 = f.id === 'pi0';
+    let lnName = pi0 ? 'pre_attention_norm' : 'input_layernorm';
+
     commentary(wt, null, 0)`
+本章跟踪一个真实对象：窗口最后一列的 token ${tokStr}（id ${tr?.embed.id ?? '…'}，序列位置 ${tr?.p ?? '…'}），它的第 ${c} 个通道（下面在 3D 中把这一格单独高亮）。
 
-上一节得到的${c_blockRef('_输入嵌入_', layout.residual0)}矩阵是 ${f.trunkName} 第一个 transformer 层（L0）的输入（共 ${f.nLayer} 层，这里展开其中一层）。
-
-层内第一步是 _RMSNorm_：对矩阵的每一列分别做归一化。图中数值均为 L0 ${f.id === 'pi0' ? 'pre_attention_norm' : 'input_layernorm'} 的真实值。`;
+它的数值来自上一章的查表：${embedInline(tr && <span>x[{c}] = 嵌入表第 {tr.embed.id} 行第 {c} 列 <N v={tr.embed.row_c} />{tr.embed.mult !== 1 ? <> × {tr.embed.mult_name} (<N v={tr.embed.mult} />)</> : null} = <N v={tr.embed.x_c} out /></span>)}。这个数是本章的起点，它要穿过 L0 的 ${embedInline(<code>{lnName}</code>)}（RMSNorm），变成下一章注意力的输入。`;
     breakAfter();
 
     let t_moveCamera = afterTime(null, 1.0);
@@ -36,34 +44,31 @@ export function walkthrough03_LayerNorm(args: IWalkthroughArgs) {
 
     breakAfter();
     commentary(wt)`
-归一化能让深层网络的训练更稳定。
-
-各列互相独立，先看其中一列。`;
+RMSNorm 对每一列独立处理：这一列只用它自己的 ${f.dModel} 个通道（图中画通道 0–${layout.shape.C - 1}），不看别的 token。`;
 
     breakAfter();
     let t_focusColumn = afterTime(null, 0.5);
 
-    // mu ascii: \u03bc
-    // sigma ascii: \u03c3
     breakAfter();
     commentary(wt)`
-RMSNorm 用该列的均方根（root-mean-square）去缩放整列，使其尺度为 1；与 LayerNorm 不同，它不减去均值，也没有偏置 β。
-图中两个聚合格分别是真实的 ${c_blockRef('mean(x²)', ln.lnAgg1)} 与 ${c_blockRef('rsqrt(mean(x²) + ε)', ln.lnAgg2)}，均对完整的 ${f.dModel} 个通道计算（不仅是图中显示的 64 个）。`;
+第一步，求这一列的均方：先把 ${f.dModel} 个通道各自平方再相加。我们的 x[${c}] 是其中一项：
+${embedInline(tr && <TermsTable t={tr.rms.sumsq} wName='' xName={i => `x[${i}]`} carryFirst square />)}
+mean(x²) = ${embedInline(tr && <span><N v={tr.rms.sumsq.sum} /> / {tr.rms.C} = <N v={tr.rms.mean} out /></span>)}，rsqrt(mean(x²) + ε) = ${embedInline(tr && <span>1 / √(<N v={tr.rms.mean} carry /> + 10<sup>−6</sup>) = <N v={tr.rms.rsqrt} out /></span>)}。
+
+这两个数就是图中两个聚合格 ${c_blockRef('mean(x²)', ln.lnAgg1)}、${c_blockRef('rsqrt', ln.lnAgg2)} 在这一列的真值。与 LayerNorm 不同，RMSNorm 不减均值。`;
 
     breakAfter();
 
     let t_calcMuAgg = afterTime(null, 0.5);
     let t_calcVarAgg = afterTime(null, 0.5);
 
-    // 1e-5 as 1x10^-5, but with superscript: 1x10<sup>-5</sup>
-
     breakAfter();
     commentary(wt)`
-RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_dimRef('C', DimStyle.C)} 的整列，ε（${<>1&times;10<sup>-6</sup></>}）用来避免除以零。
+第二步，把 x[${c}] 乘以 rsqrt，再乘可学习的${c_blockRef(pi0 ? '增益 (1 + γ)' : '增益 γ', ln.lnSigma)}的第 ${c} 个分量：
+${embedInline(tr && <div className='my-2 px-2 py-1 border-l-4 border-green-500 bg-slate-800/60 text-sm'>y[{c}] = <N v={tr.rms.x_c} carry /> × <N v={tr.rms.rsqrt} carry /> × {pi0 ? '(1 + γ)' : 'γ'}[{c}] (<N v={tr.rms.g_c} />) = <N v={tr.rms.y_c} out /></div>)}
+这就是${c_blockRef('归一化结果', ln.lnResid)}里高亮格的数。下一章算 Q 时，${embedInline(tr && <N v={tr.rms.y_c} carry />)} 是点积中 i = ${c} 那一项的输入。
 
-这些聚合值只需对整列算一次，因此存放在聚合层中。
-
-最后把每个元素乘以可学习的${c_blockRef(f.id === 'pi0' ? '增益 (1 + \u03b3)' : '增益 (\u03b3)', ln.lnSigma)}，得到${c_blockRef('归一化结果', ln.lnResid)}。RMSNorm 没有偏置 β。${f.id === 'pi0' ? 'Gemma 的 checkpoint 存的是 γ，前向时乘以 1 + γ，图中显示的就是 1 + γ。' : f.id === 'groot' ? '（主干最后 4 块 VL 自注意力用的是带 β 的 LayerNorm，不是 RMSNorm。）' : ''}`;
+${pi0 ? 'Gemma 的 checkpoint 存的是 γ，前向时乘 1 + γ；没有偏置 β。' : f.id === 'groot' ? '没有偏置 β。（主干最后 4 块 VL 自注意力用的是带 β 的 LayerNorm。）' : '没有偏置 β。'}`;
 
     breakAfter();
 
@@ -87,7 +92,6 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
 
     frameTo(state, t_moveCamera, args.layout.blocks[0].ln1.cubes, 281.5, 11, { fill: 1.1 });
 
-    let exampleIdx = 3;
     let ln1 = layout.blocks[0].ln1;
     let inputBlock = layout.residual0;
 
@@ -134,6 +138,11 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
         let aggVarCol = splitGrid(layout, ln1.lnAgg2, Dim.X, splitPos, splitAmt)!;
         let residCol = splitGrid(layout, ln1.lnResid, Dim.X, splitPos, splitAmt)!;
         let inputCol = splitGrid(layout, inputBlock, Dim.X, splitPos, splitAmt)!;
+        frameTo(state, t_focusColumn, [aggMuCol, aggVarCol, residCol, inputCol], 275, 6, { fill: 1.15 });
+        if (t_colSequence.t <= 0) splitGrid(layout, residCol, Dim.Y, c + 0.5, 0)!.highlight = 0.3;
+        let inCell = splitGrid(layout, inputCol, Dim.Y, c + 0.5, 0)!;
+        inCell.highlight = 0.6;
+        if (tr) drawCellTag(state, inCell, `x[${c}]=${fmtA(tr.rms.x_c)}`, TraceColors.carry);
         aggMuCol.opacity = 1.0;
         aggVarCol.opacity = 1.0;
         residCol.opacity = 1.0;
@@ -145,7 +154,6 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
             drawDependences(state, ln1.lnAgg1, aggDestIdx);
             drawDataFlow(state, ln1.lnAgg1, aggDestIdx, pinIdx);
             aggMuCol.access!.disable = false;
-            inputCol.highlight = 0.3;
         }
 
         if (t_calcVarAgg.t > 0.0) {
@@ -161,14 +169,15 @@ RMSNorm 的公式为 x / sqrt(mean(x²) + ε)，其中均值取自长度为 ${c_
 
             let pinIdx = new Vec3(-10, 0, 0);
 
-            let cPos = t_colSequence.t * C;
-            let cIdx = clamp(Math.floor(cPos), 0, C - 1);
+            // sweep down to the traced channel and stop there
+            let cIdx = clamp(Math.floor(t_colSequence.t * (c + 1)), 0, c);
             let destIdx = new Vec3(exampleIdx, cIdx, 0);
             drawDependences(state, ln1.lnResid, destIdx);
             drawDataFlow(state, ln1.lnResid, destIdx, pinIdx);
 
             let targetCell = splitGrid(layout, residCol, Dim.Y, cIdx + 0.5, 0.0)!;
             targetCell.highlight = 0.3;
+            if (tr && cIdx === c) drawCellTag(state, targetCell, `y[${c}]=${fmtA(tr.rms.y_c)}`, TraceColors.out);
 
             findSubBlocks(residCol, Dim.Y, 0, cIdx).forEach((blk) => {
                 blk.access!.disable = false;

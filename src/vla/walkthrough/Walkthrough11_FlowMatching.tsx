@@ -1,5 +1,7 @@
 import { Phase } from "./Walkthrough";
-import { commentary, frameCubes, setFocus, frameTo, initialFrame, IWalkthroughArgs } from "./WalkthroughTools";
+import { commentary, frameCubes, setFocus, frameTo, initialFrame, IWalkthroughArgs, drawIdxTag, TraceColors } from "./WalkthroughTools";
+import { EulerLedger, fmtA } from "../components/TraceLedger";
+import { embedInline } from "./Walkthrough01_Prelim";
 import { clamp } from "@/src/utils/data";
 import { lerp, lerpSmoothstep } from "@/src/utils/math";
 import { IBlkDef, IVlaModelLayout } from "../VlaModelLayout";
@@ -883,11 +885,13 @@ ${nL} 层之后：${c_blockRef('DiT final RMSNorm', L.expertOut)}（普通 RMSNo
         initialFrame(state, stripView, 272, 10, { fill: 1.2 });
         dimExcept(L, [...dit, ...kv], 0.2);
         let tgtArr = tgt;
+        let eu = state.vlaModel?.trace?.euler;
+        let eTok = eu?.i ?? 0, eJ = eu?.j ?? 14, eIdx = eTok * D + eJ;
         let stepInfo = (k: number) => {
             let st = fs?.steps[k];
             if (!st) return '…';
             let v = st.tex['v']?.localBuffer, xn = st.tex['x_next']?.localBuffer;
-            let base = `t = ${st.t.toFixed(Number.isInteger(10 / K) ? 1 : 2)}：|v| = ${rms(v).toFixed(2)}，x[0][14] ${f3(st.tex['x']?.localBuffer[14])} → ${f3(xn?.[14])}`;
+            let base = `t = ${st.t.toFixed(Number.isInteger(10 / K) ? 1 : 2)}：|v| = ${rms(v).toFixed(2)}，x[${eTok}][${eJ}] ${f3(st.tex['x']?.localBuffer[eIdx])} → ${f3(xn?.[eIdx])}`;
             return pi0 || groot ? base : `${base}，MSE(x, a) = ${mse(xn, tgtArr).toFixed(3)}`;
         };
         if (groot) commentary(wt, null, 0)`
@@ -932,7 +936,9 @@ ${nL} 层之后：${c_blockRef('DiT final RMSNorm', L.expertOut)}（普通 RMSNo
             if (k === 0 || k === 2) breakAfter();
             if (k === 0) commentary(wt)`
 
-第 1 次穿行（${stepInfo(0)}）。以后每次穿行用同一组权重，只换两样东西：输入板 x_t，和总线上的 t。接下来两次中速。
+第 1 次穿行（${stepInfo(0)}）。跟踪板 0 上的一个数 x[${eTok}][${eJ}]，它的完整旅程如下，每一步的输入都是上一步的输出：
+${embedInline(eu && <EulerLedger e={eu} layerName={groot ? 'DiT 块' : '专家层'} />)}
+这个 x_next 就是板 1 上同一格的值。以后每次穿行用同一组权重，只换两样东西：输入板 x_t，和总线上的 t。接下来两次中速。
 `;
             if (k === 2) commentary(wt)`
 
@@ -998,6 +1004,10 @@ ${Array.from({ length: K }, (_, k) => stepInfo(k)).filter((_, k) => k % 3 === 0 
             applyFmStep(L, m, K - 1);
             viz.massStep = K - 1;
             S[K].highlight = 0.4;
+        }
+        if (eu && started) {
+            drawIdxTag(state, S[0], eTok, eJ, `x=${fmtA(eu.x)}`, TraceColors.carry, 'left', 12);
+            if (k > 0 || ret > 0.5) drawIdxTag(state, S[1], eTok, eJ, `x_next=${fmtA(eu.x_next)}`, TraceColors.out, 'right', 12);
         }
         let kFin = fs?.steps[K - 1]?.tex['x_next']?.localBuffer;
         breakAfter();

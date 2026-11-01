@@ -1,4 +1,6 @@
-import { IBlkDef, IVlaModelLayout } from "../VlaModelLayout";
+import { getBlkDimensions, IBlkDef, IVlaModelLayout } from "../VlaModelLayout";
+import { drawText, measureText } from "../render/fontRender";
+import { Mat4f } from "@/src/utils/matrix";
 import { clamp } from "@/src/utils/data";
 import { Vec3, Vec4 } from "@/src/utils/vector";
 import { IWalkthrough, Phase, PhaseGroup } from "./Walkthrough";
@@ -295,6 +297,33 @@ export const Colors = {
     Aggregates: new Vec4(1.0, 0.8, 0.3), // a yellowish color
 
     Black: new Vec4(0, 0, 0),
+}
+
+// path-continuity tag pinned beside a traced cell: same number as the commentary ledger (ASCII only)
+export const TraceColors = { carry: new Vec4(1.0, 0.85, 0.3, 1), out: new Vec4(0.45, 0.95, 0.5, 1) };
+export function drawCellTag(state: IProgramState, cell: IBlkDef, text: string, color: Vec4, side: 'left' | 'right' = 'right', size = 3.0) {
+    let d = getBlkDimensions(cell);
+    let gap = state.layout.cell * 0.8;
+    let mtx = Mat4f.fromTranslation(new Vec3(side === 'right' ? d.br.x + gap : d.tl.x - gap, (d.tl.y + d.br.y) / 2, d.br.z));
+    let opts = { color, size, mtx };
+    let w = measureText(state.render.modelFontBuf, text, opts);
+    drawText(state.render.modelFontBuf, text, side === 'right' ? 0 : -w, -size / 2, opts);
+}
+
+/** Tag the cell at matrix index (xi, yi) of `blk`, following any splitGrid sub-blocks to its current position. */
+// Placed outside the matrix edge on `side`, level with row yi, so it never covers other cells.
+export function drawIdxTag(state: IProgramState, blk: IBlkDef, xi: number, yi: number, text: string, color: Vec4, side: 'left' | 'right' = 'right', size = 6.0) {
+    let b = blk;
+    for (let k = 0; k < 8 && b.subs; k++) {
+        let s = b.subs.find(s => xi >= (s.offX ?? 0) && xi < (s.offX ?? 0) + (s.sizeX ?? s.cx) && yi >= (s.offY ?? 0) && yi < (s.offY ?? 0) + (s.sizeY ?? s.cy));
+        if (!s) break;
+        b = s;
+    }
+    if (b.opacity === 0) return;
+    let cell = state.layout.cell;
+    let x = b.x + (xi - (b.offX ?? 0)) * cell, y = b.y + (yi - (b.offY ?? 0)) * cell;
+    x = side === 'right' ? Math.max(x, blk.x + blk.dx - cell) : Math.min(x, blk.x);
+    drawCellTag(state, { ...b, x, y, dx: cell, dy: cell, subs: undefined, localMtx: undefined } as IBlkDef, text, color, side, size);
 }
 
 export interface IPhaseGroup {

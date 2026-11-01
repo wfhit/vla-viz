@@ -3,6 +3,7 @@
 // weights and real activations from one real training row. Nothing is computed or
 // synthesised here; the browser only uploads the exported windows to the GPU.
 
+import { ITrace } from "./components/TraceLedger";
 import { createBufferTex, IBufferTex, writeToBufferTex } from "@/src/utils/bufferTex";
 import { base64ToArrayBuffer } from "@/src/utils/data";
 
@@ -323,6 +324,7 @@ export interface IVlaModelLink {
     actionChunk: IRealTex;
     fm: IFmLink;
     fmSteps?: IFmStepsLink;
+    trace?: ITrace;
 }
 
 // the suffix inputs and flow-matching tensors (all real, see export_flow_matching)

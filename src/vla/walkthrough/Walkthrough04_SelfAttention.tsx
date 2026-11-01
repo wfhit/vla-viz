@@ -4,14 +4,15 @@ import { getBlkDimensions, IBlkDef, setBlkPosition } from "../VlaModelLayout";
 import { drawDependences } from "../Interaction";
 import { IProgramState } from "../Program";
 import { drawText, IFontOpts, measureText } from "../render/fontRender";
-import { clamp, makeArray } from "@/src/utils/data";
+import { clamp } from "@/src/utils/data";
 import { inverseLerp, lerp, lerpSmoothstep } from "@/src/utils/math";
 import { Mat4f } from "@/src/utils/matrix";
 import { Dim, Vec3, Vec4 } from "@/src/utils/vector";
 import { Phase } from "./Walkthrough";
 import { processUpTo, startProcessBefore } from "./Walkthrough00_Intro";
 import { embedInline } from "./Walkthrough01_Prelim";
-import { Colors, commentary, DimStyle, dimStyleColor, IWalkthroughArgs, frameTo, initialFrame } from "./WalkthroughTools";
+import { Colors, commentary, DimStyle, IWalkthroughArgs, frameTo, initialFrame, drawIdxTag, TraceColors } from "./WalkthroughTools";
+import { Box, fmtA, N, QkLedger, TermsTable } from "../components/TraceLedger";
 import { BlockText } from '../components/CommentaryHelpers';
 
 export function walkthrough04_SelfAttention(args: IWalkthroughArgs) {
@@ -31,18 +32,32 @@ export function walkthrough04_SelfAttention(args: IWalkthroughArgs) {
     let f = state.page.facts!;
     let pi0 = f.id === 'pi0';
     let groot = f.id === 'groot';
+
+    let tr = state.vlaModel?.trace;
+    let at = tr?.attn;
+    let T = layout.shape.T;
+    let qi = T - 1;                                   // traced query = last window column
+    let jw = at ? T - 1 - (at.p - at.j) : 0;          // traced key j, as a window column
+    let tq = `t = ${qi}`;
+    let traceIntro = embedInline(at && <span>本章接着跟踪上一章那个 token（窗口最后一列 {tq}，序列位置 {at.p}）。在 head {at.head} 上只追第 {at.d} 维（图中 Q/K/V 块最上面一行）：上一章的输出 y[{at.c}] = <N v={tr!.rms.y_c} carry /> 从这里进入 Q 投影，一路变成注意力输出 o[{at.d}]，再经输出投影回到通道 {at.c} 的残差。</span>);
     if (groot) commentary(wt, null, 0)`
 注意力是 transformer 层的核心：输入嵌入矩阵中的各列在这里相互“交流”。在其他阶段，各列都是相互独立处理的。
 
-GR00T 主干（${f.trunkName}）的语言模型层用 GQA：每层 ${f.nHead} 个 query head、${f.nKv} 个 key/value head（每 ${f.nHead / f.nKv} 个 query head 共享一组 K/V），head 维度 ${f.headDim}。图中只画 L0 的 head 0（真实数值，显示 ${layout.shape.T} 个 token × ${layout.shape.A} 维的窗口）：其余 head 结构相同、只是权重不同，所以不重复铺开，标注为 ×${f.nHead}。Q/K 在点积前还要经过 q_norm / k_norm（RMSNorm）和 M-RoPE 旋转。主干只做自注意力：这里没有动作 token 参与，DiT 是在主干跑完之后才读它的输出。`;
+GR00T 主干（${f.trunkName}）的语言模型层用 GQA：每层 ${f.nHead} 个 query head、${f.nKv} 个 key/value head（每 ${f.nHead / f.nKv} 个 query head 共享一组 K/V），head 维度 ${f.headDim}。图中只画 L0 的 head 0（真实数值，显示 ${layout.shape.T} 个 token × ${layout.shape.A} 维的窗口）：其余 head 结构相同、只是权重不同，所以不重复铺开，标注为 ×${f.nHead}。Q/K 在点积前还要经过 q_norm / k_norm（RMSNorm）和 M-RoPE 旋转。主干只做自注意力：这里没有动作 token 参与，DiT 是在主干跑完之后才读它的输出。
+
+${traceIntro}`;
     else if (pi0) commentary(wt, null, 0)`
 注意力是 transformer 层的核心：输入嵌入矩阵中的各列在这里相互“交流”。在其他阶段，各列都是相互独立处理的。
 
-π0.5（Gemma-2B）的注意力是 MQA：每层 ${f.nHead} 个 query head 共享 _同一组_ key/value head（${f.nKv} 个 KV 头），head 维度 ${f.headDim}。图中只画 L0 的 head 0（真实数值，显示 ${layout.shape.T} 个 token × ${layout.shape.A} 维的窗口）：其余 ${f.nHead - 1} 个 head 与它结构相同、K/V 完全共用，只是 Q 权重不同，所以不重复铺开，标注为 ×${f.nHead}。Gemma 没有 q_norm / k_norm，Q/K 在点积前只做 RoPE 旋转。`;
+π0.5（Gemma-2B）的注意力是 MQA：每层 ${f.nHead} 个 query head 共享 _同一组_ key/value head（${f.nKv} 个 KV 头），head 维度 ${f.headDim}。图中只画 L0 的 head 0（真实数值，显示 ${layout.shape.T} 个 token × ${layout.shape.A} 维的窗口）：其余 ${f.nHead - 1} 个 head 与它结构相同、K/V 完全共用，只是 Q 权重不同，所以不重复铺开，标注为 ×${f.nHead}。Gemma 没有 q_norm / k_norm，Q/K 在点积前只做 RoPE 旋转。
+
+${traceIntro}`;
     else commentary(wt, null, 0)`
 注意力是 transformer 层的核心：输入嵌入矩阵中的各列在这里相互“交流”。在其他阶段，各列都是相互独立处理的。
 
-k005b 的注意力是 GQA：每层 16 个 query head、8 个 key/value head（每 2 个 query head 共享一组 K/V），head 维度 128。图中只画 L0 的 head 0（真实数值，显示 32 个 token × 64 维的窗口）：其余 15 个 head 与 7 组 K/V 结构完全相同，只是权重不同，所以不重复铺开，标注为 ×16。Q/K 在点积前还要经过 q_norm / k_norm（RMSNorm）和 RoPE 旋转。`;
+k005b 的注意力是 GQA：每层 16 个 query head、8 个 key/value head（每 2 个 query head 共享一组 K/V），head 维度 128。图中只画 L0 的 head 0（真实数值，显示 32 个 token × 64 维的窗口）：其余 15 个 head 与 7 组 K/V 结构完全相同，只是权重不同，所以不重复铺开，标注为 ×16。Q/K 在点积前还要经过 q_norm / k_norm（RMSNorm）和 RoPE 旋转。
+
+${traceIntro}`;
     breakAfter();
     let t_moveCamera = afterTime(null, 1.0);
     let t_highlightHeads = afterTime(null, 2.0);
@@ -59,7 +74,7 @@ ${embedInline(<ul>
     <li>V: <BlockText blk={head0.vBlock}>值向量 (Value)</BlockText></li>
 </ul>)}
 
-每个向量都由一次矩阵-向量乘法得到（${pi0 ? 'Gemma' : 'Qwen3'} 的 QKV 没有偏置），每个输出单元格都是输入向量的线性组合。例如${c_blockRef('Q 向量', head0.qBlock)}，是${c_blockRef('Q 权重矩阵', head0.qWeightBlock)}的一行与${c_blockRef('输入矩阵', block0.ln1.lnResid)}的一列做点积。`;
+每个向量都由一次矩阵-向量乘法得到（${pi0 ? 'Gemma' : 'Qwen3'} 的 QKV 没有偏置），每个输出单元格都是输入向量的线性组合。我们追的那一格是${c_blockRef('Q 向量', head0.qBlock)}最后一列（${c_dimRef(tq, DimStyle.T)}）的第 0 行：它是${c_blockRef('Q 权重矩阵', head0.qWeightBlock)}的第 0 行与${c_blockRef('输入矩阵', block0.ln1.lnResid)}的最后一列做点积。`;
     breakAfter();
 
     let t_focusQCol = afterTime(null, 1.0);
@@ -83,6 +98,10 @@ ${embedInline(<ul>
 
 这是一种让每个输出元素都能受整个输入向量影响（影响程度由权重决定）的通用方式，因此在神经网络中随处可见。
 
+这一格的真实账目（${f.dModel} 项全算，只列最大的几项；第一行 i = ${at?.c ?? '…'} 的输入就是上一章的 y）：
+${embedInline(at && <QkLedger p={at.q} inName='y' carryIn normName='q_norm' />)}
+图中 Q 格存的就是 RoPE 之后的 ${embedInline(at && <span>q[{at.d}] = <N v={at.q.rope.post[0]} out /></span>)}（RoPE 把第 ${at?.q.rope.pair[0] ?? 0} 维与第 ${at?.q.rope.pair[1] ?? 0} 维配成一对旋转，所以要同时算这两维的投影）。
+
 我们对 Q、K、V 向量的每个输出单元格重复这一运算：`;
     breakAfter();
 
@@ -92,59 +111,9 @@ ${embedInline(<ul>
 
     breakAfter();
     commentary(wt)`
-Q（查询）、K（键）、V（值）有什么用？名字已经提示了：“键”和“值”类似软件中的字典，键映射到值，而“查询”用来查找值。
+Q、K、V 各司其职：用当前列的 Q 去和每个可见列的 K 做点积，得到相似度分数；softmax 把这一行分数变成和为 1 的权重；再用这些权重把各列的 V 加起来。
 
-${embedInline(<div className='ml-4'>
-    <div className='mt-1 text-center italic'>软件类比</div>
-    <div className='text-sm mt-1 mb-1 text-gray-600'>查找表:</div>
-    <div className='font-mono'>{'table = { "key0": "value0", "key1": "value1", ... }'}</div>
-    <div className='text-sm mt-1 mb-1 text-gray-600'>查询过程:</div>
-    <div className='font-mono'>{'table["key1"] => "value1"'}</div>
-</div>)}
-
-在注意力中，我们不是返回单个条目，而是返回条目的加权组合。权重由 Q 与每个 K 的点积得到，归一化之后，再去乘对应的 V 并全部相加。
-
-${embedInline((() => {
-    let keyCol = dimStyleColor(DimStyle.Intermediates);
-    let valCol = dimStyleColor(DimStyle.A);
-    let qCol = dimStyleColor(DimStyle.Aggregates);
-
-    return <div className='ml-4'>
-        <div className='mt-1 text-center italic'>注意力</div>
-        <div className='text-sm mt-2 mb-1 text-gray-600'>查找表:</div>
-        <div className='font-mono flex items-center'>K:
-            <div className='mx-2 my-1'>{makeTextVector(keyCol)}</div>
-            <div className='mx-2 my-1'>{makeTextVector(keyCol)}</div>
-            <div className='mx-2 my-1'>{makeTextVector(keyCol)}</div>
-        </div>
-        <div className='font-mono flex items-center'>V:
-            <div className='mx-2 my-1'>{makeTextVector(valCol)}</div>
-            <div className='mx-2 my-1'>{makeTextVector(valCol)}</div>
-            <div className='mx-2 my-1'>{makeTextVector(valCol)}</div>
-        </div>
-        <div className='text-sm mt-2 mb-1 text-gray-600'>查询过程:</div>
-        <div className='font-mono flex items-center'>
-            <div className='flex items-center'>Q: <div className='mx-2 my-1'>{makeTextVector(qCol)}</div></div>
-        </div>
-        <div className='font-mono flex items-center -ml-2 mt-2'>
-            <div className='flex items-center mx-2'>w0 = <div className='m-1'>{makeTextVector(qCol)}</div>.<div className='m-1'>{makeTextVector(keyCol)}</div></div>
-            <div className='flex items-center mx-2'>w1 = <div className='m-1'>{makeTextVector(qCol)}</div>.<div className='m-1'>{makeTextVector(keyCol)}</div></div>
-            <div className='flex items-center mx-2'>w2 = <div className='m-1'>{makeTextVector(qCol)}</div>.<div className='m-1'>{makeTextVector(keyCol)}</div></div>
-        </div>
-        <div className='font-mono flex items-center my-2'>
-            [w0n, w1n, w2n] =&nbsp;<span className='italic'>softmax</span>([w0, w1, w2])
-        </div>
-        <div className='font-mono flex items-center'>
-            result =
-            w0n * <div className='ml-2 mr-2 my-1'>{makeTextVector(valCol)}</div>&nbsp;+&nbsp;
-            w1n * <div className='ml-2 mr-2 my-1'>{makeTextVector(valCol)}</div>&nbsp;+&nbsp;
-            w2n * <div className='ml-2 mr-2 my-1'>{makeTextVector(valCol)}</div>
-        </div>
-
-    </div>;
-})())}
-
-来看一个具体例子：以窗口中第 6 列（${c_dimRef('t = 5', DimStyle.T)}）作为发出查询的一列：`;
+下面用真实数字走一遍我们这一列（${c_dimRef(tq, DimStyle.T)}）：`;
     breakAfter();
 
     let t_focusQKVCols = afterTime(null, 1.0);
@@ -154,9 +123,11 @@ ${embedInline((() => {
 // columns each have a K (key) vector, which represents the information that that column has, and our
 // Q (query) vector is what information is relevant to us.
     commentary(wt)`
-查找表中的 {K, V} 条目是它可见的各列，Q 是当前这一列。
+当前列（${c_dimRef(tq, DimStyle.T)}）的${c_blockRef('Q 向量', head0.qBlock)}要与它可见的每一列的${c_blockRef('K 向量', head0.kBlock)}做点积${pi0 ? '（π0.5 的前缀是双向注意力，所以是窗口内的 _所有_ 列，不分先后）' : ''}，结果存入${c_blockRef('注意力矩阵', head0.attnMtx)}的第 ${qi} 行。
 
-先计算当前列（${c_dimRef('t = 5', DimStyle.T)}）的${c_blockRef('Q 向量', head0.qBlock)}与之前各列的${c_blockRef('K 向量', head0.kBlock)}的点积${pi0 ? '（π0.5 的前缀是双向注意力，所以这里是与窗口内的 _所有_ 列，不分先后）' : ''}，结果存入${c_blockRef('注意力矩阵', head0.attnMtx)}的对应行（${c_dimRef('t = 5', DimStyle.T)}）。`;
+拿其中一列来对账：位置 ${at?.j ?? '…'}（图中第 ${jw} 列）。它的 k[0] 由同一套流程从它自己那一列输入算出：
+${embedInline(at && <QkLedger p={at.k} inName={`y@${at.j}`} carryIn={false} normName='k_norm' />)}
+`;
     breakAfter();
 
     let t_processAttnRow = afterTime(null, 3.0);
@@ -167,9 +138,23 @@ ${embedInline((() => {
 
 ${groot ? '在 GR00T 的语言模型层中，注意力是因果的：每个 token 只能看到它自己和它之前的 token，所以注意力矩阵是下三角，被掩码的位置是真实的 -inf（softmax 后为 0）。主干最后 4 块 VL 自注意力则是双向的。' : pi0 ? '在 π0.5 中，前缀内部是双向注意力：每个前缀 token 都能看到全部前缀 token，所以主干的注意力矩阵没有三角掩码。后缀流（动作专家）的查询可以关注全部前缀和全部后缀；前缀流不会“看到”后缀。' : '在 k005b 中，后缀流（动作专家）的查询可以关注前缀流的全部 K/V，也可以关注后缀自身；前缀流不会“看到”后缀。图中被掩码的位置是真实的 -inf（softmax 后为 0）。'}
 
-点积之后还要除以 sqrt(${c_dimRef('A', DimStyle.A)}) = sqrt(${f.headDim})，其中 ${c_dimRef('A', DimStyle.A)} 是 Q/K/V 向量的长度。这样可避免较大的数值在下一步 softmax 中占据主导。
+点积之后还要除以 sqrt(${c_dimRef('A', DimStyle.A)}) = sqrt(${f.headDim})，其中 ${c_dimRef('A', DimStyle.A)} 是 Q/K/V 向量的长度。这样可避免较大的数值在下一步 softmax 中占据主导。我们这一对 (q, k_j) 的分数：
+${embedInline(at && <Box>
+    <TermsTable t={at.dot} wName='q_i' xHead='k_i' xName={i => `[${i}]`} carryFirst carryW carryRows={2} />
+    <div>s_j = <N v={at.dot.sum} /> × 1/√{at.D} (<N v={at.scale} />) = <N v={at.s_j} out /></div>
+</Box>)}
+它就是注意力矩阵第 ${qi} 行第 ${jw} 列那一格。
 
-softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和为 1。`;
+然后 softmax 把这一行（${at?.n_keys ?? '…'} 个可见位置，图中只画窗口内 ${T} 个）归一化为总和为 1：
+${embedInline(at && <Box>
+    <div>行最大值 max = <N v={at.max} />（位置 {at.max_at}），Z = Σ exp(s − max) = <N v={at.Z} /></div>
+    <div>p_j = exp(<N v={at.s_j} carry /> − <N v={at.max} />) / <N v={at.Z} /> = <N v={at.p_j} out /></div>
+    <table className='font-mono text-xs mt-1'><thead><tr className='text-slate-400'><td className='pr-3'>前 3 名位置</td><td className='pr-3'>s</td><td>p</td></tr></thead>
+        <tbody>{at.top.map(([i, sv, pv]) => <tr key={i}><td className='pr-3'>{i}{i === at!.j ? ' ← j' : ''}</td><td className='pr-3'><N v={sv} /></td><td><N v={pv} /></td></tr>)}</tbody></table>
+</Box>)}
+${at && at.max_at !== at.j ? (at.top[0][2] > 0.5
+    ? `如实说明：这一行 ${fmtA(at.top[0][2] * 100)}% 的权重落在位置 ${at.max_at}（${at.max_at < at.p - qi ? '窗口之外，图中看不到' : '窗口内'}），它像一个“汇点”（attention sink）吸走了几乎全部注意力；窗口内各列只分到很小的份额，所以图中这一行看起来很暗。`
+    : `如实说明：这一行的权重很分散，最大的位置 ${at.max_at} 也只占 ${fmtA(at.top[0][2] * 100)}%，j 只是其中一份。`) : ''}`;
     breakAfter();
 
     let t_processAttnSmAggRow = afterTime(null, 1.0);
@@ -177,7 +162,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
     breakAfter();
     commentary(wt)`
-最后生成当前列（${c_dimRef('t = 5', DimStyle.T)}）的输出向量：取${c_blockRef('归一化后的注意力矩阵', head0.attnMtxSm)}的第（${c_dimRef('t = 5', DimStyle.T)}）行，用每个权重去逐元素乘以对应列的${c_blockRef('V 向量', head0.vBlock)}。`;
+最后生成当前列（${c_dimRef(tq, DimStyle.T)}）的输出向量：取${c_blockRef('归一化后的注意力矩阵', head0.attnMtxSm)}的第 ${qi} 行，用每个权重去逐元素乘以对应列的${c_blockRef('V 向量', head0.vBlock)}。`;
     breakAfter();
 
     let t_zoomVOutput = afterTime(null, 0.4, 0.5);
@@ -191,7 +176,12 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
     breakAfter();
     commentary(wt)`
-把它们相加就得到输出向量，因此输出主要由得分高的列的 V 向量决定。
+把它们相加就得到输出向量，因此输出主要由得分高的列的 V 向量决定。第 0 维的账目（p 来自上面的 softmax）：
+${embedInline(at && <Box>
+    <TermsTable t={at.o} wName='p_j' xHead='v_j[0]' xName={i => `j=${i}`} carryW />
+    <div>o[{at.d}] = <N v={at.o.sum} out /></div>
+</Box>)}
+它就是${c_blockRef('注意力输出', head0.vOutBlock)}最后一列的第 0 格，也是“输出投影与残差”一章 o_proj 点积中第 ${at?.o_slot ?? 0} 项的输入。
 
 流程清楚了，现在对所有列都运行一遍。`;
 
@@ -245,7 +235,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
     frameTo(state, t_dotCellsZoomClose, [block0.ln1.lnResid, head0.qBlock], 274.1, 8.5, { fill: 1.1 });
     frameTo(state, t_dotCellsZoomOut, [block0.ln1.lnResid, ...head0.cubes], 286, 12.8, { fill: 1.1 });
 
-    let exampleIdx = 3;
+    let exampleIdx = qi;
     if (t_focusQCol.t > 0) {
         let otherOpacity = lerp(1.0, 0.2, t_focusQCol.t);
         head0.qBlock.opacity = otherOpacity;
@@ -261,18 +251,19 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
         inputCol.opacity = 1.0;
 
         if (t_qIterColDot.t > 0) {
-            let aPos = t_qIterColDot.t * A;
-            let aIdx = clamp(Math.floor(aPos), 0, A - 1);
+            // sweep bottom-up so it ends on row 0, the traced q[0]
+            let aIdx = clamp(A - 1 - Math.floor(t_qIterColDot.t * A), 0, A - 1);
             let destIdx = new Vec3(exampleIdx, aIdx, 0);
             let pinIdx = new Vec3(exampleIdx, 0, 0);
 
             drawDependences(state, head0.qBlock, destIdx);
             drawDataFlow(state, head0.qBlock, destIdx, pinIdx);
             splitGrid(layout, qCol, Dim.Y, aIdx + 0.5, 0);
-            for (let b of findSubBlocks(qCol, Dim.Y, null, aIdx)) {
+            for (let b of findSubBlocks(qCol, Dim.Y, aIdx, null)) {
                 b.access!.disable = false;
             }
             inputCol.highlight = 0.3;
+            if (at && t_moveDotCells.t === 0) drawIdxTag(state, block0.ln1.lnResid, qi, at.c, `y[${at.c}]=${fmtA(tr!.rms.y_c)}`, TraceColors.carry);
         }
 
         let targetTop = new Vec3(inputCol.x - 26, inputCol.y, inputCol.z + 5);
@@ -280,7 +271,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
         let biasTarget = new Vec3(addTarget.x - layout.cell * 3, addTarget.y, addTarget.z);
 
         if (t_moveDotCells.t > 0 && t_moveToDest.t === 0.0) {
-            let qWeightRow = findSubBlocks(head0.qWeightBlock, Dim.Y, A - 1, null)[0];
+            let qWeightRow = findSubBlocks(head0.qWeightBlock, Dim.Y, 0, 0)[0];
 
             let qCells = splitGridAll(layout, qWeightRow, Dim.X);
             let inCells = splitGridAll(layout, inputCol, Dim.Y);
@@ -355,7 +346,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
             // move the bias block next to the resulting dotprod cell, draw a plus between them, and then join them together
             if (t_addBias.t >= 0.0) {
-                let qBiasCell = findSubBlocks(head0.qBiasBlock, Dim.Y, A - 1, null)[0];
+                let qBiasCell = findSubBlocks(head0.qBiasBlock, Dim.Y, 0, 0)[0];
 
                 let qBiasInitial = getBlkDimensions(qBiasCell);
                 let qBiasPos = qBiasInitial.tl.lerp(biasTarget, inverseLerp(0, 0.4, t_addBias.t));
@@ -374,13 +365,13 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
         // move the resulting dotprod cell to the final destination
         if (t_moveToDest.t > 0) {
-            let qWeightRow = findSubBlocks(head0.qWeightBlock, Dim.Y, A - 1, null)[0];
-            let qBiasCell = findSubBlocks(head0.qBiasBlock, Dim.Y, A - 1, null)[0];
+            let qWeightRow = findSubBlocks(head0.qWeightBlock, Dim.Y, 0, 0)[0];
+            let qBiasCell = findSubBlocks(head0.qBiasBlock, Dim.Y, 0, 0)[0];
             qBiasCell.opacity = t_moveToDest.t;
             qWeightRow.opacity = t_moveToDest.t;
             inputCol.opacity = t_moveToDest.t;
 
-            let qResultCell = findSubBlocks(qCol, Dim.Y, A - 1, null)[0];
+            let qResultCell = findSubBlocks(qCol, Dim.Y, 0, 0)[0];
             let qResultInitial = getBlkDimensions(qResultCell);
             let qResultPos = qResultInitial.tl.lerp(addTarget, 1.0 - t_moveToDest.t);
 
@@ -395,7 +386,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
     }
 
     // highlight the example index column for the Q block, and previous columns for K and V
-    let attnExampleIdx = 5;
+    let attnExampleIdx = qi;
     if (t_focusQKVCols.t > 0 && t_processRemain.t <= 0) {
         let ignoreOpacity = lerp(1.0, 0.2, t_focusQKVCols.t);
         head0.qBlock.opacity = ignoreOpacity;
@@ -423,7 +414,15 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
         head0.vBlock.opacity = 1.0;
     }
 
-    frameTo(state, t_focusQKVCols, [head0.qBlock, head0.kBlock, head0.vBlock, head0.attnMtx, head0.attnMtxSm], 270.1, -38.4, { fill: 1.15 });
+    frameTo(state, t_focusQKVCols, [head0.qBlock, head0.kBlock, head0.vBlock, head0.attnMtx, head0.attnMtxSm], 270.1, -20, { fill: 1.4 });
+
+    if (at && t_moveToDest.t >= 1 && t_processRemain.t <= 0) {
+        drawIdxTag(state, head0.qBlock, qi, 0, `q[0]=${fmtA(at.q.rope.post[0])}`, TraceColors.carry);
+        if (t_focusQKVCols.t > 0) {
+            drawIdxTag(state, head0.kBlock, jw, 0, `k[0] @j=${at.j}: ${fmtA(at.k.rope.post[0])}`, TraceColors.carry, 'left');
+            drawIdxTag(state, head0.vBlock, jw, 0, `v[0] @j=${at.j}: ${fmtA(at.v_j)}`, TraceColors.carry, 'left');
+        }
+    }
 
     if (t_processAttnRow.t > 0 && t_processRemain.t <= 0) {
         let aIdx = clamp(Math.floor(t_processAttnRow.t * (attnExampleIdx + 1)), 0, attnExampleIdx);
@@ -442,6 +441,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
         for (let blk of attnRowStart) {
             blk.access!.disable = false;
         }
+        if (at && aIdx >= jw && t_zoomVOutput.t <= 0) drawIdxTag(state, head0.attnMtx, jw, qi, `s[${at.j}]=${fmtA(at.s_j)}`, TraceColors.out);
     }
 
     if (t_processAttnSmAggRow.t > 0 && t_processRemain.t <= 0) {
@@ -458,6 +458,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
     if (t_processAttnSmRow.t > 0 && t_processRemain.t <= 0) {
         let hidePopup = t_zoomVOutput.t > 0;
         processDim(state, head0.attnMtxSm, Dim.Y, attnExampleIdx, t_processAttnSmRow.t, { pinIdx: new Vec3(5, 0, 0), clamp: true, maxIdx: attnExampleIdx + 1, hidePopup });
+        if (at && t_processAttnSmRow.t * (attnExampleIdx + 1) >= jw && t_expandVCols.t <= 0) drawIdxTag(state, head0.attnMtxSm, jw, qi, `p[${at.j}]=${fmtA(at.p_j)}`, TraceColors.out, 'left');
     }
 
     if (t_zoomVOutput.t > 0 && t_processRemain.t <= 0) {
@@ -466,10 +467,14 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
 
     // Do the attn_sm times V vectors to get the output vectors animation
     {
-        frameTo(state, t_zoomVOutput, [head0.vBlock, head0.attnMtxSm, head0.vOutBlock], 270.1, -7.5, { fill: 1.2 });
-
         let topLeftPos = getBlkDimensions(head0.vBlock).tl.add(new Vec3(0, 4, 5));
         let midLeftPos = topLeftPos.add(new Vec3(0, layout.cell * (A / 2 - 0.5)));
+        // many columns: pack them 2 cells apart and drop each weight in from above (no room for x/+ symbols)
+        let nV = attnExampleIdx + 1;
+        let dense = nV > 8;
+        let sp = dense ? 2 : 5;
+        let expandBox = { x: topLeftPos.x, y: topLeftPos.y - 3 * layout.cell, z: topLeftPos.z, dx: nV * sp * layout.cell, dy: (A + 3) * layout.cell, dz: layout.cell };
+        frameTo(state, t_zoomVOutput, [head0.vBlock, head0.attnMtxSm, head0.vOutBlock, expandBox], 270.1, -7.5, { fill: 1.2 });
 
         if (t_expandVCols.t > 0 && t_placeVOutput.t <= 0) {
             let allVCols = [];
@@ -491,25 +496,27 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
                 let attnVal = getBlockValueAtIdx(head0.attnMtxSm, new Vec3(i, attnExampleIdx, 0)) ?? 0.2;
 
                 let initColPos = getBlkDimensions(allVCols[i]).tl;
-                let destColPos = topLeftPos.add(new Vec3(i * layout.cell * 5, 0, 0));
+                let destColPos = topLeftPos.add(new Vec3(i * layout.cell * sp, 0, 0));
 
                 setBlkPosition(allVCols[i], initColPos.lerp(destColPos, t_expandVCols.t));
 
                 let initAttnPos = getBlkDimensions(allAttnCells[i]).tl;
-                let destAttnPos = midLeftPos.add(new Vec3(i * layout.cell * 5 - 2 * layout.cell, 0));
+                let destAttnPos = dense ? topLeftPos.add(new Vec3(i * layout.cell * sp, -2 * layout.cell)) : midLeftPos.add(new Vec3(i * layout.cell * 5 - 2 * layout.cell, 0));
 
                 setBlkPosition(allAttnCells[i], initAttnPos.lerp(destAttnPos, t_moveAttnVals.t));
 
                 if (t_applyMultiplies.t > 0) {
                     initAttnPos = destAttnPos;
-                    destAttnPos = initAttnPos.add(new Vec3(layout.cell * 2, 0));
+                    destAttnPos = initAttnPos.add(dense ? new Vec3(0, layout.cell * 2) : new Vec3(layout.cell * 2, 0));
                     setBlkPosition(allAttnCells[i], initAttnPos.lerp(destAttnPos, t_applyMultiplies.t));
 
                     allAttnCells[i].opacity = 1.0 - t_applyMultiplies.t;
                     allVCols[i].highlight = lerp(0.0, attnVal * 1.5, t_applyMultiplies.t);
                 }
 
-                if (t_moveAttnVals.t > 0.8 && t_applyMultiplies.t < 0.7) {
+                if (at && !dense && i === jw && t_applyAdds.t <= 0) drawIdxTag(state, allVCols[i], i, 0, `${fmtA(at.p_j)} x ${fmtA(at.v_j)}`, TraceColors.carry);
+
+                if (!dense && t_moveAttnVals.t > 0.8 && t_applyMultiplies.t < 0.7) {
                     drawSymbolBetweenBlocks(args, allVCols[i], allAttnCells[i], Dim.X, 'x', { color: Colors.Black, size: 1.5 });
                 }
 
@@ -520,7 +527,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
                     setBlkPosition(allVCols[i], initColPos.lerp(destColPos, t_applyAdds.t));
                 }
 
-                if (t_applyMultiplies.t > 0.6 && i > 0 && t_applyAdds.t < 0.7) {
+                if (!dense && t_applyMultiplies.t > 0.6 && i > 0 && t_applyAdds.t < 0.7) {
                     drawSymbolBetweenBlocks(args, allVCols[i - 1], allVCols[i], Dim.X, '+', { color: Colors.Black, size: 1.5 });
                 }
             }
@@ -552,6 +559,7 @@ softmax 稍后详细介绍，这里只需知道：每一行被归一化为总和
             let vOutCol = splitGrid(layout, head0.vOutBlock, Dim.X, attnExampleIdx + 0.5, splitAmt)!;
             vOutCol.access!.disable = false;
         }
+        if (at && t_placeVOutput.t >= 1) drawIdxTag(state, head0.vOutBlock, qi, 0, `o[0]=${fmtA(at.o.sum)}`, TraceColors.out);
     }
 
     frameTo(state, t_processRemainZoom, head0.cubes, 275.6, -4.4, { fill: 1.1 });
@@ -726,13 +734,4 @@ function drawSymbolBetweenBlocks(args: IWalkthroughArgs, block1: IBlkDef, block2
     let fontOpts: IFontOpts = { color, size, mtx };
     let w = measureText(args.state.render.modelFontBuf, symbol, fontOpts);
     drawText(args.state.render.modelFontBuf, symbol, -w/2, -fontOpts.size/2, fontOpts);
-}
-
-function makeTextVector(col: Vec4) {
-    let bgColor = new Vec4(col.x, col.y, col.z, 0.5);
-    return <div className='flex flex-col pb-[2px]'>
-        {makeArray(3, 0).map((_, i) => {
-            return <div key={i} className={"w-3 h-3 border-2 mb-[-2px]"} style={{ borderColor: col.toHexColor(), backgroundColor: bgColor.toHexColor() }} />;
-        })}
-    </div>;
 }

@@ -325,6 +325,8 @@ def main():
             x = r1 + fo
             Kc.append(k)
             Vc.append(v)
+            if l == 0:
+                tr0 = dict(x_in=x_in, xn=xn, q=q, k=k, v=v, pr=pr, enc=enc, ao=ao, r1=r1)
 
             # ---- layer l, k005b schema: window rows tw, channel / head-dim / FF windows ----
             Ln = f"L{l}"
@@ -645,6 +647,8 @@ def main():
             json.dump(obj, f)
         print(f"[write] {path} {os.path.getsize(path) / 1e6:.1f} MB", flush=True)
 
+    write_trace(out_dir, tr0, steps, Np, t0w, NH, HD, W, Pm, emb_table, ids, NIMG, dt)
+
     L0 = s0["layers"][0]
     check = {
         "W.L0.q_w[h0,d5,c7]": float(W("attn.q_einsum#.w", 0, "")[0, 7, 5]),
@@ -660,6 +664,46 @@ def main():
         json.dump(check, f, indent=1)
     print("[check]", json.dumps(check), flush=True)
     print(f"[done] total {time.time() - t0:.0f}s", flush=True)
+
+
+def write_trace(out_dir, tr0, steps, Np, t0w, NH, HD, W, Pm, emb_table, ids, NIMG, dt):
+    """public/pi0-trace.json: the example token (last prefix token) through L0 RMSNorm and head-0
+    attention, and action [0][0] through Euler step 0 (see tools/trace_common.py)."""
+    import torch
+    import trace_common as tc
+    p = Np - 1
+    x_p, y_p = tr0["x_in"][p], tr0["xn"][p]
+    Wq = W("attn.q_einsum#.w", 0, "")[0].T                                 # [256, 2048] head 0
+    kv = W("attn.kv_einsum#.w", 0, "")
+    Wo = W("attn.attn_vec_einsum#.w", 0, "")                               # [8, 256, 2048]
+    c = int(torch.argmax((Wq[0, :WC] * y_p[:WC]).abs()))
+    tok_id = int(ids[p - NIMG])
+    emb = {"id": tok_id, "row_c": float(emb_table[tok_id, c]), "mult": math.sqrt(2048.0), "mult_name": "sqrt(2048)",
+           "x_c": float(x_p[c])}
+    assert abs(emb["row_c"] * emb["mult"] - emb["x_c"]) < 1e-3 * (1 + abs(emb["x_c"])), "embed link"
+    g1 = 1 + W("pre_attention_norm.scale", 0, "")
+    attn = tc.attention(
+        p=p, y_all=tr0["xn"], x_p=x_p[c], Wq=Wq, bq=None, Wk=kv[0, 0].T, bk=None, Wv=kv[1, 0].T, bv=None,
+        qn=None, kn=None, eps=1e-6, q=tr0["q"][p, 0] * math.sqrt(HD), K=tr0["k"][:, 0], V=tr0["v"][:, 0],
+        mask_row=torch.ones(Np), probs_row=tr0["pr"][0, p], attn_out=tr0["enc"][p, 0],
+        o_cat=tr0["enc"][p].reshape(-1), Wo_row=Wo[:, :, c].reshape(-1), o_ref=tr0["ao"][p, c],
+        resid_ref=tr0["r1"][p, c], c=c, d=0, head=0, D=HD, scale=HD ** -0.5, win=(t0w, Np))
+    s0 = steps[0]
+    i, j = 0, 0
+    Wout, bout = Pm("action_out_proj.kernel"), Pm("action_out_proj.bias")
+    fin = s0["final"][i]
+    ce = int(torch.argmax((Wout[:WC, j] * fin[:WC]).abs()))
+    Wi, bi = Pm("action_in_proj.kernel"), Pm("action_in_proj.bias")
+    enc = [tc.linear("action_in_proj", Wi[:, ce], s0["x_t"][i], bi[ce], [j], s0["a_tok"][i, ce], out=f"h0[{ce}]")]
+    Ls = s0["layers"]
+    dec = [tc.norm_mod("final_norm", s0["x_out"][i], 1e-6, ce, 1 + s0["final_scale"], s0["final_shift"], fin),
+           tc.linear("action_out_proj", Wout[:, j], fin, bout[j], [ce], s0["v"][i, j], out=f"v[{i}][{j}]")]
+    eu = tc.euler(step=0, t=s0["t"], dt=dt, i=i, j=j, c=ce, tok=i, x=s0["x_t"][i, j], enc=enc,
+                  layers=[(L["x_in"][i, ce], L["r1"][i, ce], L["out"][i, ce]) for L in Ls],
+                  dec=dec, v=s0["v"][i, j], x_next=s0["x_next"][i, j])
+    tc.write(os.path.join(out_dir, "pi0-trace.json"), {
+        "model": "pi0", "p": p, "win_idx": p - t0w, "embed": emb,
+        "rms": tc.rms(x_p, g1, 1e-6, c, y_p, "1+scale"), "attn": attn, "euler": eu})
 
 
 if __name__ == "__main__":

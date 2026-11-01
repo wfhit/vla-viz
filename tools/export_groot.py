@@ -839,6 +839,8 @@ def main():
             json.dump(obj, f)
         print(f"[write] {path} {os.path.getsize(path) / 1e6:.1f} MB", flush=True)
 
+    write_trace(out_dir, cap, trunk, lm_layers, steps, Wt, P, slot, ids, bb, S, t0w, H, HD, EPS, K)
+
     check = {
         "W.E0.q_w[h0,d5,c7]": float(Wt(P + "model.transformer_blocks.0.attn1.to_q.weight")[5, 7]),
         "A.E0.ada[scale,c7]": float(s0["layers"][0]["scale"][7]),
@@ -852,6 +854,61 @@ def main():
         json.dump(check, f, indent=1)
     print("[check]", json.dumps(check), flush=True)
     print(f"[done] total {time.time() - t0:.0f}s", flush=True)
+
+
+def write_trace(out_dir, cap, trunk, lm_layers, steps, Wt, P, slot, ids, bb, S, t0w, H, HD, EPS, K):
+    """public/groot-trace.json: the example token (last backbone token) through LM L0 RMSNorm and
+    head-0 attention, and action [0][0] through Euler step 0 (see tools/trace_common.py)."""
+    import torch
+    import trace_common as tc
+    p = S - 1
+    L, T0, ca = lm_layers[0], trunk[0], cap["attn"][0]
+    at = L.self_attn
+    x_p, y_p = T0["x_in"][p], T0["xn"][p]
+    Wq, Wk, Wv = at.q_proj.weight[:HD], at.k_proj.weight[:HD], at.v_proj.weight[:HD]
+    bq, bk, bv = [None if m.bias is None else m.bias[:HD] for m in (at.q_proj, at.k_proj, at.v_proj)]
+    c = int(torch.argmax((Wq[0, :WC] * y_p[:WC]).abs()))
+    tok_id = int(ids[p])
+    erow = bb.model.language_model.embed_tokens.weight[tok_id]
+    emb = {"id": tok_id, "row_c": float(erow[c]), "mult": 1.0, "mult_name": "", "x_c": float(x_p[c])}
+    assert abs(emb["row_c"] - emb["x_c"]) < 1e-3 * (1 + abs(emb["x_c"])), "embed link"
+    attn = tc.attention(
+        p=p, y_all=T0["xn"], x_p=x_p[c], Wq=Wq, bq=bq, Wk=Wk, bk=bk, Wv=Wv, bv=bv,
+        qn=at.q_norm.weight, kn=at.k_norm.weight, eps=EPS, q=ca["q"][0, p], K=ca["k"][0], V=ca["v"][0],
+        mask_row=torch.ones(S), probs_row=ca["probs"][0, p], attn_out=ca["out"][p, 0],
+        o_cat=ca["out"][p].reshape(-1), Wo_row=at.o_proj.weight[c], o_ref=T0["ao"][p, c],
+        resid_ref=T0["r1"][p, c], c=c, d=0, head=0, D=HD, scale=float(ca["scaling"]), win=(t0w, S))
+    s0 = steps[0]
+    i, j, tok = 0, 0, 1
+    cw = lambda key: (Wt(P + key + ".W")[slot].T, Wt(P + key + ".b")[slot])
+    L1w, L1b = cw("action_decoder.layer1")
+    L2w, L2b = cw("action_decoder.layer2")
+    dec_mlp = tc.mlp2(("decoder.layer1", "relu", "decoder.layer2"), s0["dit_out"][tok], L1w, L1b, L2w, L2b, j,
+                      tc.top_in(0, L1w.shape[1]), "relu", s0["pred"][tok, j])
+    kd = dec_mlp[0]["terms"][0][0]
+    Wp, bp = Wt(P + "model.proj_out_2.weight"), Wt(P + "model.proj_out_2.bias")
+    no = s0["final"][tok]
+    ce = int(torch.argmax((Wp[kd, :WC] * no[:WC]).abs()))
+    dec = [tc.norm_mod("norm_out", s0["x_out"][tok], 1e-6, ce, 1 + s0["final_scale"], s0["final_shift"], no, kind="ln"),
+           tc.linear("proj_out_2", Wp[kd], no, bp[kd], [ce], s0["dit_out"][tok, kd], out=f"dit_out[{kd}]"), *dec_mlp]
+    W1w, W1b = cw("action_encoder.W1")
+    W2w, W2b = cw("action_encoder.W2")
+    W3w, W3b = cw("action_encoder.W3")
+    DA = W1w.shape[0]
+    xin = torch.cat([s0["a_emb"][i], s0["tau"]])
+    enc_mlp = tc.mlp2(("action_encoder.W2", "swish", "action_encoder.W3"), xin, W2w, W2b, W3w, W3b, ce,
+                      tc.top_in(0, DA), "swish", s0["a_feat"][i, ce], xnames=[[0, "a_emb"], [DA, "tau"]])
+    k1 = enc_mlp[0]["terms"][0][0]
+    enc = [tc.linear("action_encoder.W1", W1w[k1], s0["x_t"][i], W1b[k1], [j], s0["a_emb"][i, k1], out=f"a_emb[{k1}]"),
+           *enc_mlp,
+           tc.add("+pos_emb", s0["a_feat"][i, ce], s0["a_feat_pos"][i, ce] - s0["a_feat"][i, ce], s0["sa"][tok, ce],
+                  f"h0[{tok}][{ce}]")]
+    eu = tc.euler(step=0, t=s0["t"], dt=1.0 / K, i=i, j=j, c=ce, tok=tok, x=s0["x_t"][i, j], enc=enc,
+                  layers=[(Lr["x_in"][tok, ce], Lr["r1"][tok, ce], Lr["out"][tok, ce]) for Lr in s0["layers"]],
+                  dec=dec, v=s0["v"][i, j], x_next=s0["x_next"][i, j])
+    tc.write(os.path.join(out_dir, "groot-trace.json"), {
+        "model": "groot", "p": p, "win_idx": p - t0w, "embed": emb,
+        "rms": tc.rms(x_p, L.input_layernorm.weight, EPS, c, y_p, "g"), "attn": attn, "euler": eu})
 
 
 if __name__ == "__main__":

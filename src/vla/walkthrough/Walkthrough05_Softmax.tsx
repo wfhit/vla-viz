@@ -1,5 +1,7 @@
 import { Phase } from "./Walkthrough";
 import { commentary, IWalkthroughArgs, initialFrame } from "./WalkthroughTools";
+import { embedInline } from "./Walkthrough01_Prelim";
+import { Box, N } from "../components/TraceLedger";
 
 export function walkthrough05_Softmax(args: IWalkthroughArgs) {
     let { walkthrough: wt, state } = args;
@@ -13,6 +15,7 @@ export function walkthrough05_Softmax(args: IWalkthroughArgs) {
     initialFrame(state, [h.qBlock, h.kBlock, h.attnMtx, h.attnMtxAgg1, h.attnMtxAgg2, h.attnMtxSm, h.vOutBlock], 290, 8, { fill: 1.1 });
 
     let f = state.page.facts!;
+    let at = state.vlaModel?.trace?.attn;
     commentary(wt, null, 0)`
 
 softmax 是注意力的核心运算：它把一个向量变成总和为 1.0 的权重。
@@ -28,6 +31,12 @@ ${f.id === 'groot'
     : '在 k005b 的联合注意力中，softmax 作用于注意力矩阵的每一行，范围是前缀（prefix）列：即 VLM 前缀流的 K。动作专家的后缀（suffix）查询对前缀列（以及自身）计算注意力；前缀不受后缀影响。'}
 
 和 RMSNorm 一样，这里先有一个聚合步骤，为每一行保存最大值（max）以及“减去最大值后取指数”的求和（sum）。然后每个输出就只需：减去 max、取指数、除以 sum。
+
+用上一章跟踪的那一行（第 ${args.layout.shape.T - 1} 行）对账：两个聚合格里存的是 max 和 1 / sum，上一章的分数 s_j 经它们变成 p_j：
+${embedInline(at && <Box>
+    <div>max = <N v={at.max} />（位置 {at.max_at}），sum = Σ exp(s − max) = <N v={at.Z} />（{at.n_keys} 个可见位置），1 / sum = <N v={1 / at.Z} /></div>
+    <div>p_j = exp(<N v={at.s_j} carry /> − <N v={at.max} />) × <N v={1 / at.Z} /> = <N v={at.p_j} out /></div>
+</Box>)}
 
 “softmax” 的名字来源于 argmax：argmax 只把最大值设为 1.0、其余为 0.0，是“硬”选择；softmax 则是“软”版本，既突出最大值，又保留其他位置的相对权重。
 `;
