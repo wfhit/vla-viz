@@ -19,13 +19,27 @@ export function drawBlockInfo(state: IProgramState) {
         if (!cur || d < cur.d) best.set(blk.name, { d, blk });
     }
 
-    for (let { blk } of best.values()) {
+    // overlapping tags (e.g. K / V blocks stacked in depth): the brighter, nearer-to-focus one wins
+    let mvp = state.camera.viewMtx.mul(state.camera.modelMtx);
+    let placed: { x0: number, y0: number, x1: number, y1: number }[] = [];
+    let order = [...best.values()].sort((a, b) => (b.blk.opacity - a.blk.opacity) || (a.d - b.d));
+
+    for (let { blk } of order) {
 
         let blkTopMid = new Vec3(blk.x + blk.dx / 2, blk.y, blk.z + blk.dz / 2);
 
         let scale = camScaleToScreen(state, blkTopMid);
 
         scale = Math.min(scale, state.page.tagScaleMax ?? 1.45);
+
+        {
+            let size = scale * 2.5, w = measureText(state.render.modelFontBuf, blk.name!, { color: new Vec4(), size, mtx: new Mat4f() });
+            let a = mvp.mulVec3Proj(blkTopMid.add(new Vec3(-w / 2, -size, 0)));
+            let b = mvp.mulVec3Proj(blkTopMid.add(new Vec3(w / 2, 0, 0)));
+            let r = { x0: Math.min(a.x, b.x), y0: Math.min(a.y, b.y), x1: Math.max(a.x, b.x), y1: Math.max(a.y, b.y) };
+            if (placed.some(q => r.x0 < q.x1 && r.x1 > q.x0 && r.y0 < q.y1 && r.y1 > q.y0)) continue;
+            placed.push(r);
+        }
 
         let textColor = new Vec4(1, 1, 1, 1).mul(blk.opacity);
         let bgColor = new Vec4(0, 0, 0, 1).mul(blk.opacity);

@@ -1006,6 +1006,23 @@ ${Array.from({ length: K }, (_, k) => stepInfo(k)).filter((_, k) => k % 3 === 0 
             S[K].highlight = 0.4;
         }
         if (eu && started) {
+            // pass 1 carries the traced element through the tower: h0 -> each layer's residual -> norm -> v
+            let ec = eu.c, et = eu.tok;
+            if (k === 0) {
+                let h0 = eu.enc[eu.enc.length - 1].y;
+                // the camera rides between layers li-1 and li, so tag li's input = layer li-1's residual output
+                let li = viz.activeLayer;
+                if (u < 0.85 && li === 0) drawIdxTag(state, L.expertIn, et, ec, `h0[${ec}]=${fmtA(h0)}`, TraceColors.carry, 'left', 12);
+                if (u < 0.85 && li >= 1 && eu.layers[li - 1])
+                    drawIdxTag(state, L.expertLayers[li - 1].mlpResidual, et, ec, `E${li - 1}[${ec}]=${fmtA(eu.layers[li - 1][2])}`, TraceColors.carry, 'right', 12);
+                if (u >= 0.8) {
+                    let nrm = eu.dec.find(l => l.k === 'norm');
+                    let lN = eu.layers[nL - 1];
+                    if (lN) drawIdxTag(state, L.expertLayers[nL - 1].mlpResidual, et, ec, `E${nL - 1}[${ec}]=${fmtA(lN[2])}`, TraceColors.carry, 'right', 12);
+                    if (nrm) drawIdxTag(state, L.expertOut, et, ec, `norm[${ec}]=${fmtA(nrm.y)}`, TraceColors.carry, 'left', 12);
+                    drawIdxTag(state, L.actionVelocity, eTok, eJ, `v=${fmtA(eu.v)}`, TraceColors.carry, 'right', 12);
+                }
+            }
             drawIdxTag(state, S[0], eTok, eJ, `x=${fmtA(eu.x)}`, TraceColors.carry, 'left', 12);
             if (k > 0 || ret > 0.5) drawIdxTag(state, S[1], eTok, eJ, `x_next=${fmtA(eu.x_next)}`, TraceColors.out, 'right', 12);
         }

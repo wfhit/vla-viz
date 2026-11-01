@@ -1,6 +1,6 @@
 # THREE-VIZ MISSION STATUS (single source of truth — read this first in any session)
 
-Last updated: 2026-10-25 (/pi0 done). Owner: Hermes (orchestration + checking). Maker: Copilot Opus 5.5 (tmux `vlaviz:opus`).
+Last updated: 2026-10-26 02:49 sentinel (all pages re-accepted, waiting on Frank's training go). Owner: Hermes (orchestration + checking). Maker: Copilot Opus 5.5 (tmux `vlaviz:opus`). Dev server: localhost:3002.
 
 ## Mission
 
@@ -10,9 +10,9 @@ fabricated mappings. No toy data. No popups/overlays — in-scene walkthrough st
 
 | Page | Model | Weights (local) | Status |
 |---|---|---|---|
-| `/vla` | k005b dual-head VLA | `outputs/k005b-task0-v3/checkpoints` (step_150000) | REWORK DONE (a)(b)(c) + single-column layer-pair stack (28 pairs: trunk Li beside expert Ei, pair headers, tower titles beside the column; old 14+14 wrap deleted), self-tested: 84-shot sweep audit empty, build OK, /pi0 261 + /groot 292 edges clean; awaiting Hermes re-acceptance |
-| `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`) | ENGINE INSTANCE (111ec10): same 3D engine as /vla, single-column 18 layer pairs, MQA joint attention, gated adaRMSNorm, 10-step Euler; self-test: audit noIn/noOut empty (1494 edges; trunk single-layer 650, RMSNorm 1514, D7 1495), 0 console errors, build OK; awaiting Hermes re-acceptance |
-| `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | ENGINE INSTANCE (walls in src/groot deleted): same 3D engine as /vla, single column trunk 20 (16 LM + 4 vlsa) beside DiT 32 (cross text/self/cross image/self), VL-token bus to cross K/V, AdaLayerNorm, 4-step Euler t 0->1; all chapters have groot text; self-test: audit noIn/noOut empty (1809 edges; trunk single-layer 720, D7 1810), 0 console errors, build OK; slot 23 untrained -> action has no semantics (stated in D7); awaiting Hermes re-acceptance |
+| `/vla` | k005b dual-head VLA | `outputs/k005b-task0-v3/checkpoints` (step_150000) | REWORK DONE (a)(b)(c) + single-column layer-pair stack (28 pairs: trunk Li beside expert Ei, pair headers, tower titles beside the column; old 14+14 wrap deleted). RE-ACCEPTED 2026-10-25 late: 21-phase sweep audit noIn/noOut empty (2332 edges; trunk 1024, RMSNorm 2352, D7 2333), 0 JS errors, no overlays; k005b-*.json untouched since prior acceptance |
+| `/pi0` | pi0.5 b1k finetune | `~/workspace/model/openpi_comet/pi05-b1kpt12-cs32` (+`pi05-b1kpt50-cs32`) | ENGINE INSTANCE (111ec10): same 3D engine as /vla, single-column 18 layer pairs, MQA joint attention, gated adaRMSNorm, 10-step Euler. RE-ACCEPTED 2026-10-25 late: 17-phase sweep audit noIn/noOut empty (1494 edges; trunk 650, RMSNorm 1514, D7 1495), 0 JS errors, no overlays; weight spot-checks EXACT vs zarr checkpoint (L0.q_w permuted [h,dim,in], L0.gate_w [F,in], both max|diff|=0) |
+| `/groot` | GR00T N1.7-3B (incl. sim_behavior_r1_pro embodiment id=23, latest=global_step196000) | `~/workspace/model/nvidia/GR00T-N1.7-3B` | ENGINE INSTANCE (e3ff769, walls in src/groot deleted): same 3D engine as /vla, single column trunk 20 (16 LM + 4 vlsa) beside DiT 32 (cross text/self/cross image/self), VL-token bus to cross K/V, AdaLayerNorm, 4-step Euler t 0->1; all chapters have groot text. RE-ACCEPTED 2026-10-25 late: 17-phase sweep audit noIn/noOut empty (1809 edges; trunk single-layer 720, RMSNorm 1817, D7 1810), 0 JS errors, no overlays; weight spot-checks EXACT vs safetensors (L0.ln1_w full, L0.q_w strided, E0.q_w head0 slice, E0.q_b — all max|diff|=0); slot 23 untrained -> action has no semantics (stated in D7) |
 
 Input frames for ALL pages: local BEHAVIOR dataset
 `~/workspace/behavior_challenge_data/dataset/{behavior-1k-knack, 2026-challenge-demos}`.
@@ -22,12 +22,17 @@ last token, one channel; W03 RMSNorm, W04/W05 attention (q,k,s_j,p_j,o[0]), W06 
 (closes back to W03's x[c]), D7 Euler step 1 (x -> input chain -> every layer -> v -> x_next =
 board 1). Ledgers in commentary + ASCII 3D tags on the traced cells, same numbers.
 `tools/check_trace.py public/*-trace.json` = [ok] x3 (also cross-checks fm.json boards).
+3D chain now complete in all three demo chapters: W03 x[c] -> mean/rsqrt readouts (beside the
+traced column) -> g[c] -> y[c]; W04 q/k/s/p/o; D7 pass 1 h0 -> E{l}[c] per layer -> norm -> v ->
+x/x_next. Block-name tags that overlap on screen keep only the brightest/nearest one.
+Regression: per-chapter shots on all 3 pages, 600-step sweep audits noIn/noOut empty.
 
 ## Verified facts (do not re-litigate)
 
 - k005b action head: K-step Euler decode (`sample_action_chunk`), K=10 default, K=1 = old
   single-shot; checkpoint `action_decode` stamp gates K (unstamped lineage = K 1 only).
-  PR #638 merged; 155 tests green; bf16 launch bug fixed (20b39c2).
+  PR #638 merged (K-step decode); bf16 boundary fix 20b39c2 merged as PR #639
+  (2026-10-25 16:12 CST); docs entropy pass merged as PR #640; 155 tests green.
 - GR00T N1.7 (from config.json + weight shapes): DiT 32 layers, 32 heads, head_dim 48,
   ada_norm, interleave_self_attention=true, action_horizon 40, action dim 132, backbone
   embedding 2048 (Cosmos-Reason2-2B), Euler 4 steps (draw 4, not 10), embodiment
@@ -64,19 +69,17 @@ board 1). Ledgers in commentary + ASCII 3D tags on the traced cells, same number
 
 ## Current reasoning (rewritten each sentinel run)
 
-2026-10-25 21:28 — (a)(b)(c) are now COMMITTED (baac081: trunk visual language, one
-representative head ×16, label/tag dedupe, fit-to-view labels, occluder fade, framing
-margin). Opus is in final polish: tower titles moved beside their columns (trunk left,
-experts right) to stop overlapping embedding blocks, then the closing sequence is already
-underway — full 84-shot sweep (w*.png via /tmp/dshots/list.txt) → `next build` →
-/pi0+`/groot` regression audits → docs + commit. Its plan matches the required sequence
-exactly; no steering. 5 files still modified mid-iteration (VlaModelLayout, Arrow,
-SectionLabels, Walkthrough00, Walkthrough11) — normal while the sweep runs. After Opus
-stops: Hermes re-acceptance of /vla (arrow audit noIn/noOut empty, 0 console errors,
-per-step screenshots vs directive (b)) — that is the only remaining unowned step; do it
-in the next sentinel run once Opus's closing commit lands. Still gated on Frank:
-training restart (paused 10:25, do not relaunch; resume from step_150000); step_160000
-stamp → real 10-step activation re-export replaces the pre-stamp preview data.
+2026-10-26 06:54 — NO CHANGE since 05:53; the reasoning stands. Facts checked this
+run: HEAD still e3ff769, working tree clean except this doc; all three pages 200 on
+port 3002; Opus idle with no pending decisions; no training process alive and no
+training log to tail — training still PAUSED by Frank (10:25 Oct 25), resume point
+step_150000, cc10step session idle. The one thing that matters is unchanged: it is
+Frank's gate, not ours.
+Correct order from here: (1) Frank says go -> resume from step_150000 in cc10step;
+(2) at step_160000 stamped -> re-export /vla activations -> /vla Euler shows real
+10-step values -> light re-audit of /vla only; (3) until then every sentinel run =
+facts + this reasoning, silent. Known accepted cosmetic item (groot D7 strip labels)
+stays as-is.
 
 ## Standing rules (Frank)
 

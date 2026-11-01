@@ -122,7 +122,7 @@ ${pi0 ? 'Gemma 的 checkpoint 存的是 γ，前向时乘 1 + γ；没有偏置 
         inputBlock.highlight = lerp(0.3, 0.0, t_moveInputEmbed.t);
     }
 
-    frameTo(state, t_moveCameraClose, [args.layout.blocks[0].ln1.lnAgg1, args.layout.blocks[0].ln1.lnAgg2, args.layout.blocks[0].ln1.lnResid], 270, 4, { fill: 1.2 });
+    frameTo(state, t_moveCameraClose, [ln1.lnAgg1, ln1.lnAgg2, ln1.lnResid], 270, 4, { fill: 1.2 });
 
     let splitAmt = lerp(0.0, 2.0, t_focusColumn.t);
     let splitPos = exampleIdx + 0.5;
@@ -138,7 +138,9 @@ ${pi0 ? 'Gemma 的 checkpoint 存的是 γ，前向时乘 1 + γ；没有偏置 
         let aggVarCol = splitGrid(layout, ln1.lnAgg2, Dim.X, splitPos, splitAmt)!;
         let residCol = splitGrid(layout, ln1.lnResid, Dim.X, splitPos, splitAmt)!;
         let inputCol = splitGrid(layout, inputBlock, Dim.X, splitPos, splitAmt)!;
-        frameTo(state, t_focusColumn, [aggMuCol, aggVarCol, residCol, inputCol], 275, 6, { fill: 1.15 });
+        // the aggregate readouts hang left of the column: keep room for them in the frame
+        let cl = layout.cell, readout = { x: aggMuCol.x - 14 * cl, y: aggMuCol.y - 12 * cl, z: aggMuCol.z, dx: cl, dy: cl, dz: cl };
+        frameTo(state, t_focusColumn, [readout, aggMuCol, aggVarCol, residCol, inputCol], 275, 6, { fill: 1.15 });
         if (t_colSequence.t <= 0) splitGrid(layout, residCol, Dim.Y, c + 0.5, 0)!.highlight = 0.3;
         let inCell = splitGrid(layout, inputCol, Dim.Y, c + 0.5, 0)!;
         inCell.highlight = 0.6;
@@ -150,14 +152,15 @@ ${pi0 ? 'Gemma 的 checkpoint 存的是 γ，前向时乘 1 + γ；没有偏置 
 
         let aggDestIdx = new Vec3(exampleIdx, 0, 0);
         if (t_calcMuAgg.t > 0.0) {
-            let pinIdx = new Vec3(0, 10, 0);
+            // readouts sit just left of the traced column, mean above rsqrt
+            let pinIdx = new Vec3(exampleIdx - 8, -3, 0);
             drawDependences(state, ln1.lnAgg1, aggDestIdx);
             drawDataFlow(state, ln1.lnAgg1, aggDestIdx, pinIdx);
             aggMuCol.access!.disable = false;
         }
 
         if (t_calcVarAgg.t > 0.0) {
-            let pinIdx = new Vec3(9, 9, 0);
+            let pinIdx = new Vec3(exampleIdx - 8, 4, 0);
             drawDependences(state, ln1.lnAgg2, aggDestIdx);
             drawDataFlow(state, ln1.lnAgg2, aggDestIdx, pinIdx);
             aggVarCol.access!.disable = false;
@@ -167,7 +170,7 @@ ${pi0 ? 'Gemma 的 checkpoint 存的是 γ，前向时乘 1 + γ；没有偏置 
             aggMuCol.access!.disable = false;
             aggVarCol.access!.disable = false;
 
-            let pinIdx = new Vec3(-10, 0, 0);
+            let pinIdx = new Vec3(exampleIdx - 8, -3, 0);
 
             // sweep down to the traced channel and stop there
             let cIdx = clamp(Math.floor(t_colSequence.t * (c + 1)), 0, c);
@@ -177,7 +180,10 @@ ${pi0 ? 'Gemma 的 checkpoint 存的是 γ，前向时乘 1 + γ；没有偏置 
 
             let targetCell = splitGrid(layout, residCol, Dim.Y, cIdx + 0.5, 0.0)!;
             targetCell.highlight = 0.3;
-            if (tr && cIdx === c) drawCellTag(state, targetCell, `y[${c}]=${fmtA(tr.rms.y_c)}`, TraceColors.out);
+            if (tr && cIdx === c) {
+                drawCellTag(state, targetCell, `y[${c}]=${fmtA(tr.rms.y_c)}`, TraceColors.out);
+                drawCellTag(state, targetCell, `g[${c}]=${fmtA(tr.rms.g_c)}`, TraceColors.carry, 'left');
+            }
 
             findSubBlocks(residCol, Dim.Y, 0, cIdx).forEach((blk) => {
                 blk.access!.disable = false;
